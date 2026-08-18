@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
+examples/minimal-vmodel/node_modules/
+examples/minimal-vmodel/dist/
+.takumi/

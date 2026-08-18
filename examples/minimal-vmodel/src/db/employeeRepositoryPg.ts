@@ -5,6 +5,7 @@
 import { ConflictError, NotFoundError } from '../domain/errors.ts';
 import type { Employee, EmployeeQuery } from '../domain/types.ts';
 import type { EmployeeRepository } from '../employees/employeeRepository.ts';
+import type { Pool } from 'pg';
 
 type DbRow = {
   id: number | string;
@@ -55,7 +56,7 @@ const UNIQUE_FIELDS: Record<string, { field: string; message: string }> = {
 };
 
 export class PostgresEmployeeRepository implements EmployeeRepository {
-  constructor(private readonly pool: import('pg').Pool) {}
+  constructor(private readonly pool: Pool) {}
 
   private mapUniqueViolation(err: unknown): never | void {
     const e = err as { code?: string; constraint?: string };

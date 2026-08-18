@@ -4,9 +4,10 @@
 
 import type { OperationLogEntry } from '../domain/types.ts';
 import type { OperationLogRepository } from './operationLog.ts';
+import type { Pool } from 'pg';
 
 export class PostgresOperationLogRepository implements OperationLogRepository {
-  constructor(private readonly pool: import('pg').Pool) {}
+  constructor(private readonly pool: Pool) {}
 
   async record(entry: OperationLogEntry): Promise<void> {
     await this.pool.query(
