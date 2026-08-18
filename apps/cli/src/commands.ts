@@ -5,10 +5,12 @@ import {
   ArtifactStore,
   discoverExtensions,
   executeWorkflow,
+  renderTraceabilityMatrix,
   WorkflowDefinition,
 } from '@takumi/core';
 import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
+import { PiRuntimeAdapter } from '@takumi/runtime-pi';
 
 export interface ProjectConfig {
   runtime: string;
@@ -32,14 +34,16 @@ export function loadConfig(cwd: string): ProjectConfig {
 
 /**
  * Runtime registry: resolve a runtime id to an AgentRuntimeAdapter.
- * Built-ins: "fake". Future: "pi" (Phase 3), plus dynamic runtimes/ directory.
+ * Built-ins: "fake" (deterministic), "pi" (real Pi AgentSession).
  */
 export function resolveRuntime(id: string): AgentRuntimeAdapter {
   switch (id) {
     case 'fake':
       return new FakeRuntime();
+    case 'pi':
+      return new PiRuntimeAdapter();
     default:
-      throw new Error(`unknown runtime "${id}" (available: fake)`);
+      throw new Error(`unknown runtime "${id}" (available: fake, pi)`);
   }
 }
 
@@ -74,6 +78,7 @@ export async function runTask(opts: RunOptions): Promise<{
   events: string[];
   summary: string;
   artifacts: string[];
+  traceabilityMatrix?: string;
 }> {
   const runtime = resolveRuntime(opts.runtimeId);
   const store = new ArtifactStore(join(opts.cwd, opts.config.artifacts));
@@ -98,10 +103,21 @@ export async function runTask(opts: RunOptions): Promise<{
     for (const s of result.steps) {
       events.push(`step ${s.stepId}: ${s.status} — ${s.summary}`);
     }
+    // Traceability matrix from artifacts produced during the run.
+    let matrix = '';
+    try {
+      const artifacts = await store.list();
+      if (artifacts.length > 0) {
+        matrix = renderTraceabilityMatrix(artifacts);
+      }
+    } catch {
+      matrix = '';
+    }
     return {
       events,
       summary: `workflow "${opts.workflow}" ${result.status}`,
       artifacts: result.steps.flatMap((s) => s.artifacts),
+      traceabilityMatrix: matrix,
     };
   }
 

@@ -1,0 +1,4 @@
+name: pi
+kind: runtime
+version: 0.1.0
+description: Pi coding agent runtime adapter (AgentSession SDK, in-process)

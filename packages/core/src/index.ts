@@ -36,3 +36,5 @@ export { executeWorkflow, renderPrompt } from './workflow-engine.js';
 export type { WorkflowExecutionContext, WorkflowRunResult, WorkflowStepResult } from './workflow-engine.js';
 
 export { ArtifactStore } from './artifact-store.js';
+export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
+export type { TraceabilityNode, TraceLink } from './traceability.js';

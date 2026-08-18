@@ -1,0 +1,4 @@
+name: fake
+kind: runtime
+version: 0.1.0
+description: Deterministic in-process runtime for tests and development

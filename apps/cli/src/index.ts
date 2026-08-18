@@ -82,19 +82,24 @@ async function main(argv: string[]): Promise<number> {
       }
 
       if (runtimeId === 'pi') {
-        console.error('Pi runtime not implemented yet (Phase 3). Use --runtime fake.');
-        return 1;
+        console.log(`Using runtime: ${runtimeId} (real Pi AgentSession)`);
       }
 
       console.log(`⚙ Takumi run (runtime=${runtimeId}${workflow ? `, workflow=${workflow}` : ''})`);
       console.log(`  prompt: ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`);
       console.log('');
 
-      const { events, summary } = await runTask({ cwd, prompt, runtimeId, workflow, config });
+      const { events, summary, traceabilityMatrix } = await runTask({ cwd, prompt, runtimeId, workflow, config });
 
       for (const ev of events) console.log(`  ${ev}`);
       console.log('');
       console.log(`✓ ${summary}`);
+
+      if (traceabilityMatrix) {
+        console.log('');
+        console.log('Traceability Matrix:');
+        console.log(traceabilityMatrix);
+      }
 
       // Traceability report for artifacts (Phase 5 builds the real matrix).
       console.log('');
