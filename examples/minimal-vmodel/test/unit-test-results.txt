@@ -1,0 +1,1011 @@
+
+> employee-management-system@1.0.0 test
+> node --experimental-transform-types --test "test/*.test.ts"
+
+TAP version 13
+# (node:1575686) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: API integration
+    # Subtest: POST /api/auth/login 正常系: トークンを返す (REQ-AUTH-01)
+    ok 1 - POST /api/auth/login 正常系: トークンを返す (REQ-AUTH-01)
+      ---
+      duration_ms: 145.23278
+      type: 'test'
+      ...
+    # Subtest: POST /api/auth/login 異常系: 資格情報誤りは 401 で同一メッセージ (REQ-AUTH-02)
+    ok 2 - POST /api/auth/login 異常系: 資格情報誤りは 401 で同一メッセージ (REQ-AUTH-02)
+      ---
+      duration_ms: 92.084261
+      type: 'test'
+      ...
+    # Subtest: POST /api/auth/logout 正常系: 204 を返す (REQ-AUTH-04)
+    ok 3 - POST /api/auth/logout 正常系: 204 を返す (REQ-AUTH-04)
+      ---
+      duration_ms: 7.442129
+      type: 'test'
+      ...
+    # Subtest: GET /api/employees 認証なしは 401 (REQ-AUTH-04)
+    ok 4 - GET /api/employees 認証なしは 401 (REQ-AUTH-04)
+      ---
+      duration_ms: 4.664251
+      type: 'test'
+      ...
+    # Subtest: GET /api/employees: ロールに応じて一覧を絞り込む (REQ-RBAC-03,05)
+    ok 5 - GET /api/employees: ロールに応じて一覧を絞り込む (REQ-RBAC-03,05)
+      ---
+      duration_ms: 12.219222
+      type: 'test'
+      ...
+    # Subtest: GET /api/employees/:id: 自身参照と水平越権 (REQ-RBAC-05)
+    ok 6 - GET /api/employees/:id: 自身参照と水平越権 (REQ-RBAC-05)
+      ---
+      duration_ms: 13.444254
+      type: 'test'
+      ...
+    # Subtest: POST /api/employees: admin は作成でき、passwordHash を返さない (REQ-EMP-01, REQ-AUTH-03)
+    ok 7 - POST /api/employees: admin は作成でき、passwordHash を返さない (REQ-EMP-01, REQ-AUTH-03)
+      ---
+      duration_ms: 88.701528
+      type: 'test'
+      ...
+    # Subtest: POST /api/employees: manager は member のみ作成可能 (REQ-RBAC-03)
+    ok 8 - POST /api/employees: manager は member のみ作成可能 (REQ-RBAC-03)
+      ---
+      duration_ms: 88.182964
+      type: 'test'
+      ...
+    # Subtest: POST /api/employees: member はルートガードで 403 (REQ-RBAC-02)
+    ok 9 - POST /api/employees: member はルートガードで 403 (REQ-RBAC-02)
+      ---
+      duration_ms: 3.871923
+      type: 'test'
+      ...
+    # Subtest: POST /api/employees: 不正入力は 422 とフィールドエラー (REQ-VAL-01,05)
+    ok 10 - POST /api/employees: 不正入力は 422 とフィールドエラー (REQ-VAL-01,05)
+      ---
+      duration_ms: 4.826081
+      type: 'test'
+      ...
+    # Subtest: PUT /api/employees/:id: admin は更新できる (REQ-EMP-03)
+    ok 11 - PUT /api/employees/:id: admin は更新できる (REQ-EMP-03)
+      ---
+      duration_ms: 5.451437
+      type: 'test'
+      ...
+    # Subtest: PUT /api/employees/:id: member はルートガードで 403 (REQ-RBAC-02)
+    ok 12 - PUT /api/employees/:id: member はルートガードで 403 (REQ-RBAC-02)
+      ---
+      duration_ms: 3.084345
+      type: 'test'
+      ...
+    # Subtest: DELETE /api/employees/:id: admin は他社員を削除できる (REQ-EMP-04)
+    ok 13 - DELETE /api/employees/:id: admin は他社員を削除できる (REQ-EMP-04)
+      ---
+      duration_ms: 3.583234
+      type: 'test'
+      ...
+    # Subtest: DELETE /api/employees/:id: admin は自分自身を削除できない (REQ-EMP-06)
+    ok 14 - DELETE /api/employees/:id: admin は自分自身を削除できない (REQ-EMP-06)
+      ---
+      duration_ms: 2.29868
+      type: 'test'
+      ...
+    # Subtest: DELETE /api/employees/:id: manager は 403 (REQ-RBAC-02)
+    ok 15 - DELETE /api/employees/:id: manager は 403 (REQ-RBAC-02)
+      ---
+      duration_ms: 2.476056
+      type: 'test'
+      ...
+    # Subtest: 不正 JWT は 401 (REQ-AUTH-04)
+    ok 16 - 不正 JWT は 401 (REQ-AUTH-04)
+      ---
+      duration_ms: 2.243837
+      type: 'test'
+      ...
+    # Subtest: 不正 JSON は 400 (REQ-VAL-06)
+    ok 17 - 不正 JSON は 400 (REQ-VAL-06)
+      ---
+      duration_ms: 2.974706
+      type: 'test'
+      ...
+    # Subtest: 未定義ルートは 404 と統一エラー形式 (REQ-VAL-05)
+    ok 18 - 未定義ルートは 404 と統一エラー形式 (REQ-VAL-05)
+      ---
+      duration_ms: 2.33093
+      type: 'test'
+      ...
+    # Subtest: エラーレスポンスはスタック等の内部情報を露出しない (REQ-VAL-08)
+    ok 19 - エラーレスポンスはスタック等の内部情報を露出しない (REQ-VAL-08)
+      ---
+      duration_ms: 83.975583
+      type: 'test'
+      ...
+    1..19
+ok 1 - API integration
+  ---
+  duration_ms: 570.89159
+  type: 'suite'
+  ...
+# (node:1575687) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: createAuthMiddleware
+    # Subtest: 正常系: Bearer トークンから認証済みクレームを付与する (REQ-AUTH-04)
+    ok 1 - 正常系: Bearer トークンから認証済みクレームを付与する (REQ-AUTH-04)
+      ---
+      duration_ms: 4.44483
+      type: 'test'
+      ...
+    # Subtest: 異常系: ヘッダー未指定は 401 (REQ-AUTH-04)
+    ok 2 - 異常系: ヘッダー未指定は 401 (REQ-AUTH-04)
+      ---
+      duration_ms: 0.266565
+      type: 'test'
+      ...
+    # Subtest: 異常系: Bearer スキーム以外は 401 (REQ-AUTH-04)
+    ok 3 - 異常系: Bearer スキーム以外は 401 (REQ-AUTH-04)
+      ---
+      duration_ms: 0.594294
+      type: 'test'
+      ...
+    # Subtest: 異常系: 不正トークンは 401 (REQ-AUTH-04)
+    ok 4 - 異常系: 不正トークンは 401 (REQ-AUTH-04)
+      ---
+      duration_ms: 0.183403
+      type: 'test'
+      ...
+    1..4
+ok 2 - createAuthMiddleware
+  ---
+  duration_ms: 6.506797
+  type: 'suite'
+  ...
+# Subtest: requireRoles
+    # Subtest: 正常系: 許可されたロールは next() を通す (REQ-RBAC-02)
+    ok 1 - 正常系: 許可されたロールは next() を通す (REQ-RBAC-02)
+      ---
+      duration_ms: 0.267406
+      type: 'test'
+      ...
+    # Subtest: 異常系: 未認証は 401 (REQ-AUTH-04)
+    ok 2 - 異常系: 未認証は 401 (REQ-AUTH-04)
+      ---
+      duration_ms: 0.125634
+      type: 'test'
+      ...
+    # Subtest: 異常系: 許可されないロールは 403 (REQ-RBAC-02)
+    ok 3 - 異常系: 許可されないロールは 403 (REQ-RBAC-02)
+      ---
+      duration_ms: 0.242937
+      type: 'test'
+      ...
+    1..3
+ok 3 - requireRoles
+  ---
+  duration_ms: 0.98069
+  type: 'suite'
+  ...
+# (node:1575693) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: AuthService.login
+    # Subtest: 正常系: 正しい資格情報でトークンと安全なユーザー情報を返す (REQ-AUTH-01)
+    ok 1 - 正常系: 正しい資格情報でトークンと安全なユーザー情報を返す (REQ-AUTH-01)
+      ---
+      duration_ms: 91.037507
+      type: 'test'
+      ...
+    # Subtest: 正常系: username 前後の空白はトリムする (REQ-AUTH-01)
+    ok 2 - 正常系: username 前後の空白はトリムする (REQ-AUTH-01)
+      ---
+      duration_ms: 83.630066
+      type: 'test'
+      ...
+    # Subtest: 異常系: 存在しないユーザー名は 401 を投げ、どちらが誤りか特定しない (REQ-AUTH-02)
+    ok 3 - 異常系: 存在しないユーザー名は 401 を投げ、どちらが誤りか特定しない (REQ-AUTH-02)
+      ---
+      duration_ms: 0.711217
+      type: 'test'
+      ...
+    # Subtest: 異常系: 誤ったパスワードも同一メッセージで 401 (REQ-AUTH-02)
+    ok 4 - 異常系: 誤ったパスワードも同一メッセージで 401 (REQ-AUTH-02)
+      ---
+      duration_ms: 84.31904
+      type: 'test'
+      ...
+    # Subtest: 異常系: 未入力・非文字列は ValidationError (REQ-VAL-01)
+    ok 5 - 異常系: 未入力・非文字列は ValidationError (REQ-VAL-01)
+      ---
+      duration_ms: 0.432043
+      type: 'test'
+      ...
+    # Subtest: 失敗時はログインログを記録しない (REQ-NFR-01)
+    ok 6 - 失敗時はログインログを記録しない (REQ-NFR-01)
+      ---
+      duration_ms: 83.654908
+      type: 'test'
+      ...
+    1..6
+ok 4 - AuthService.login
+  ---
+  duration_ms: 344.977073
+  type: 'suite'
+  ...
+# Subtest: AuthService.logout
+    # Subtest: 正常系: LOGOUT 操作ログを記録する (REQ-AUTH-04, REQ-NFR-01)
+    ok 1 - 正常系: LOGOUT 操作ログを記録する (REQ-AUTH-04, REQ-NFR-01)
+      ---
+      duration_ms: 0.400258
+      type: 'test'
+      ...
+    1..1
+ok 5 - AuthService.logout
+  ---
+  duration_ms: 0.618583
+  type: 'suite'
+  ...
+# (node:1575694) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: loadConfig
+    # Subtest: 正常系: 環境変数が無い場合の既定値を返す
+    ok 1 - 正常系: 環境変数が無い場合の既定値を返す
+      ---
+      duration_ms: 0.803703
+      type: 'test'
+      ...
+    # Subtest: 正常系: 環境変数の値で上書きする
+    ok 2 - 正常系: 環境変数の値で上書きする
+      ---
+      duration_ms: 0.182376
+      type: 'test'
+      ...
+    # Subtest: 異常系: 不正な PORT は例外を投げる
+    ok 3 - 異常系: 不正な PORT は例外を投げる
+      ---
+      duration_ms: 0.505779
+      type: 'test'
+      ...
+    # Subtest: 境界値: PORT=1 と PORT=65535 を許容する
+    ok 4 - 境界値: PORT=1 と PORT=65535 を許容する
+      ---
+      duration_ms: 0.155879
+      type: 'test'
+      ...
+    1..4
+ok 6 - loadConfig
+  ---
+  duration_ms: 2.717889
+  type: 'suite'
+  ...
+# (node:1575700) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: PostgresEmployeeRepository
+    # Subtest: findById はスネークケースをドメイン型へマッピングする (REQ-EMP-02)
+    ok 1 - findById はスネークケースをドメイン型へマッピングする (REQ-EMP-02)
+      ---
+      duration_ms: 7.299687
+      type: 'test'
+      ...
+    # Subtest: findById が空なら null を返す (REQ-EMP-02)
+    ok 2 - findById が空なら null を返す (REQ-EMP-02)
+      ---
+      duration_ms: 0.206833
+      type: 'test'
+      ...
+    # Subtest: findAll は role/keyword フィルタと LIMIT/OFFSET を組み立てる (REQ-EMP-02)
+    ok 3 - findAll は role/keyword フィルタと LIMIT/OFFSET を組み立てる (REQ-EMP-02)
+      ---
+      duration_ms: 0.245872
+      type: 'test'
+      ...
+    # Subtest: findByUsername / findByEmployeeNo / findByEmail をマッピングする (REQ-EMP-02)
+    ok 4 - findByUsername / findByEmployeeNo / findByEmail をマッピングする (REQ-EMP-02)
+      ---
+      duration_ms: 0.297533
+      type: 'test'
+      ...
+    # Subtest: create は RETURNING 行を返す (REQ-EMP-01)
+    ok 5 - create は RETURNING 行を返す (REQ-EMP-01)
+      ---
+      duration_ms: 0.189494
+      type: 'test'
+      ...
+    # Subtest: create の一意制約違反は ConflictError に変換する (REQ-VAL-02,04)
+    ok 6 - create の一意制約違反は ConflictError に変換する (REQ-VAL-02,04)
+      ---
+      duration_ms: 0.658158
+      type: 'test'
+      ...
+    # Subtest: update は既存値をマージして更新する (REQ-EMP-03)
+    ok 7 - update は既存値をマージして更新する (REQ-EMP-03)
+      ---
+      duration_ms: 0.256328
+      type: 'test'
+      ...
+    # Subtest: update 対象が存在しない場合は NotFoundError (REQ-VAL-06)
+    ok 8 - update 対象が存在しない場合は NotFoundError (REQ-VAL-06)
+      ---
+      duration_ms: 0.272616
+      type: 'test'
+      ...
+    # Subtest: delete 対象が存在しない場合は NotFoundError (REQ-VAL-06)
+    ok 9 - delete 対象が存在しない場合は NotFoundError (REQ-VAL-06)
+      ---
+      duration_ms: 0.351701
+      type: 'test'
+      ...
+    # Subtest: delete 成功時は例外を投げない (REQ-EMP-04)
+    ok 10 - delete 成功時は例外を投げない (REQ-EMP-04)
+      ---
+      duration_ms: 0.544754
+      type: 'test'
+      ...
+    1..10
+ok 7 - PostgresEmployeeRepository
+  ---
+  duration_ms: 11.636923
+  type: 'suite'
+  ...
+# (node:1575721) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: EmployeeService.list
+    # Subtest: admin は全社員を取得できる (REQ-RBAC-03)
+    ok 1 - admin は全社員を取得できる (REQ-RBAC-03)
+      ---
+      duration_ms: 1.203005
+      type: 'test'
+      ...
+    # Subtest: manager は member のみ取得できる (REQ-RBAC-03)
+    ok 2 - manager は member のみ取得できる (REQ-RBAC-03)
+      ---
+      duration_ms: 0.354489
+      type: 'test'
+      ...
+    # Subtest: member は自身のみ取得できる (REQ-RBAC-03)
+    ok 3 - member は自身のみ取得できる (REQ-RBAC-03)
+      ---
+      duration_ms: 0.303345
+      type: 'test'
+      ...
+    1..3
+ok 8 - EmployeeService.list
+  ---
+  duration_ms: 2.680696
+  type: 'suite'
+  ...
+# Subtest: EmployeeService.getById
+    # Subtest: admin は任意の社員を参照できる (REQ-RBAC-03)
+    ok 1 - admin は任意の社員を参照できる (REQ-RBAC-03)
+      ---
+      duration_ms: 0.264667
+      type: 'test'
+      ...
+    # Subtest: manager は member を参照できる (REQ-RBAC-03)
+    ok 2 - manager は member を参照できる (REQ-RBAC-03)
+      ---
+      duration_ms: 0.203857
+      type: 'test'
+      ...
+    # Subtest: manager は admin/manager を参照できない（垂直越権） (REQ-RBAC-05)
+    ok 3 - manager は admin/manager を参照できない（垂直越権） (REQ-RBAC-05)
+      ---
+      duration_ms: 0.555579
+      type: 'test'
+      ...
+    # Subtest: member は自身のみ参照でき、他者は拒否する（水平越権） (REQ-RBAC-05)
+    ok 4 - member は自身のみ参照でき、他者は拒否する（水平越権） (REQ-RBAC-05)
+      ---
+      duration_ms: 0.293839
+      type: 'test'
+      ...
+    # Subtest: 存在しない ID は NotFoundError (REQ-VAL-06)
+    ok 5 - 存在しない ID は NotFoundError (REQ-VAL-06)
+      ---
+      duration_ms: 0.364627
+      type: 'test'
+      ...
+    1..5
+ok 9 - EmployeeService.getById
+  ---
+  duration_ms: 2.054689
+  type: 'suite'
+  ...
+# Subtest: EmployeeService.create
+    # Subtest: admin は任意のロールを作成できる (REQ-EMP-01, REQ-RBAC-03)
+    ok 1 - admin は任意のロールを作成できる (REQ-EMP-01, REQ-RBAC-03)
+      ---
+      duration_ms: 93.357246
+      type: 'test'
+      ...
+    # Subtest: manager は member のみ作成できる (REQ-RBAC-03)
+    ok 2 - manager は member のみ作成できる (REQ-RBAC-03)
+      ---
+      duration_ms: 84.112457
+      type: 'test'
+      ...
+    # Subtest: 作成時に CREATE 操作ログを記録する (REQ-NFR-01)
+    ok 3 - 作成時に CREATE 操作ログを記録する (REQ-NFR-01)
+      ---
+      duration_ms: 83.717705
+      type: 'test'
+      ...
+    # Subtest: 不正入力は ValidationError (REQ-VAL-01)
+    ok 4 - 不正入力は ValidationError (REQ-VAL-01)
+      ---
+      duration_ms: 0.397214
+      type: 'test'
+      ...
+    1..4
+ok 10 - EmployeeService.create
+  ---
+  duration_ms: 261.965216
+  type: 'suite'
+  ...
+# Subtest: EmployeeService.update
+    # Subtest: admin は任意の社員を更新できる (REQ-EMP-03)
+    ok 1 - admin は任意の社員を更新できる (REQ-EMP-03)
+      ---
+      duration_ms: 0.587849
+      type: 'test'
+      ...
+    # Subtest: manager は member のみ更新でき、ロール変更は不可 (REQ-RBAC-03,04)
+    ok 2 - manager は member のみ更新でき、ロール変更は不可 (REQ-RBAC-03,04)
+      ---
+      duration_ms: 0.258536
+      type: 'test'
+      ...
+    # Subtest: member は自身の更新も禁止される（実装上の制約） (REQ-EMP-03)
+    ok 3 - member は自身の更新も禁止される（実装上の制約） (REQ-EMP-03)
+      ---
+      duration_ms: 0.206427
+      type: 'test'
+      ...
+    # Subtest: password 指定時はハッシュ化して保存する (REQ-AUTH-03)
+    ok 4 - password 指定時はハッシュ化して保存する (REQ-AUTH-03)
+      ---
+      duration_ms: 85.720262
+      type: 'test'
+      ...
+    # Subtest: password 未指定なら既存ハッシュを維持する (REQ-EMP-03)
+    ok 5 - password 未指定なら既存ハッシュを維持する (REQ-EMP-03)
+      ---
+      duration_ms: 0.221479
+      type: 'test'
+      ...
+    # Subtest: 更新時に UPDATE 操作ログを記録する (REQ-NFR-01)
+    ok 6 - 更新時に UPDATE 操作ログを記録する (REQ-NFR-01)
+      ---
+      duration_ms: 0.144374
+      type: 'test'
+      ...
+    # Subtest: 存在しない ID は NotFoundError (REQ-VAL-06)
+    ok 7 - 存在しない ID は NotFoundError (REQ-VAL-06)
+      ---
+      duration_ms: 0.306146
+      type: 'test'
+      ...
+    # Subtest: 不正入力は ValidationError (REQ-VAL-01)
+    ok 8 - 不正入力は ValidationError (REQ-VAL-01)
+      ---
+      duration_ms: 0.172859
+      type: 'test'
+      ...
+    1..8
+ok 11 - EmployeeService.update
+  ---
+  duration_ms: 87.863728
+  type: 'suite'
+  ...
+# Subtest: EmployeeService.remove
+    # Subtest: admin は他社員を削除できる (REQ-EMP-04, REQ-RBAC-03)
+    ok 1 - admin は他社員を削除できる (REQ-EMP-04, REQ-RBAC-03)
+      ---
+      duration_ms: 0.234018
+      type: 'test'
+      ...
+    # Subtest: admin は自分自身を削除できない (REQ-EMP-06)
+    ok 2 - admin は自分自身を削除できない (REQ-EMP-06)
+      ---
+      duration_ms: 0.154757
+      type: 'test'
+      ...
+    # Subtest: manager / member は削除できない (REQ-RBAC-02)
+    ok 3 - manager / member は削除できない (REQ-RBAC-02)
+      ---
+      duration_ms: 0.229192
+      type: 'test'
+      ...
+    # Subtest: 存在しない ID は NotFoundError (REQ-VAL-06)
+    ok 4 - 存在しない ID は NotFoundError (REQ-VAL-06)
+      ---
+      duration_ms: 0.180506
+      type: 'test'
+      ...
+    # Subtest: 削除時に DELETE 操作ログを記録する (REQ-NFR-01)
+    ok 5 - 削除時に DELETE 操作ログを記録する (REQ-NFR-01)
+      ---
+      duration_ms: 2.427136
+      type: 'test'
+      ...
+    1..5
+ok 12 - EmployeeService.remove
+  ---
+  duration_ms: 3.366855
+  type: 'suite'
+  ...
+# (node:1575728) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: createErrorHandler
+    # Subtest: AppError は対応する status/code/message/details を返す (REQ-VAL-05,06)
+    ok 1 - AppError は対応する status/code/message/details を返す (REQ-VAL-05,06)
+      ---
+      duration_ms: 8.820487
+      type: 'test'
+      ...
+    # Subtest: JSON parse エラーは 400 に変換する (REQ-VAL-06)
+    ok 2 - JSON parse エラーは 400 に変換する (REQ-VAL-06)
+      ---
+      duration_ms: 0.20209
+      type: 'test'
+      ...
+    # Subtest: JWT エラーは 401 に変換する (REQ-AUTH-04)
+    ok 3 - JWT エラーは 401 に変換する (REQ-AUTH-04)
+      ---
+      duration_ms: 0.223274
+      type: 'test'
+      ...
+    # Subtest: 未捕捉例外は 500 INTERNAL_ERROR に変換し、スタックを露出しない (REQ-VAL-08)
+    ok 4 - 未捕捉例外は 500 INTERNAL_ERROR に変換し、スタックを露出しない (REQ-VAL-08)
+      ---
+      duration_ms: 0.251579
+      type: 'test'
+      ...
+    # Subtest: 認証エラー等の AppError も共通形式で返す (REQ-VAL-05)
+    ok 5 - 認証エラー等の AppError も共通形式で返す (REQ-VAL-05)
+      ---
+      duration_ms: 0.174559
+      type: 'test'
+      ...
+    # Subtest: InternalError は details を空で返す
+    ok 6 - InternalError は details を空で返す
+      ---
+      duration_ms: 0.158782
+      type: 'test'
+      ...
+    # Subtest: NotFoundException は 404 を返す
+    ok 7 - NotFoundException は 404 を返す
+      ---
+      duration_ms: 0.211543
+      type: 'test'
+      ...
+    1..7
+ok 13 - createErrorHandler
+  ---
+  duration_ms: 11.115375
+  type: 'suite'
+  ...
+# (node:1575735) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: domain errors
+    # Subtest: 各例外は HTTP ステータス・エラーコード・メッセージ・details を保持する (REQ-VAL-05)
+    ok 1 - 各例外は HTTP ステータス・エラーコード・メッセージ・details を保持する (REQ-VAL-05)
+      ---
+      duration_ms: 1.523922
+      type: 'test'
+      ...
+    # Subtest: ValidationError は fieldErrors 相当の details を保持する (REQ-VAL-01)
+    ok 2 - ValidationError は fieldErrors 相当の details を保持する (REQ-VAL-01)
+      ---
+      duration_ms: 0.231335
+      type: 'test'
+      ...
+    # Subtest: InternalError は cause を保持する (REQ-VAL-08)
+    ok 3 - InternalError は cause を保持する (REQ-VAL-08)
+      ---
+      duration_ms: 0.198895
+      type: 'test'
+      ...
+    # Subtest: AppError は name を具象クラス名にする
+    ok 4 - AppError は name を具象クラス名にする
+      ---
+      duration_ms: 0.131313
+      type: 'test'
+      ...
+    1..4
+ok 14 - domain errors
+  ---
+  duration_ms: 3.096032
+  type: 'suite'
+  ...
+# (node:1575743) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: InMemoryEmployeeRepository
+    # Subtest: 正常系: create で ID とタイムスタンプを採番して返す (REQ-EMP-01)
+    ok 1 - 正常系: create で ID とタイムスタンプを採番して返す (REQ-EMP-01)
+      ---
+      duration_ms: 1.242605
+      type: 'test'
+      ...
+    # Subtest: 正常系: 各一意キーで検索できる (REQ-EMP-02)
+    ok 2 - 正常系: 各一意キーで検索できる (REQ-EMP-02)
+      ---
+      duration_ms: 0.303209
+      type: 'test'
+      ...
+    # Subtest: 正常系: findAll は role/keyword で絞り込み、ページングする (REQ-EMP-02)
+    ok 3 - 正常系: findAll は role/keyword で絞り込み、ページングする (REQ-EMP-02)
+      ---
+      duration_ms: 2.091306
+      type: 'test'
+      ...
+    # Subtest: 異常系: employeeNo / email / username の重複を ConflictError で拒否する (REQ-VAL-02,04)
+    ok 4 - 異常系: employeeNo / email / username の重複を ConflictError で拒否する (REQ-VAL-02,04)
+      ---
+      duration_ms: 0.651614
+      type: 'test'
+      ...
+    # Subtest: 正常系: update は部分更新できる (REQ-EMP-03)
+    ok 5 - 正常系: update は部分更新できる (REQ-EMP-03)
+      ---
+      duration_ms: 0.244261
+      type: 'test'
+      ...
+    # Subtest: 異常系: 存在しない update は NotFoundError (REQ-EMP-03)
+    ok 6 - 異常系: 存在しない update は NotFoundError (REQ-EMP-03)
+      ---
+      duration_ms: 0.206637
+      type: 'test'
+      ...
+    # Subtest: 正常系: delete で削除し、以降の find は null (REQ-EMP-04)
+    ok 7 - 正常系: delete で削除し、以降の find は null (REQ-EMP-04)
+      ---
+      duration_ms: 0.244383
+      type: 'test'
+      ...
+    # Subtest: 異常系: 存在しない delete は NotFoundError (REQ-EMP-04)
+    ok 8 - 異常系: 存在しない delete は NotFoundError (REQ-EMP-04)
+      ---
+      duration_ms: 0.238284
+      type: 'test'
+      ...
+    # Subtest: 正常系: update で自分自身の一意値は変更できる（同一レコードは除外） (REQ-VAL-02)
+    ok 9 - 正常系: update で自分自身の一意値は変更できる（同一レコードは除外） (REQ-VAL-02)
+      ---
+      duration_ms: 0.287826
+      type: 'test'
+      ...
+    # Subtest: seed はテスト用に任意の初期データを投入する
+    ok 10 - seed はテスト用に任意の初期データを投入する
+      ---
+      duration_ms: 0.409544
+      type: 'test'
+      ...
+    1..10
+ok 15 - InMemoryEmployeeRepository
+  ---
+  duration_ms: 7.170555
+  type: 'suite'
+  ...
+# (node:1575750) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: createSafeOperationLogger
+    # Subtest: 正常系: 配下のリポジトリへ記録する (REQ-NFR-01)
+    ok 1 - 正常系: 配下のリポジトリへ記録する (REQ-NFR-01)
+      ---
+      duration_ms: 0.631028
+      type: 'test'
+      ...
+    # Subtest: 異常系: 記録失敗でも主処理を継続する（例外を投げない） (REQ-NFR-01)
+    ok 2 - 異常系: 記録失敗でも主処理を継続する（例外を投げない） (REQ-NFR-01)
+      ---
+      duration_ms: 0.401125
+      type: 'test'
+      ...
+    1..2
+ok 16 - createSafeOperationLogger
+  ---
+  duration_ms: 1.917665
+  type: 'suite'
+  ...
+# (node:1575758) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: password
+    # Subtest: 正常系: ハッシュは平文を含まず、bcrypt 形式である (REQ-AUTH-03)
+    ok 1 - 正常系: ハッシュは平文を含まず、bcrypt 形式である (REQ-AUTH-03)
+      ---
+      duration_ms: 98.987505
+      type: 'test'
+      ...
+    # Subtest: 正常系: 正しい平文は検証に成功する (REQ-AUTH-03)
+    ok 2 - 正常系: 正しい平文は検証に成功する (REQ-AUTH-03)
+      ---
+      duration_ms: 185.869085
+      type: 'test'
+      ...
+    # Subtest: 異常系: 誤った平文は検証に失敗する (REQ-AUTH-03)
+    ok 3 - 異常系: 誤った平文は検証に失敗する (REQ-AUTH-03)
+      ---
+      duration_ms: 165.740721
+      type: 'test'
+      ...
+    # Subtest: 同じ平文でもソルトによりハッシュが異なる (REQ-AUTH-03)
+    ok 4 - 同じ平文でもソルトによりハッシュが異なる (REQ-AUTH-03)
+      ---
+      duration_ms: 160.635479
+      type: 'test'
+      ...
+    # Subtest: bcrypt 形式として認識できる
+    ok 5 - bcrypt 形式として認識できる
+      ---
+      duration_ms: 79.110525
+      type: 'test'
+      ...
+    1..5
+ok 17 - password
+  ---
+  duration_ms: 691.55249
+  type: 'suite'
+  ...
+# (node:1575764) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: token service
+    # Subtest: 正常系: sign/verify でクレームを復元する (REQ-AUTH-04)
+    ok 1 - 正常系: sign/verify でクレームを復元する (REQ-AUTH-04)
+      ---
+      duration_ms: 3.832979
+      type: 'test'
+      ...
+    # Subtest: 異常系: 異なる秘密鍵では検証できない (REQ-AUTH-04)
+    ok 2 - 異常系: 異なる秘密鍵では検証できない (REQ-AUTH-04)
+      ---
+      duration_ms: 0.701858
+      type: 'test'
+      ...
+    # Subtest: 異常系: 不正なトークンでは検証できない (REQ-AUTH-04)
+    ok 3 - 異常系: 不正なトークンでは検証できない (REQ-AUTH-04)
+      ---
+      duration_ms: 0.141391
+      type: 'test'
+      ...
+    # Subtest: 異常系: 期限切れトークンでは検証できない (REQ-AUTH-04)
+    ok 4 - 異常系: 期限切れトークンでは検証できない (REQ-AUTH-04)
+      ---
+      duration_ms: 0.46515
+      type: 'test'
+      ...
+    # Subtest: 異常系: sub を持たないトークンは拒否する (REQ-AUTH-04)
+    ok 5 - 異常系: sub を持たないトークンは拒否する (REQ-AUTH-04)
+      ---
+      duration_ms: 0.426308
+      type: 'test'
+      ...
+    1..5
+ok 18 - token service
+  ---
+  duration_ms: 6.598751
+  type: 'suite'
+  ...
+# (node:1575773) ExperimentalWarning: Transform Types is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: validateCreate
+    # Subtest: 正常系: 有効な入力は例外を投げない (REQ-VAL-01)
+    ok 1 - 正常系: 有効な入力は例外を投げない (REQ-VAL-01)
+      ---
+      duration_ms: 1.294112
+      type: 'test'
+      ...
+    # Subtest: 異常系: 必須項目の欠落をすべて検出する (REQ-VAL-01)
+    ok 2 - 異常系: 必須項目の欠落をすべて検出する (REQ-VAL-01)
+      ---
+      duration_ms: 0.367353
+      type: 'test'
+      ...
+    # Subtest: 異常系: employeeNo の形式違反を検出する (REQ-EMP-05)
+    ok 3 - 異常系: employeeNo の形式違反を検出する (REQ-EMP-05)
+      ---
+      duration_ms: 0.29548
+      type: 'test'
+      ...
+    # Subtest: 境界値: employeeNo 20 文字は許容、21 文字は拒否する (REQ-EMP-05)
+    ok 4 - 境界値: employeeNo 20 文字は許容、21 文字は拒否する (REQ-EMP-05)
+      ---
+      duration_ms: 0.176349
+      type: 'test'
+      ...
+    # Subtest: 異常系: name が 101 文字なら拒否する (REQ-EMP-05)
+    ok 5 - 異常系: name が 101 文字なら拒否する (REQ-EMP-05)
+      ---
+      duration_ms: 0.148935
+      type: 'test'
+      ...
+    # Subtest: 異常系: email 形式違反を検出する (REQ-VAL-04)
+    ok 6 - 異常系: email 形式違反を検出する (REQ-VAL-04)
+      ---
+      duration_ms: 0.140149
+      type: 'test'
+      ...
+    # Subtest: 異常系: username に禁止文字がある場合は拒否する (REQ-VAL-02)
+    ok 7 - 異常系: username に禁止文字がある場合は拒否する (REQ-VAL-02)
+      ---
+      duration_ms: 0.156115
+      type: 'test'
+      ...
+    # Subtest: 境界値: パスワードは 8 文字で各文字種を含む場合は許容する (REQ-VAL-03)
+    ok 8 - 境界値: パスワードは 8 文字で各文字種を含む場合は許容する (REQ-VAL-03)
+      ---
+      duration_ms: 0.197061
+      type: 'test'
+      ...
+    # Subtest: 異常系: パスワード強度不足を検出する (REQ-VAL-03)
+    ok 9 - 異常系: パスワード強度不足を検出する (REQ-VAL-03)
+      ---
+      duration_ms: 0.396298
+      type: 'test'
+      ...
+    # Subtest: 異常系: 不正なロールを拒否する (REQ-RBAC-01)
+    ok 10 - 異常系: 不正なロールを拒否する (REQ-RBAC-01)
+      ---
+      duration_ms: 0.334771
+      type: 'test'
+      ...
+    # Subtest: 異常系: 所属部署が 101 文字以上なら拒否する (REQ-EMP-05)
+    ok 11 - 異常系: 所属部署が 101 文字以上なら拒否する (REQ-EMP-05)
+      ---
+      duration_ms: 0.138595
+      type: 'test'
+      ...
+    # Subtest: 実装上の制約: 未来日付は形式が正しければ現状許可される（既知ギャップ） (REQ-EMP-05)
+    ok 12 - 実装上の制約: 未来日付は形式が正しければ現状許可される（既知ギャップ） (REQ-EMP-05)
+      ---
+      duration_ms: 0.094122
+      type: 'test'
+      ...
+    # Subtest: 異常系: 日付の形式違反を検出する (REQ-EMP-05)
+    ok 13 - 異常系: 日付の形式違反を検出する (REQ-EMP-05)
+      ---
+      duration_ms: 0.101105
+      type: 'test'
+      ...
+    1..13
+ok 19 - validateCreate
+  ---
+  duration_ms: 5.044087
+  type: 'suite'
+  ...
+# Subtest: validateUpdate
+    # Subtest: 正常系: 空オブジェクトは許容する (REQ-EMP-03)
+    ok 1 - 正常系: 空オブジェクトは許容する (REQ-EMP-03)
+      ---
+      duration_ms: 0.1881
+      type: 'test'
+      ...
+    # Subtest: 正常系: 指定した項目のみ検証する (REQ-EMP-03)
+    ok 2 - 正常系: 指定した項目のみ検証する (REQ-EMP-03)
+      ---
+      duration_ms: 0.079795
+      type: 'test'
+      ...
+    # Subtest: 異常系: 指定した項目の形式違反を検出する (REQ-VAL-01)
+    ok 3 - 異常系: 指定した項目の形式違反を検出する (REQ-VAL-01)
+      ---
+      duration_ms: 0.634177
+      type: 'test'
+      ...
+    # Subtest: 境界値: password 空文字は検証せず許容する（更新しない扱い） (REQ-EMP-03)
+    ok 4 - 境界値: password 空文字は検証せず許容する（更新しない扱い） (REQ-EMP-03)
+      ---
+      duration_ms: 0.079761
+      type: 'test'
+      ...
+    # Subtest: department を null に更新するのは許容する (REQ-EMP-03)
+    ok 5 - department を null に更新するのは許容する (REQ-EMP-03)
+      ---
+      duration_ms: 0.077859
+      type: 'test'
+      ...
+    # Subtest: 異常系: role の不正値を拒否する (REQ-RBAC-01)
+    ok 6 - 異常系: role の不正値を拒否する (REQ-RBAC-01)
+      ---
+      duration_ms: 0.088574
+      type: 'test'
+      ...
+    # Subtest: 異常系: 無効な日付を拒否する (REQ-EMP-05)
+    ok 7 - 異常系: 無効な日付を拒否する (REQ-EMP-05)
+      ---
+      duration_ms: 0.086789
+      type: 'test'
+      ...
+    1..7
+ok 20 - validateUpdate
+  ---
+  duration_ms: 2.164651
+  type: 'suite'
+  ...
+# Subtest: validateLogin
+    # Subtest: 正常系: username/password 文字列を許容する (REQ-AUTH-01)
+    ok 1 - 正常系: username/password 文字列を許容する (REQ-AUTH-01)
+      ---
+      duration_ms: 0.141998
+      type: 'test'
+      ...
+    # Subtest: 異常系: username が空・非文字列の場合は拒否する (REQ-AUTH-01)
+    ok 2 - 異常系: username が空・非文字列の場合は拒否する (REQ-AUTH-01)
+      ---
+      duration_ms: 0.125028
+      type: 'test'
+      ...
+    # Subtest: 異常系: password が空・非文字列の場合は拒否する (REQ-AUTH-01)
+    ok 3 - 異常系: password が空・非文字列の場合は拒否する (REQ-AUTH-01)
+      ---
+      duration_ms: 0.108372
+      type: 'test'
+      ...
+    1..3
+ok 21 - validateLogin
+  ---
+  duration_ms: 0.469561
+  type: 'suite'
+  ...
+# Subtest: validateListQuery
+    # Subtest: 正常系: 既定値 page=1, size=20 を返す (REQ-EMP-02)
+    ok 1 - 正常系: 既定値 page=1, size=20 を返す (REQ-EMP-02)
+      ---
+      duration_ms: 0.175222
+      type: 'test'
+      ...
+    # Subtest: 正常系: 有効な page/size/role/keyword を返す (REQ-EMP-02)
+    ok 2 - 正常系: 有効な page/size/role/keyword を返す (REQ-EMP-02)
+      ---
+      duration_ms: 0.079975
+      type: 'test'
+      ...
+    # Subtest: 異常系: page が 0 以下なら拒否する (REQ-VAL-06)
+    ok 3 - 異常系: page が 0 以下なら拒否する (REQ-VAL-06)
+      ---
+      duration_ms: 0.093143
+      type: 'test'
+      ...
+    # Subtest: 境界値: size=100 は許容、size=101 は拒否する (REQ-VAL-06)
+    ok 4 - 境界値: size=100 は許容、size=101 は拒否する (REQ-VAL-06)
+      ---
+      duration_ms: 0.103576
+      type: 'test'
+      ...
+    # Subtest: 異常系: 不正な role を拒否する (REQ-RBAC-01)
+    ok 5 - 異常系: 不正な role を拒否する (REQ-RBAC-01)
+      ---
+      duration_ms: 0.085218
+      type: 'test'
+      ...
+    1..5
+ok 22 - validateListQuery
+  ---
+  duration_ms: 0.654907
+  type: 'suite'
+  ...
+# Subtest: isValidPassword / isIsoDate
+    # Subtest: isValidPassword: 複合条件を検証する (REQ-VAL-03)
+    ok 1 - isValidPassword: 複合条件を検証する (REQ-VAL-03)
+      ---
+      duration_ms: 0.090142
+      type: 'test'
+      ...
+    # Subtest: isIsoDate: 実在日付のみ許容する (REQ-EMP-05)
+    ok 2 - isIsoDate: 実在日付のみ許容する (REQ-EMP-05)
+      ---
+      duration_ms: 0.080862
+      type: 'test'
+      ...
+    1..2
+ok 23 - isValidPassword / isIsoDate
+  ---
+  duration_ms: 0.30235
+  type: 'suite'
+  ...
+1..23
+# tests 135
+# suites 23
+# pass 135
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1278.884155
