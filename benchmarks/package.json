@@ -1,0 +1,20 @@
+{
+  "name": "@takumi/benchmark",
+  "version": "0.1.0",
+  "description": "Japan SWE-Agent Benchmark — harness comparison harness (Pi vs DeepSeek Harness) and bench runner.",
+  "type": "module",
+  "scripts": {
+    "bench": "node dist/runner.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@takumi/core": "workspace:*",
+    "@takumi/runtime-fake": "workspace:*",
+    "@takumi/runtime-pi": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.6.0"
+  }
+}

@@ -47,6 +47,36 @@ export interface WorkflowRunResult {
 
 const RUNNING = new Set<string>();
 
+/** Extract trace IDs (REQ-xxx, UT-xxx, DESIGN-xxx...) from free text. */
+export function extractTraceIds(text: string): string[] {
+  const seen = new Set<string>();
+  for (const m of text.matchAll(/\b(REQ|UT|IT|DESIGN|EVIDENCE)-\d+\b/g)) {
+    seen.add(m[0]);
+  }
+  return [...seen];
+}
+
+/** Drop the leading `jp-` prefix from a skill name to derive an artifact kind. */
+export function skillToKind(skill: string): string {
+  return skill.replace(/^jp-/, '');
+}
+
+/** True when the runtime is the deterministic fake. */
+export function isFakeRuntime(runtime: AgentRuntimeAdapter): boolean {
+  return runtime.metadata().id === 'fake';
+}
+
+/** True when the runtime is the real Pi harness. */
+export function isPiRuntime(runtime: AgentRuntimeAdapter): boolean {
+  return runtime.metadata().id === 'pi';
+}
+
+/** Determine the artifact kind for a completed workflow step. */
+export function stepArtifactKind(step: WorkflowStep, fallback: string): string {
+  const kind = step.skill ? skillToKind(step.skill) : fallback;
+  return kind === 'code-review' ? 'review' : kind;
+}
+
 /** Render a step prompt by resolving {placeholders} from the run context. */
 export function renderPrompt(template: string, vars: Record<string, string>): string {
   return template.replace(/\{(\w+)\}/g, (m, key: string) => vars[key] ?? m);
@@ -146,7 +176,7 @@ export async function executeWorkflow(
           id: `${runId}:${stepId}:${attempt}`,
           prompt: renderPrompt(step.prompt ?? `Execute workflow step "${stepId}"`, vars),
           cwd: ctx.cwd,
-          trace: [],
+          trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
           context: { workflowStep: stepId, workflow: workflow.name, ...vars },
         };
         try {
@@ -176,15 +206,16 @@ export async function executeWorkflow(
           // carrying trace links so Requirement → Design → Test → Evidence
           // traceability can be rendered.
           if (stepOutcome.status === 'completed' && res.summary && res.summary !== 'processed: undefined') {
-            const kind = step.skill ? step.skill.replace(/^jp-/, '') : stepId.split('_')[0] ?? 'output';
+            const kind = stepArtifactKind(step, stepId.split('_')[0] ?? 'output');
+            const stepTrace = task.trace ?? [];
             try {
               const art = await ctx.artifacts.write({
                 taskId: task.id,
-                kind: kind === 'code-review' ? 'review' : kind,
+                kind,
                 fileName: `${stepId}.md`,
                 content: `# ${stepId}\n\n${res.summary}\n`,
                 contentType: 'text/markdown',
-                trace: task.trace ?? [],
+                trace: stepTrace,
               });
               stepOutcome.artifacts = [...stepOutcome.artifacts, art.path];
             } catch (e) {
@@ -209,6 +240,15 @@ export async function executeWorkflow(
         if (stepOutcome.status === 'completed') done.add(stepId);
         // Expose step summary to later steps via {step.<id>} var.
         vars[`step.${stepId}`] = stepOutcome.summary;
+
+        // Trace propagation: extract REQ-xxx / DESIGN-xxx ids from the step
+        // output and make them available to downstream steps + artifacts.
+        const ids = extractTraceIds(stepOutcome.summary);
+        if (ids.length > 0) {
+          const known = new Set(vars['trace.ids'] ? vars['trace.ids'].split(',') : []);
+          for (const id of ids) known.add(id);
+          vars['trace.ids'] = [...known].join(',');
+        }
       }
     }
 

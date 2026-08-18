@@ -156,3 +156,42 @@ test('renderPrompt: substitutes {vars} and leaves unknown intact', () => {
   assert.equal(renderPrompt('hello {name}', { name: 'takumi' }), 'hello takumi');
   assert.equal(renderPrompt('keep {unknown}', {}), 'keep {unknown}');
 });
+
+test('extractTraceIds: finds REQ/UT/DESIGN ids in text', async () => {
+  const { extractTraceIds } = await import('../workflow-engine.js');
+  const ids = extractTraceIds('Covered by REQ-001, REQ-002 and UT-007; see DESIGN-003');
+  assert.deepEqual(ids.sort(), ['DESIGN-003', 'REQ-001', 'REQ-002', 'UT-007']);
+  assert.deepEqual(extractTraceIds('no ids here'), []);
+  // dedupe
+  assert.deepEqual(extractTraceIds('REQ-001 REQ-001'), ['REQ-001']);
+});
+
+test('workflow: trace ids propagate from step output to downstream artifacts', async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'trace-prop',
+      version: '0.1.0',
+      description: 'trace propagation',
+      steps: [
+        { id: 'requirements', type: 'agent', prompt: 'generate REQ-001, REQ-002' },
+        { id: 'design', type: 'agent', prompt: 'design for REQ-001', dependsOn: ['requirements'] },
+      ],
+    };
+    const res = await executeWorkflow(wf, c.exec);
+    assert.equal(res.status, 'completed');
+    // design step artifact should carry the REQ ids extracted from requirements step
+    const design = res.steps.find((s) => s.stepId === 'design');
+    assert.ok(design, 'design step ran');
+    const store = c.exec.artifacts;
+    const arts = await store.list();
+    const reqArt = arts.find((a) => a.path.includes('requirements'));
+    const designArt = arts.find((a) => a.path.includes('design'));
+    assert.ok(reqArt, 'requirements artifact persisted');
+    assert.ok(designArt, 'design artifact persisted');
+    // design artifact should trace back to REQ ids discovered earlier
+    assert.ok(designArt.trace.length >= 2, `design trace should include REQ ids, got ${JSON.stringify(designArt.trace)}`);
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});

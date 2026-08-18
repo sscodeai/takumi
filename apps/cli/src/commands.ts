@@ -1,6 +1,7 @@
 import { parse } from 'yaml';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import {
   ArtifactStore,
   discoverExtensions,
@@ -11,6 +12,45 @@ import {
 import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
 import { PiRuntimeAdapter } from '@takumi/runtime-pi';
+
+/**
+ * Interactive approval gate. Prompts the user with [a] approve / [r] reject /
+ * [v] view. Auto-approves when stdin is not a TTY (pipelines, CI).
+ */
+export async function interactiveApprove(stepId: string, prompt: string): Promise<boolean> {
+  // Non-interactive (pipe/CI): auto-approve, still record the decision.
+  if (!process.stdin.isTTY) {
+    console.log(`  [auto] ${stepId} approved (non-interactive)`);
+    return true;
+  }
+
+  console.log('');
+  console.log(`  🔒 Approval required — ${stepId}`);
+  console.log(`    ${prompt.split('\n')[0] ?? ''}`);
+  console.log('    [a] approve   [r] reject   [v] view prompt');
+
+  return new Promise<boolean>((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.setPrompt('    > ');
+    rl.prompt();
+    rl.on('line', (line) => {
+      const input = line.trim().toLowerCase();
+      if (input === 'a' || input === 'approve' || input === 'y' || input === 'yes') {
+        rl.close();
+        resolve(true);
+      } else if (input === 'r' || input === 'reject' || input === 'n' || input === 'no') {
+        rl.close();
+        resolve(false);
+      } else if (input === 'v' || input === 'view') {
+        console.log(`\n  --- prompt ---\n${prompt}\n  --- end ---`);
+        rl.prompt();
+      } else {
+        console.log('    type a (approve), r (reject), or v (view)');
+        rl.prompt();
+      }
+    });
+  });
+}
 
 export interface ProjectConfig {
   runtime: string;
@@ -94,9 +134,11 @@ export async function runTask(opts: RunOptions): Promise<{
         cwd: opts.cwd,
         runtime,
         artifacts: store,
-        onApproval: () => {
-          events.push('approval: auto-approved');
-          return true;
+        onApproval: async (req) => {
+          const line = `approval required [${req.stepId}]: ${req.prompt}`;
+          events.push(line);
+          if (opts.verbose) console.log(`  ${line}`);
+          return interactiveApprove(req.stepId, req.prompt);
         },
         onEvent: (stepId, message) => {
           const line = `workflow[${stepId}]: ${message}`;
