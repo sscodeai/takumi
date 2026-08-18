@@ -72,6 +72,8 @@ export interface RunOptions {
   runtimeId: string;
   workflow?: string;
   config: ProjectConfig;
+  /** Stream workflow step events to stdout as they happen. */
+  verbose?: boolean;
 }
 
 export async function runTask(opts: RunOptions): Promise<{
@@ -96,7 +98,11 @@ export async function runTask(opts: RunOptions): Promise<{
           events.push('approval: auto-approved');
           return true;
         },
-        onEvent: (stepId, message) => events.push(`workflow[${stepId}]: ${message}`),
+        onEvent: (stepId, message) => {
+          const line = `workflow[${stepId}]: ${message}`;
+          events.push(line);
+          if (opts.verbose) console.log(`  ${line}`);
+        },
       },
       { input: opts.prompt },
     );

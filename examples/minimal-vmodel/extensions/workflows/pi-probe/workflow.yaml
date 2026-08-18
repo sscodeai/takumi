@@ -1,0 +1,15 @@
+name: pi-probe
+version: 0.1.0
+description: Minimal 2-step probe to verify config-level runtime switching (Fake→Pi)
+runtime: pi
+steps:
+  - id: analyze
+    type: agent
+    prompt: |
+      以下は社員管理システムの要件です。REQ-001〜の要件リスト（YAML）に整理して返してください。
+      要件: {input}
+  - id: summarize
+    type: agent
+    prompt: |
+      上記の要件分析結果を踏まえ、システム概要を3文以内で要約してください。
+      要件: {input}

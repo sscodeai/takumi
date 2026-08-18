@@ -34,7 +34,7 @@ export class ArtifactStore {
     const rel = path.relative(this.root, filePath).split(path.sep).join('/');
     const sha256 = createHash('sha256').update(data).digest('hex');
 
-    return {
+    const artifact: Artifact = {
       id: rel,
       taskId: opts.taskId,
       kind: opts.kind,
@@ -45,6 +45,18 @@ export class ArtifactStore {
       createdAt: Date.now(),
       sha256,
     };
+
+    // Persist metadata (esp. trace links) next to the artifact so that
+    // list() can reconstruct a full traceability view after restart.
+    const metaDir = path.join(this.root, '.meta');
+    await fs.mkdir(metaDir, { recursive: true });
+    await fs.writeFile(
+      path.join(metaDir, `${encodeURIComponent(rel)}.json`),
+      JSON.stringify(artifact, null, 2),
+      'utf8',
+    );
+
+    return artifact;
   }
 
   async read(artifact: Artifact): Promise<Buffer> {
@@ -56,6 +68,27 @@ export class ArtifactStore {
   async list(kind?: string): Promise<Artifact[]> {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
+    const metaDir = path.join(this.root, '.meta');
+
+    // Prefer persisted metadata (has trace links + taskId); fall back to
+    // walking files for artifacts without metadata.
+    let metaFiles: string[] = [];
+    try {
+      metaFiles = await fs.readdir(metaDir);
+    } catch {
+      metaFiles = [];
+    }
+    const fromMeta: Artifact[] = [];
+    for (const f of metaFiles) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const raw = await fs.readFile(path.join(metaDir, f), 'utf8');
+        fromMeta.push(JSON.parse(raw) as Artifact);
+      } catch {
+        // skip corrupt metadata
+      }
+    }
+
     const walk = async (dir: string): Promise<Artifact[]> => {
       const out: Artifact[] = [];
       let entries;
@@ -85,7 +118,10 @@ export class ArtifactStore {
       }
       return out;
     };
-    const all = await walk(this.root);
+    const all = [...fromMeta];
+    if (fromMeta.length === 0) {
+      all.push(...(await walk(this.root)));
+    }
     return kind ? all.filter((a) => a.kind === kind) : all;
   }
 }

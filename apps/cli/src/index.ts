@@ -54,6 +54,7 @@ async function main(argv: string[]): Promise<number> {
       const positional: string[] = [];
       let runtimeId = 'fake';
       let workflow: string | undefined;
+      let verbose = false;
 
       for (let i = 0; i < rest.length; i++) {
         const arg = rest[i] ?? '';
@@ -61,6 +62,8 @@ async function main(argv: string[]): Promise<number> {
           runtimeId = rest[++i] ?? 'fake';
         } else if (arg === '--workflow') {
           workflow = rest[++i];
+        } else if (arg === '--verbose' || arg === '-v') {
+          verbose = true;
         } else if (arg.startsWith('--runtime=')) {
           runtimeId = arg.slice('--runtime='.length);
         } else if (arg.startsWith('--workflow=')) {
@@ -89,7 +92,7 @@ async function main(argv: string[]): Promise<number> {
       console.log(`  prompt: ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`);
       console.log('');
 
-      const { events, summary, traceabilityMatrix } = await runTask({ cwd, prompt, runtimeId, workflow, config });
+      const { events, summary, traceabilityMatrix, artifacts } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose });
 
       for (const ev of events) console.log(`  ${ev}`);
       console.log('');
@@ -101,10 +104,15 @@ async function main(argv: string[]): Promise<number> {
         console.log(traceabilityMatrix);
       }
 
-      // Traceability report for artifacts (Phase 5 builds the real matrix).
+      // Artifacts produced during this run.
       console.log('');
-      console.log('Artifacts:');
-      console.log('  (none produced in this run)');
+      if (artifacts.length > 0) {
+        console.log('Artifacts:');
+        for (const a of artifacts) console.log(`  • ${a}`);
+      } else {
+        console.log('Artifacts:');
+        console.log('  (none produced in this run)');
+      }
       return 0;
     }
 

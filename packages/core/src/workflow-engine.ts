@@ -172,6 +172,25 @@ export async function executeWorkflow(
             artifacts: res.artifacts.map((a) => a.path),
             tests: res.tests,
           };
+          // Persist the step's output as an artifact (kind from skill or step id),
+          // carrying trace links so Requirement → Design → Test → Evidence
+          // traceability can be rendered.
+          if (stepOutcome.status === 'completed' && res.summary && res.summary !== 'processed: undefined') {
+            const kind = step.skill ? step.skill.replace(/^jp-/, '') : stepId.split('_')[0] ?? 'output';
+            try {
+              const art = await ctx.artifacts.write({
+                taskId: task.id,
+                kind: kind === 'code-review' ? 'review' : kind,
+                fileName: `${stepId}.md`,
+                content: `# ${stepId}\n\n${res.summary}\n`,
+                contentType: 'text/markdown',
+                trace: task.trace ?? [],
+              });
+              stepOutcome.artifacts = [...stepOutcome.artifacts, art.path];
+            } catch (e) {
+              ctx.onEvent?.(stepId, `artifact persist failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
         } catch (e) {
           lastError = e instanceof Error ? e.message : String(e);
           ctx.onEvent?.(stepId, `attempt ${attempt} error: ${lastError}`);
