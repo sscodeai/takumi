@@ -32,5 +32,7 @@ export { discoverExtensions } from './extensions.js';
 
 export type { WorkflowDefinition, WorkflowRun, WorkflowStep, StepType } from './workflow.js';
 export { topoSort } from './workflow.js';
+export { executeWorkflow, renderPrompt } from './workflow-engine.js';
+export type { WorkflowExecutionContext, WorkflowRunResult, WorkflowStepResult } from './workflow-engine.js';
 
 export { ArtifactStore } from './artifact-store.js';

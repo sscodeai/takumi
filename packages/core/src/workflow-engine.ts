@@ -1,0 +1,207 @@
+import {
+  AgentRuntimeAdapter,
+  AgentTask,
+  ApprovalRequest,
+  ArtifactStore,
+  TestResultDetail,
+  WorkflowDefinition,
+  WorkflowRun,
+  WorkflowStep,
+  runTaskAndCollect,
+  topoSort,
+  validateCapabilities,
+} from './index.js';
+import { randomUUID } from 'node:crypto';
+
+export interface WorkflowExecutionContext {
+  /** Project working directory (steps run here). */
+  cwd: string;
+  /** Runtime used for agent steps. */
+  runtime: AgentRuntimeAdapter;
+  /** Artifact store for persisting step outputs. */
+  artifacts: ArtifactStore;
+  /**
+   * Approval callback. Return true to continue, false to abort the run.
+   * CLI implementation prompts [a] approve / [r] reject / [v] view.
+   */
+  onApproval?: (req: ApprovalRequest) => Promise<boolean> | boolean;
+  /** Optional event observer (progress reporting). */
+  onEvent?: (stepId: string, message: string) => void;
+  /** Max attempts per agent step before failing (default 1). */
+  defaultMaxAttempts?: number;
+}
+
+export interface WorkflowStepResult {
+  stepId: string;
+  status: 'completed' | 'failed' | 'skipped';
+  summary: string;
+  artifacts: string[];
+  tests: TestResultDetail[];
+}
+
+export interface WorkflowRunResult {
+  run: WorkflowRun;
+  steps: WorkflowStepResult[];
+  status: 'completed' | 'failed' | 'cancelled';
+}
+
+const RUNNING = new Set<string>();
+
+/** Render a step prompt by resolving {placeholders} from the run context. */
+export function renderPrompt(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{(\w+)\}/g, (m, key: string) => vars[key] ?? m);
+}
+
+/**
+ * Execute a declarative workflow. Steps run in topological order; approval
+ * steps pause for the onApproval callback. Agent steps are retried per
+ * `retry.maxAttempts`. Returns step-by-step results.
+ */
+export async function executeWorkflow(
+  workflow: WorkflowDefinition,
+  ctx: WorkflowExecutionContext,
+  inputVars: Record<string, string> = {},
+): Promise<WorkflowRunResult> {
+  // Capability validation before anything runs (invariant: validate before execute)
+  const required = [...(workflow.requires ?? []), ...workflow.steps.flatMap((s) => s.requires ?? [])];
+  const capCheck = validateCapabilities(ctx.runtime, required as string[]);
+  if (!capCheck.ok) {
+    const missing = (capCheck as { ok: false; missing: string[] }).missing;
+    throw new Error(
+      `workflow "${workflow.name}" requires capabilities [${missing.join(', ')}] not provided by runtime "${ctx.runtime.metadata().id}"`,
+    );
+  }
+
+  const order = topoSort(workflow.steps);
+  const runId = `wf-${randomUUID().slice(0, 8)}`;
+  const run: WorkflowRun = {
+    id: runId,
+    workflow,
+    runtimeId: ctx.runtime.metadata().id,
+    stepStatus: Object.fromEntries(order.map((id) => [id, 'pending'] as const)),
+    stepResults: {},
+    order,
+    status: 'pending',
+    startedAt: Date.now(),
+  };
+  const stepResults: WorkflowStepResult[] = [];
+  const vars: Record<string, string> = { ...inputVars };
+
+  const byId = new Map(workflow.steps.map((s) => [s.id, s]));
+  const done = new Set<string>();
+  const failedIds = new Set<string>();
+
+  try {
+    for (const stepId of order) {
+      const step = byId.get(stepId);
+      if (!step) {
+        run.stepStatus[stepId] = 'failed';
+        throw new Error(`workflow step ${stepId} not found in definition`);
+      }
+
+      // Skip a step whose dependencies failed.
+      const deps = step.dependsOn ?? [];
+      if (deps.some((d) => failedIds.has(d))) {
+        run.stepStatus[stepId] = 'skipped';
+        stepResults.push({ stepId, status: 'skipped', summary: 'skipped (dependency failed)', artifacts: [], tests: [] });
+        continue;
+      }
+
+      if (step.type === 'approval') {
+        run.stepStatus[stepId] = 'running';
+        ctx.onEvent?.(stepId, 'approval required');
+        const req: ApprovalRequest = {
+          id: `${runId}:${stepId}`,
+          workflowRunId: runId,
+          taskId: '',
+          stepId,
+          prompt: step.prompt ?? `Do you approve step "${stepId}"?`,
+          options: ['approve', 'reject', 'view'],
+          createdAt: Date.now(),
+        };
+        const approved = await (ctx.onApproval ? ctx.onApproval(req) : true);
+        if (!approved) {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'cancelled';
+          stepResults.push({ stepId, status: 'failed', summary: 'rejected by approver', artifacts: [], tests: [] });
+          return { run, steps: stepResults, status: 'cancelled' };
+        }
+        run.stepStatus[stepId] = 'completed';
+        stepResults.push({ stepId, status: 'completed', summary: 'approved', artifacts: [], tests: [] });
+        done.add(stepId);
+        continue;
+      }
+
+      // agent / tool step
+      const maxAttempts = step.retry?.maxAttempts ?? ctx.defaultMaxAttempts ?? 1;
+      run.stepStatus[stepId] = 'running';
+      let stepOutcome: WorkflowStepResult | undefined;
+      let lastError = '';
+      let attempt = 0;
+
+      while (attempt < maxAttempts && !stepOutcome) {
+        attempt++;
+        ctx.onEvent?.(stepId, `attempt ${attempt}/${maxAttempts}`);
+        const task: AgentTask = {
+          id: `${runId}:${stepId}:${attempt}`,
+          prompt: renderPrompt(step.prompt ?? `Execute workflow step "${stepId}"`, vars),
+          cwd: ctx.cwd,
+          trace: [],
+          context: { workflowStep: stepId, workflow: workflow.name, ...vars },
+        };
+        try {
+          const res = await runTaskAndCollect(ctx.runtime, task);
+          if (res.status === 'failed') {
+            lastError = res.error ?? res.summary;
+            ctx.onEvent?.(stepId, `attempt ${attempt} failed: ${lastError}`);
+            if (attempt >= maxAttempts) {
+              run.stepStatus[stepId] = 'failed';
+              failedIds.add(stepId);
+              stepOutcome = { stepId, status: 'failed', summary: lastError, artifacts: [], tests: res.tests };
+              break;
+            }
+            // backoff before retry
+            const backoff = step.retry?.backoffSeconds ?? 1;
+            await new Promise((r) => setTimeout(r, backoff * 1000 * attempt));
+            continue;
+          }
+          stepOutcome = {
+            stepId,
+            status: 'completed',
+            summary: res.summary,
+            artifacts: res.artifacts.map((a) => a.path),
+            tests: res.tests,
+          };
+        } catch (e) {
+          lastError = e instanceof Error ? e.message : String(e);
+          ctx.onEvent?.(stepId, `attempt ${attempt} error: ${lastError}`);
+          if (attempt >= maxAttempts) {
+            run.stepStatus[stepId] = 'failed';
+            failedIds.add(stepId);
+            stepOutcome = { stepId, status: 'failed', summary: lastError, artifacts: [], tests: [] };
+          }
+        }
+      }
+
+      if (stepOutcome) {
+        run.stepStatus[stepId] = stepOutcome.status === 'completed' ? 'completed' : 'failed';
+        run.stepResults[stepId] = stepOutcome.summary;
+        stepResults.push(stepOutcome);
+        if (stepOutcome.status === 'completed') done.add(stepId);
+        // Expose step summary to later steps via {step.<id>} var.
+        vars[`step.${stepId}`] = stepOutcome.summary;
+      }
+    }
+
+    run.status = failedIds.size > 0 ? 'failed' : 'completed';
+    run.finishedAt = Date.now();
+    return { run, steps: stepResults, status: run.status };
+  } catch (e) {
+    run.status = 'failed';
+    run.finishedAt = Date.now();
+    if (e instanceof Error) {
+      stepResults.push({ stepId: 'workflow', status: 'failed', summary: e.message, artifacts: [], tests: [] });
+    }
+    throw e;
+  }
+}

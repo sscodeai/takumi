@@ -37,6 +37,9 @@ importers:
         specifier: ^2.9.0
         version: 2.9.0
     devDependencies:
+      '@takumi/runtime-fake':
+        specifier: workspace:*
+        version: link:../../runtimes/fake
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1

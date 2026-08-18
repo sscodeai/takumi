@@ -1,8 +1,13 @@
 import { parse } from 'yaml';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { discoverExtensions } from '@takumi/core';
-import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect, WorkflowDefinition, ArtifactStore } from '@takumi/core';
+import {
+  ArtifactStore,
+  discoverExtensions,
+  executeWorkflow,
+  WorkflowDefinition,
+} from '@takumi/core';
+import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
 
 export interface ProjectConfig {
@@ -38,6 +43,25 @@ export function resolveRuntime(id: string): AgentRuntimeAdapter {
   }
 }
 
+/** Load a workflow extension from the project's workflows registry dir by name. */
+export async function loadWorkflow(cwd: string, config: ProjectConfig, name: string): Promise<WorkflowDefinition> {
+  const dir = join(cwd, config.registry.workflows, name);
+  const manifest = existsSync(join(dir, 'workflow.yaml'))
+    ? join(dir, 'workflow.yaml')
+    : existsSync(join(dir, 'workflow.json'))
+      ? join(dir, 'workflow.json')
+      : null;
+  if (!manifest) {
+    throw new Error(`workflow "${name}" not found in ${dir} (need workflow.yaml or workflow.json)`);
+  }
+  const raw = readFileSync(manifest, 'utf8');
+  const def = (manifest.endsWith('.json') ? JSON.parse(raw) : parse(raw)) as WorkflowDefinition;
+  if (!def.name || !def.steps) {
+    throw new Error(`invalid workflow manifest at ${manifest}: missing name or steps`);
+  }
+  return def;
+}
+
 export interface RunOptions {
   cwd: string;
   prompt: string;
@@ -54,6 +78,32 @@ export async function runTask(opts: RunOptions): Promise<{
   const runtime = resolveRuntime(opts.runtimeId);
   const store = new ArtifactStore(join(opts.cwd, opts.config.artifacts));
   const events: string[] = [];
+
+  if (opts.workflow) {
+    const wf = await loadWorkflow(opts.cwd, opts.config, opts.workflow);
+    const result = await executeWorkflow(
+      wf,
+      {
+        cwd: opts.cwd,
+        runtime,
+        artifacts: store,
+        onApproval: () => {
+          events.push('approval: auto-approved');
+          return true;
+        },
+        onEvent: (stepId, message) => events.push(`workflow[${stepId}]: ${message}`),
+      },
+      { input: opts.prompt },
+    );
+    for (const s of result.steps) {
+      events.push(`step ${s.stepId}: ${s.status} — ${s.summary}`);
+    }
+    return {
+      events,
+      summary: `workflow "${opts.workflow}" ${result.status}`,
+      artifacts: result.steps.flatMap((s) => s.artifacts),
+    };
+  }
 
   // A minimal workflow (or the plain run path) — Phase 4 will formalize this.
   const task: AgentTask = {

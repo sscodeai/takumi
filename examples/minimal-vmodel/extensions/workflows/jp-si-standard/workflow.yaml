@@ -1,0 +1,39 @@
+name: jp-si-standard
+version: 0.1.0
+description: Japanese SI standard V-model flow (minimal closed loop)
+runtime: fake
+requires:
+  - filesystem
+  - shell
+steps:
+  - id: requirements
+    type: agent
+    skill: jp-requirements
+    prompt: |
+      分析以下需求，输出标准化 Requirement 清单：
+      {input}
+  - id: basic_design
+    type: agent
+    skill: jp-basic-design
+    prompt: |
+      基于 Requirements 生成日本风格基本設計書（概述/架构/画面/API/DB/权限/校验/异常处理）。
+    dependsOn: [requirements]
+  - id: design_approval
+    type: approval
+    prompt: 基本設計書已完成，是否批准进入实现阶段？
+    dependsOn: [basic_design]
+  - id: implementation
+    type: agent
+    skill: jp-code-review
+    prompt: 基于基本設計書实现代码。
+    dependsOn: [design_approval]
+  - id: unit_test
+    type: agent
+    skill: jp-unit-test
+    prompt: 为实现的代码生成并执行单元测试。
+    dependsOn: [implementation]
+  - id: evidence
+    type: agent
+    skill: jp-evidence
+    prompt: 收集测试日志与构建结果，生成 Evidence 汇总。
+    dependsOn: [unit_test]
