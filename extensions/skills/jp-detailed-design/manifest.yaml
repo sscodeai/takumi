@@ -1,0 +1,8 @@
+name: jp-detailed-design
+kind: skill
+version: 0.1.0
+description: 日本SIの詳細設計書（画面仕様・API仕様・DBスキーマ・クラス設計・テスト仕様）作成スキル
+prompts:
+  generate: prompts/generate.md
+resources:
+- SKILL.md

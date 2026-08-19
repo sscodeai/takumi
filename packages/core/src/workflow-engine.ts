@@ -272,6 +272,132 @@ export async function executeWorkflow(
         continue;
       }
 
+      // Quality Gate step: enforce a test/quality threshold — a REAL gate.
+      // Its `prompt` is a command whose stdout is parsed for test results
+      // (# fail N / not ok / failure). Any failing test (or non-zero exit)
+      // FAILS the gate and ABORTS the workflow (no downstream step runs).
+      // This is the Japanese SI Quality Gate — not decorative.
+      if (step.type === 'quality_gate') {
+        run.stepStatus[stepId] = 'running';
+        const cmd = renderPrompt(step.prompt ?? 'npm test', vars);
+        ctx.onEvent?.(stepId, `quality gate run: ${cmd}`);
+        let out = '';
+        let exitOk = true;
+        try {
+          const r = await execAsync(cmd, { cwd: ctx.cwd, timeout: step.timeoutMs ?? 300000 });
+          out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+        } catch (e) {
+          exitOk = false;
+          const msg = e instanceof Error && 'stdout' in e ? `${(e as { stdout?: string }).stdout ?? ''}${(e as { stderr?: string }).stderr ?? ''}` : e instanceof Error ? e.message : String(e);
+          out = msg;
+        }
+        // Parse test outcome: fail count / "not ok" markers / explicit failure.
+        const allOut = out.toUpperCase();
+        const notOk = (out.match(/not ok/g) ?? []).length;
+        const failLine = out.match(/^#\s*fail\s*:?\s*(\d+)/m);
+        const fails = failLine ? parseInt(failLine[1] ?? '0', 10) : notOk;
+        const gatePassed = exitOk && fails === 0 && !/FAILED|FATAL/i.test(allOut);
+        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing, exit ${exitOk ? 0 : '!0'}\n${out.slice(0, 1200)}`;
+        if (gatePassed) {
+          run.stepStatus[stepId] = 'completed';
+          stepResults.push({ stepId, status: 'completed', summary, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `quality gate PASSED (${fails} failing)`);
+        } else {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `quality gate FAILED (${fails} failing) — workflow aborted`);
+        }
+        done.add(stepId);
+        continue;
+      }
+
+      // Independent Review step: a quality gate on top of review. Runs in an
+      // ISOLATED runtime context (separate cwd → separate Pi session) so the
+      // reviewer sees the code cold, untainted by the implementation session.
+      // Its prompt uses the independent_review skill; the review verdict is
+      // persisted as an artifact and the step fails if a critical finding exists.
+      if (step.type === 'independent_review') {
+        run.stepStatus[stepId] = 'running';
+        const fsx2 = await import('node:fs/promises');
+        const path2 = await import('node:path');
+        const reviewDir = path2.join(ctx.cwd, '.takumi', 'review');
+        await fsx2.mkdir(reviewDir, { recursive: true });
+        // The reviewer works in the isolated dir but must READ the implementation,
+        // so give it the real project path in the prompt context.
+        const reviewPrompt = renderPrompt(
+          step.prompt ?? `独立レビューを実施せよ。対象プロジェクト: ${ctx.cwd}。実装が設計・品質基準を満たすか判断し、重大な欠陥（Critical/High）があれば指摘せよ。`,
+          { ...vars, projectDir: ctx.cwd },
+        );
+        const reviewTask: AgentTask = {
+          id: `${runId}:${stepId}`,
+          prompt: reviewPrompt,
+          cwd: reviewDir, // isolated session context
+          trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
+          context: { workflowStep: stepId, workflow: workflow.name, independentReview: true },
+        };
+        const res2 = await runTaskAndCollect(ctx.runtime, reviewTask);
+        const hasCritical = /Critical|High|重大|must fix|要修正|ng|✗|不合格/i.test(res2.summary);
+        const kind = step.id.split('_')[0] ?? 'review';
+        const artifact = await ctx.artifacts.write({
+          taskId: reviewTask.id,
+          kind,
+          fileName: `${stepId}.md`,
+          content: res2.summary,
+          contentType: 'text/markdown',
+          trace: taskTraceFor(step, vars),
+        });
+        stepResults.push({
+          stepId,
+          status: hasCritical ? 'failed' : 'completed',
+          summary: hasCritical ? `independent review found critical findings:\n${res2.summary.slice(0, 1500)}` : `independent review passed:\n${res2.summary.slice(0, 800)}`,
+          artifacts: [artifact.path],
+          tests: [],
+        });
+        run.stepStatus[stepId] = hasCritical ? 'failed' : 'completed';
+        if (hasCritical) {
+          run.status = 'failed';
+          failedIds.add(stepId);
+          ctx.onEvent?.(stepId, `independent review FAILED (critical findings) — workflow aborted`);
+        } else {
+          ctx.onEvent?.(stepId, `independent review passed`);
+        }
+        done.add(stepId);
+        continue;
+      }
+
+      // Delivery step: package the run's artifacts into a delivery bundle.
+      // Produces a delivery manifest + a ZIP-able summary of all artifacts.
+      if (step.type === 'delivery') {
+        run.stepStatus[stepId] = 'running';
+        const fsx3 = await import('node:fs/promises');
+        const path3 = await import('node:path');
+        const all = await ctx.artifacts.list();
+        const lines = [
+          `# 納品物一覧 (Delivery Manifest)`,
+          `workflow: ${workflow.name}  |  run: ${runId}`,
+          `generated: ${new Date().toISOString()}`,
+          ``,
+          `## artifacts (${all.length})`,
+        ];
+        for (const a of all) lines.push(`- ${a.path}  (kind=${a.kind}, trace=[${(a.trace ?? []).join(', ')}])`);
+        const manifest = lines.join('\n');
+        const deliveryArtifact = await ctx.artifacts.write({
+          taskId: `${runId}:${stepId}`,
+          kind: 'delivery',
+          fileName: 'delivery-manifest.md',
+          content: manifest,
+          contentType: 'text/markdown',
+          trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
+        });
+        stepResults.push({ stepId, status: 'completed', summary: `delivery bundle ready (${all.length} artifacts)`, artifacts: [deliveryArtifact.path], tests: [] });
+        run.stepStatus[stepId] = 'completed';
+        ctx.onEvent?.(stepId, `delivery manifest written (${all.length} artifacts)`);
+        done.add(stepId);
+        continue;
+      }
+
       // agent / tool step
       const maxAttempts = step.retry?.maxAttempts ?? ctx.defaultMaxAttempts ?? 1;
       run.stepStatus[stepId] = 'running';

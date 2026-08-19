@@ -8,7 +8,7 @@ import type { RuntimeCapability } from './types.js';
  * honest scope note; see docs/acceptance-report.md Gate 10).
  */
 
-export type StepType = 'agent' | 'approval' | 'tool';
+export type StepType = 'agent' | 'approval' | 'tool' | 'quality_gate' | 'independent_review' | 'delivery';
 
 export interface WorkflowStep {
   id: string;

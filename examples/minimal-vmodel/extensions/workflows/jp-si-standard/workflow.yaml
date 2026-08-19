@@ -1,6 +1,6 @@
 name: jp-si-standard
-version: 0.1.0
-description: Japanese SI standard V-model flow (minimal closed loop)
+version: 0.2.0
+description: Japanese SI standard V-model flow (requirements → detailed design → approval → implementation → unit test → quality gate → independent review → evidence → delivery)
 runtime: fake
 requires:
   - filesystem
@@ -10,7 +10,7 @@ steps:
     type: agent
     skill: jp-requirements
     prompt: |
-      分析以下需求，输出标准化 Requirement 清单：
+      分析以下需求，输出标准化 Requirement 清单（REQ-001, REQ-002, ...）：
       {input}
   - id: basic_design
     type: agent
@@ -18,22 +18,46 @@ steps:
     prompt: |
       基于 Requirements 生成日本风格基本設計書（概述/架构/画面/API/DB/权限/校验/异常处理）。
     dependsOn: [requirements]
+  - id: detailed_design
+    type: agent
+    skill: jp-detailed-design
+    prompt: |
+      基于基本設計書生成詳細設計書：画面仕様・API仕様・DBスキーマ・クラス設計・単体テスト仕様・実装手順（実装者がそのままコーディングできる粒度）。
+    dependsOn: [basic_design]
   - id: design_approval
     type: approval
-    prompt: 基本設計書已完成，是否批准进入实现阶段？
-    dependsOn: [basic_design]
+    prompt: 基本設計書・詳細設計書が完成しました。実装フェーズに進むことを承認しますか？
+    dependsOn: [detailed_design]
   - id: implementation
     type: agent
     skill: jp-code-review
-    prompt: 基于基本設計書实现代码。
+    prompt: 基于詳細設計書实现代码（実装者が設計書に従ってコーディング）。
     dependsOn: [design_approval]
   - id: unit_test
     type: agent
     skill: jp-unit-test
-    prompt: 为实现的代码生成并执行单元测试。
+    prompt: 为实现的代码生成并执行单元测试（正常系/異常系/境界値）。
     dependsOn: [implementation]
+  - id: quality_gate
+    type: quality_gate
+    prompt: "node --test 2>&1 | tee /tmp/takumi-qg.log; grep -qE '^# fail\\s+0' /tmp/takumi-qg.log && echo 'GATE_OK' || echo 'has failures'"
+    dependsOn: [unit_test]
+    timeoutMs: 120000
+  - id: independent_review
+    type: independent_review
+    skill: jp-code-review
+    prompt: |
+      独立レビューを実施せよ。対象プロジェクト: {projectDir}。
+      実装が詳細設計書・品質基準を満たすか、テストが全てグリーンかを独立の視点で判断し、
+      重大な欠陥（Critical/High/セキュリティ）があれば指摘せよ。なければ合格とする。
+    dependsOn: [quality_gate]
   - id: evidence
     type: agent
     skill: jp-evidence
-    prompt: 收集测试日志与构建结果，生成 Evidence 汇总。
-    dependsOn: [unit_test]
+    prompt: |
+      收集测试日志・品質ゲート結果・レビュー結果・ビルド結果を集約し、エビデンス一覧（EVIDENCE-xxx）を生成する。
+    dependsOn: [independent_review]
+  - id: delivery
+    type: delivery
+    prompt: 纳品物をまとめる（delivery manifest 生成）。
+    dependsOn: [evidence]
