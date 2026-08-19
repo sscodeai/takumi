@@ -1,4 +1,5 @@
 import {
+  AgentResult,
   AgentRuntimeAdapter,
   AgentTask,
   ApprovalRequest,
@@ -40,7 +41,7 @@ export interface WorkflowExecutionContext {
 
 export interface WorkflowStepResult {
   stepId: string;
-  status: 'completed' | 'failed' | 'skipped';
+  status: 'completed' | 'failed' | 'skipped' | 'cancelled';
   summary: string;
   artifacts: string[];
   tests: TestResultDetail[];
@@ -115,10 +116,45 @@ export async function resolveStepPrompt(
 }
 
 /**
- * Execute a declarative workflow. Steps run in topological order; approval
- * steps pause for the onApproval callback. Agent steps are retried per
- * `retry.maxAttempts`. Returns step-by-step results.
+ * Run a task with a hard timeout (High fix: no hung runtime can hang the
+ * workflow forever). On timeout, cancel the runtime (subprocess/session abort)
+ * and resolve a FAILED result with a clear message — never leave the caller
+ * suspended and never silently re-run the task.
  */
+async function runStepWithTimeout(
+  runtime: AgentRuntimeAdapter,
+  task: AgentTask,
+  timeoutMs: number | undefined,
+): Promise<AgentResult> {
+  if (!timeoutMs) {
+    return runTaskAndCollect(runtime, task);
+  }
+  const runPromise = runTaskAndCollect(runtime, task);
+  const timeoutResult: AgentResult = {
+    taskId: task.id,
+    status: 'failed',
+    summary: `step timed out after ${timeoutMs}ms`,
+    changedFiles: [],
+    tests: [],
+    usage: { runtimeId: '', model: null, promptTokens: 0, completionTokens: 0, totalTokens: 0, costUsd: 0, durationMs: timeoutMs },
+    artifacts: [],
+    trace: [],
+    error: `timeout after ${timeoutMs}ms`,
+  };
+  const timer = new Promise<AgentResult>((resolve) => {
+    setTimeout(() => {
+      // Best-effort cancel; the in-flight run settles in the background. We
+      // resolve FAILED immediately — never hang the workflow on a stuck runtime.
+      void runtime.cancel(task.id);
+      resolve(timeoutResult);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([runPromise, timer]);
+  } finally {
+    // no-op; timer already resolved
+  }
+}
 export async function executeWorkflow(
   workflow: WorkflowDefinition,
   ctx: WorkflowExecutionContext,
@@ -214,7 +250,18 @@ export async function executeWorkflow(
           context: { workflowStep: stepId, workflow: workflow.name, ...vars },
         };
         try {
-          const res = await runTaskAndCollect(ctx.runtime, task);
+          const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
+          // A cancelled task (user abort / hard timeout cancel) should NOT be
+          // retried as a failure, and remaining work should stop: cancellation
+          // is an explicit control signal, not a transient error (High fix).
+          if (res.status === 'cancelled') {
+            run.stepStatus[stepId] = 'cancelled';
+            run.status = 'cancelled';
+            lastError = res.error ?? 'cancelled';
+            ctx.onEvent?.(stepId, `cancelled: ${lastError}`);
+            stepOutcome = { stepId, status: 'cancelled', summary: lastError, artifacts: [], tests: res.tests };
+            break;
+          }
           if (res.status === 'failed') {
             lastError = res.error ?? res.summary;
             ctx.onEvent?.(stepId, `attempt ${attempt} failed: ${lastError}`);

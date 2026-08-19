@@ -52,7 +52,7 @@ export interface WorkflowRun {
   workflow: WorkflowDefinition;
   runtimeId: string;
   /** stepId → status */
-  stepStatus: Record<string, 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'waiting_approval'>;
+  stepStatus: Record<string, 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'waiting_approval' | 'cancelled'>;
   /** stepId → result summary */
   stepResults: Record<string, string>;
   /** Which steps ran in which order. */

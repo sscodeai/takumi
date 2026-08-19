@@ -79,6 +79,7 @@ export type AgentEventType =
   | 'test.completed'
   | 'artifact.created'
   | 'approval.required'
+  | 'task.cancelled'
   | 'task.failed'
   | 'task.completed';
 

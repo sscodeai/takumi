@@ -142,7 +142,12 @@ export class CliRuntimeAdapter implements AgentRuntimeAdapter {
     const fullOut = out.join('');
     const aborted = this.children.get(id)?.aborted ?? false;
 
-    if (exit !== 0 || aborted) {
+    if (aborted) {
+      // Cancellation must NOT surface as a failure (High fix: cancelled stays
+      // cancelled; runTaskAndCollect maps task.cancelled → status cancelled).
+      this.statuses.set(id, 'cancelled');
+      streamed.push(emit('task.cancelled', { message: 'subprocess cancelled' }));
+    } else if (exit !== 0) {
       const msg = err.join('') || fullOut.trim() || `command exited ${exit}`;
       this.statuses.set(id, 'failed');
       streamed.push(emit('task.failed', { message: msg.slice(0, 2000) }));

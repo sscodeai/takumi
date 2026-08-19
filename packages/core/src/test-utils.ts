@@ -22,6 +22,7 @@ import type {
 export class TestRuntime implements AgentRuntimeAdapter {
   private readonly statuses = new Map<TaskId, TaskStatus>();
   private readonly usages = new Map<TaskId, Usage>();
+  private readonly cancelled = new Set<TaskId>();
   constructor(
     private readonly onResult: (task: AgentTask) => string | void = () => 'ok',
     private readonly caps: RuntimeCapabilities = { capabilities: ['streaming'], maxParallelTasks: 4 },
@@ -44,6 +45,12 @@ export class TestRuntime implements AgentRuntimeAdapter {
       timestamp: Date.now(),
     };
     yield started;
+
+    if (this.cancelled.has(task.id)) {
+      this.statuses.set(task.id, 'cancelled');
+      yield { id: `${task.id}-cancelled`, taskId: task.id, type: 'task.cancelled', timestamp: Date.now(), message: 'cancelled' };
+      return;
+    }
 
     try {
       const summary = this.onResult(task) ?? 'ok';
@@ -94,7 +101,8 @@ export class TestRuntime implements AgentRuntimeAdapter {
     return [];
   }
 
-  async cancel(_taskId: TaskId): Promise<void> {
-    // no-op for the deterministic stub
+  async cancel(taskId: TaskId): Promise<void> {
+    this.cancelled.add(taskId);
+    this.statuses.set(taskId, 'cancelled');
   }
 }

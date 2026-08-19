@@ -53,6 +53,7 @@ export function runTaskAndCollect(
     try {
       let lastSummary = '';
       let failed = false;
+      let cancelled = false;
       let error: string | undefined;
       for await (const ev of runtime.run(task)) {
         onEvent?.(ev);
@@ -60,7 +61,26 @@ export function runTaskAndCollect(
           failed = true;
           error = ev.message;
         }
-        if (ev.message && ev.type !== 'task.failed') lastSummary = ev.message;
+        if (ev.type === 'task.cancelled') {
+          cancelled = true;
+          error = ev.message ?? 'task cancelled';
+        }
+        if (ev.message && ev.type !== 'task.failed' && ev.type !== 'task.cancelled') lastSummary = ev.message;
+      }
+      if (cancelled) {
+        const usage = await runtime.getUsage(task.id).catch(() => null);
+        resolve({
+          taskId: task.id,
+          status: 'cancelled',
+          summary: error ?? 'task cancelled',
+          changedFiles: [],
+          tests: [],
+          usage: usage ?? { runtimeId: '', model: null, promptTokens: 0, completionTokens: 0, totalTokens: 0, costUsd: 0, durationMs: 0 },
+          artifacts: await runtime.getArtifacts(task.id).catch(() => [] as Artifact[]),
+          trace: [],
+          error,
+        });
+        return;
       }
       if (failed) {
         resolve({

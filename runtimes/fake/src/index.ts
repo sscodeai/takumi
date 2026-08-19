@@ -61,7 +61,7 @@ export class FakeRuntime implements AgentRuntimeAdapter {
 
     if (this.cancelled.has(id)) {
       this.statuses.set(id, 'cancelled');
-      yield emit({ type: 'task.failed', message: 'cancelled before start' });
+      yield emit({ type: 'task.cancelled', message: 'cancelled before start' });
       return;
     }
 
@@ -78,7 +78,7 @@ export class FakeRuntime implements AgentRuntimeAdapter {
 
     if (this.cancelled.has(id)) {
       this.statuses.set(id, 'cancelled');
-      yield emit({ type: 'task.failed', message: 'cancelled' });
+      yield emit({ type: 'task.cancelled', message: 'cancelled' });
       this.artifacts.set(id, []);
       return;
     }
