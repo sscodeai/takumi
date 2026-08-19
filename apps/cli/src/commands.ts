@@ -100,17 +100,23 @@ export async function resolveRuntime(id: string): Promise<AgentRuntimeAdapter> {
   }
   if (id === 'pi') {
     try {
-      // Dynamic import of the opt-in pi-runtime package. Using an indirect
-      // specifier keeps this from being statically resolved at build time so
-      // the CLI builds without the Pi SDK installed (BLOCKED_BY_EXTERNAL_DEP).
-      const mod = `@takumi/runtime-${'pi'}`;
+      // Opt-in Pi runtime. Resolution order:
+      //  1) explicit path via TAKUMI_PI_RUNTIME (skip module resolution)
+      //  2) '@takumi/runtime-pi' from the project's node_modules
+      // The pi package depends on the unpublished @earendil-works SDK, so it
+      // is NOT a workspace member; it must be installed per-project (or its
+      // built output pointed at directly) on a machine that has the SDK.
+      const explicit = process.env.TAKUMI_PI_RUNTIME;
+      const mod = explicit ?? '@takumi/runtime-pi';
       const m = (await import(mod)) as { PiRuntimeAdapter: new () => AgentRuntimeAdapter };
       return new m.PiRuntimeAdapter();
     } catch {
       throw new Error(
-        `runtime "pi" is not installed on this machine (BLOCKED_BY_EXTERNAL_DEPENDENCY). ` +
+        `runtime "pi" is not available (BLOCKED_BY_EXTERNAL_DEPENDENCY). ` +
           `It requires the unpublished @earendil-works/pi-coding-agent SDK. ` +
-          `Set it up with: cd runtimes/pi && pnpm install && pnpm build, then build this CLI.`,
+          `Set up the pi package (cd runtimes/pi && pnpm install && pnpm build) then either ` +
+          `install it into this project (npm i @takumi/runtime-pi) or point TAKUMI_PI_RUNTIME at its dist: ` +
+          `TAKUMI_PI_RUNTIME=/abs/path/to/runtimes/pi/dist/index.js`,
       );
     }
   }

@@ -1,47 +1,34 @@
-# Contributing to Takumi
+# Contributing
 
-Thanks for your interest! Takumi is an open-source Agentic Software Engineering Platform. Contributions of all kinds are welcome: code, docs, Japanese SI skills, benchmark tasks, bug reports.
+Thanks for your interest in Takumi. This project is in **Developer Preview**
+and follows a lightweight contribution loop.
 
-## Development setup
+## How to contribute
 
-```bash
-git clone <your-fork> && cd takumi
-pnpm install
-pnpm build        # sequential build (core → runtimes → cli)
-pnpm test         # run all package tests
-```
+1. **Open an issue / discuss first** for non-trivial changes (architecture,
+   API, behavior changes).
+2. **Single-focus commits**: one logical change per commit, typed as
+   `feat:` / `fix:` / `refactor:` / `test:` / `docs:` / `chore:`, with a body
+   explaining **why**.
+3. **Tests with code**: any behavior change ships with or updates its tests.
+   Full suite must stay green (`pnpm test`, all packages).
+4. **Honesty (Gate 22)**: do not add unverified "Enterprise / Production
+   Ready / Secure / HA / Scalable" claims to README or docs. Mark things
+   `Planned` / `Experimental` unless genuinely done.
 
-## Repository layout
+## Architecture invariants (please preserve)
 
-- `packages/core/` — orchestration primitives, runtime abstraction, workflow engine, artifact store, traceability. **No runtime-specific or Japanese-SI-specific code.**
-- `runtimes/` — runtime adapters implementing `AgentRuntimeAdapter` (fake, pi).
-- `extensions/` — first-party extensions (skills, tools, workflows).
-- `apps/cli/` — the `takumi` CLI.
+- **Core is harness-agnostic**: `packages/core` must not import any runtime
+  (Pi / DeepSeek / Codex) and must not branch on a runtime id. Runtimes live
+  under `runtimes/*`.
+- **Extensions are discovered, not hardcoded**: skills/tools/workflows/
+  runtimes are added by dropping a `manifest.yaml` into a registry dir — Core
+  is not edited.
+- **Real behavior over demo**: tests assert observable outcomes (statuses,
+  on-disk artifacts, event sequences, error strings), not implementation
+  details.
 
-## Architecture invariants (must hold in every PR)
+## Environment
 
-1. Core imports no Pi-specific package.
-2. Core imports no Japanese-SI-specific implementation.
-3. Runtime adapters stay harness-agnostic.
-4. Skills and Tools are independent of runtime implementations.
-5. Workflow definitions don't require a specific runtime unless explicitly configured.
-6. Artifact/traceability models don't depend on Japanese-specific artifact types.
-7. Runtime capabilities are validated before execution.
-8. Extension discovery never hardcodes extension names.
-
-## Adding a Japanese SI skill
-
-Create `extensions/skills/<name>/` with `SKILL.md`, `manifest.yaml`, and optional `prompts/`, `checklists/`, `schemas/`. See existing skills for the format.
-
-## Testing
-
-Every Core feature must have tests (runtime adapter contract tests, workflow execution tests, plugin discovery tests, capability validation tests, artifact tests, traceability tests). Run `pnpm test`.
-
-## Commit conventions
-
-- Logical slices: `feat:`, `fix:`, `docs:`, `test:`, `chore:`
-- Reference ADRs when changing architecture: `docs/adr/`
-
-## Questions
-
-Open an issue or discussion. For architecture decisions, prefer adding an ADR over chat-only decisions.
+- Node ≥ 20, pnpm. `pnpm install` + `pnpm build` + `pnpm test`.
+- The Pi runtime is opt-in (depends on an unpublished SDK); see README.
