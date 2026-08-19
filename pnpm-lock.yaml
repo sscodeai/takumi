@@ -34,25 +34,6 @@ importers:
         specifier: ^5.6.0
         version: 5.9.3
 
-  benchmarks:
-    dependencies:
-      '@takumi/core':
-        specifier: workspace:*
-        version: link:../packages/core
-      '@takumi/runtime-fake':
-        specifier: workspace:*
-        version: link:../runtimes/fake
-      '@takumi/runtime-pi':
-        specifier: workspace:*
-        version: link:../runtimes/pi
-    devDependencies:
-      '@types/node':
-        specifier: ^22.20.1
-        version: 22.20.1
-      typescript:
-        specifier: ^5.6.0
-        version: 5.9.3
-
   packages/core:
     dependencies:
       yaml:
@@ -67,6 +48,19 @@ importers:
         version: 22.20.1
       typescript:
         specifier: ^5.6.0
+        version: 5.9.3
+
+  runtimes/cli:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.20.1
+        version: 22.20.1
+      typescript:
+        specifier: ^5.9.3
         version: 5.9.3
 
   runtimes/fake:
