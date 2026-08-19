@@ -38,3 +38,4 @@ export type { WorkflowExecutionContext, WorkflowRunResult, WorkflowStepResult } 
 export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
+export { runRuntimeContractSuite } from './contract.js';
