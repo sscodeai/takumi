@@ -4,12 +4,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ArtifactStore, executeWorkflow, WorkflowDefinition } from '../index.js';
-import { FakeRuntime } from '@takumi/runtime-fake';
-import { CliRuntimeAdapter } from '@takumi/runtime-cli';
+import { TestRuntime } from '../test-utils.js';
 
 // Acceptance Gate 24 — Runtime Replacement Test.
 // Proves Takumi is NOT a Pi wrapper: the SAME workflow definition runs on
 // multiple runtimes with ZERO changes to workflow / Core / skill.
+// Both "runtimes" are in-repo TestRuntime instances configured differently
+// (distinct handlers + ids) so Core's tests never import a real runtime pkg.
 const WORKFLOW: WorkflowDefinition = {
   name: 'replacement-test',
   version: '0.1.0',
@@ -28,17 +29,12 @@ function makeEnv() {
 test('Gate 24: same workflow runs on FakeRuntime AND a second CLI runtime (no workflow change)', async () => {
   const { dir, artifacts } = makeEnv();
 
-  // Runtime A: FakeRuntime (deterministic)
-  const runtimeA = new FakeRuntime((t) => `[A] handled ${t.prompt}`);
+  // Runtime A: in-repo TestRuntime (id 'runtime-a').
+  const runtimeA = new TestRuntime((t) => `[A] handled ${t.prompt}`, undefined, 'runtime-a');
 
-  // Runtime B: a second runtime via the CLI bridge (echo prints the prompt → stdout).
-  // This is a DIFFERENT runtime implementation; the workflow object is identical.
-  const runtimeB = new CliRuntimeAdapter({
-    id: 'echo-b',
-    name: 'Echo Runtime B',
-    command: 'echo',
-    args: ['BRIDGE_B'],
-  });
+  // Runtime B: a DIFFERENT runtime (id 'runtime-b', different handler). The
+  // workflow object is identical — proving runtime replacement, not a wrapper.
+  const runtimeB = new TestRuntime((t) => `[B] handled ${t.prompt}`, undefined, 'runtime-b');
 
   try {
     const resA = await executeWorkflow(WORKFLOW, {

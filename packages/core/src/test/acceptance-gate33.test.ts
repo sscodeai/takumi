@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ArtifactStore, executeWorkflow } from '../index.js';
-import { FakeRuntime } from '@takumi/runtime-fake';
+import { TestRuntime } from '../test-utils.js';
 
 // Acceptance Gate 33 — Non-Japanese Workflow (rapid-mvp).
 // Proves Takumi Core is a GENERAL platform: a workflow with NO Japanese-SI
@@ -25,7 +25,7 @@ const RAPID_MVP: import('../workflow.js').WorkflowDefinition = {
 test('Gate 33: rapid-mvp (non-Japanese) workflow runs to completion', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gate33-'));
   try {
-    const runtime = new FakeRuntime((t) => `mvp-done(${t.prompt})`);
+    const runtime = new TestRuntime((t) => `mvp-done(${t.prompt})`);
     const res = await executeWorkflow(
       RAPID_MVP,
       {

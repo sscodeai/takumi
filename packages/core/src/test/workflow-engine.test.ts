@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ArtifactStore, executeWorkflow, renderPrompt, WorkflowDefinition } from '../index.js';
-import { FakeRuntime } from '@takumi/runtime-fake';
+import { TestRuntime } from '../test-utils.js';
 
 function ctx(overrides: { approvals?: string[]; onApproval?: (stepId: string) => boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'takumi-wf-'));
@@ -13,7 +13,7 @@ function ctx(overrides: { approvals?: string[]; onApproval?: (stepId: string) =>
     dir,
     exec: {
       cwd: dir,
-      runtime: new FakeRuntime((task) => `done(${task.prompt})`),
+      runtime: new TestRuntime((task) => `done(${task.prompt})`),
       artifacts: new ArtifactStore(join(dir, 'artifacts')),
       onApproval: (req: { stepId: string }) => (overrides.onApproval ? overrides.onApproval(req.stepId) : approvalIds.includes(req.stepId)),
       onEvent: () => {},
@@ -90,7 +90,7 @@ test('workflow: retry policy retries failing agent step', async () => {
   const c = ctx();
   try {
     let calls = 0;
-    const flaky = new FakeRuntime(() => {
+    const flaky = new TestRuntime(() => {
       calls++;
       if (calls < 2) throw new Error('flaky failure');
       return 'stable';
@@ -131,7 +131,7 @@ test('workflow: capability validation fails before execution', async () => {
 test('workflow: failed dependency skips dependents', async () => {
   const c = ctx();
   try {
-    const failing = new FakeRuntime(() => {
+    const failing = new TestRuntime(() => {
       throw new Error('hard fail');
     });
     const wf: WorkflowDefinition = {

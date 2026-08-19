@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ArtifactStore, executeWorkflow, renderTraceabilityMatrix, runTaskAndCollect, validateCapabilities, WorkflowDefinition } from '../index.js';
-import { FakeRuntime } from '@takumi/runtime-fake';
+import { TestRuntime } from '../test-utils.js';
 
 // Consent acceptance gates that need a real (non-LLM) harness: Gate 4 (Fake),
 // Gate 11 (approval semantics), Gate 12 (artifact passing), Gate 16 (failure
@@ -21,7 +21,7 @@ test('Gate 4: FakeRuntime simulates start/events/artifact/failure/retry/cancel',
   try {
     // start → events → artifact
     const store = new ArtifactStore(join(dir, 'artifacts'));
-    const r = new FakeRuntime((t) => `done(${t.prompt})`);
+    const r = new TestRuntime((t) => `done(${t.prompt})`);
     const events: string[] = [];
     const res = await runTaskAndCollect(r, { id: 'g4', prompt: 'x', cwd: dir }, (ev) => events.push(ev.type));
     assert.equal(res.status, 'completed');
@@ -33,7 +33,7 @@ test('Gate 4: FakeRuntime simulates start/events/artifact/failure/retry/cancel',
     assert.equal((await store.list('evidence')).length, 1);
 
     // failure simulation
-    const flaky = new FakeRuntime(() => {
+    const flaky = new TestRuntime(() => {
       throw new Error('boom');
     });
     const failRes = await runTaskAndCollect(flaky, { id: 'g4f', prompt: 'x', cwd: dir });
@@ -68,7 +68,7 @@ test('Gate 11: reject halts workflow before dependent step (implementation not s
     };
     const res = await executeWorkflow(wf, {
       cwd: e.dir,
-      runtime: new FakeRuntime((t) => `[${t.prompt}]`),
+      runtime: new TestRuntime((t) => `[${t.prompt}]`),
       artifacts: e.artifacts,
       onApproval: () => false, // REJECT
     });
@@ -95,7 +95,7 @@ test('Gate 11: approve resumes workflow into dependent step', async () => {
     };
     const res = await executeWorkflow(wf, {
       cwd: e.dir,
-      runtime: new FakeRuntime((t) => `[${t.prompt}]`),
+      runtime: new TestRuntime((t) => `[${t.prompt}]`),
       artifacts: e.artifacts,
       onApproval: () => true, // APPROVE
     });
@@ -152,7 +152,7 @@ test('Gate 16: unsupported capability, missing runtime, invalid workflow all fai
       () =>
         executeWorkflow(badWf, {
           cwd: e.dir,
-          runtime: new FakeRuntime((t) => t.prompt),
+          runtime: new TestRuntime((t) => t.prompt),
           artifacts: e.artifacts,
           onApproval: () => true,
         }),

@@ -4,8 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ArtifactStore, executeWorkflow, WorkflowDefinition } from '../index.js';
-import { FakeRuntime } from '@takumi/runtime-fake';
-import { CliRuntimeAdapter } from '@takumi/runtime-cli';
+import { TestRuntime } from '../test-utils.js';
 
 // Acceptance Gate 6 — Runtime Capability Negotiation.
 // A workflow declaring `requires: [shell]` must be REJECTED BEFORE EXECUTION
@@ -25,17 +24,14 @@ function env() {
   return { dir, artifacts: new ArtifactStore(join(dir, 'artifacts')) };
 }
 
-// Runtime A: FakeRuntime supports shell.
-const runtimeSupportsShell = new FakeRuntime((t) => `[A] ${t.prompt}`);
-
-// Runtime B: CliRuntimeAdapter with capabilities restricted to streaming ONLY
-// (does NOT advertise shell) — this is the "does not support shell" runtime.
-const runtimeNoShell = new CliRuntimeAdapter({
-  id: 'no-shell',
-  name: 'No Shell Runtime',
-  command: 'echo',
-  capabilities: ['streaming'],
+// Runtime A: TestRuntime (in-repo Core stub) advertising shell capability.
+const runtimeSupportsShell = new TestRuntime((t) => `[A] ${t.prompt}`, {
+  capabilities: ['filesystem', 'shell', 'streaming'],
+  maxParallelTasks: 4,
 });
+
+// Runtime B: TestRuntime with default caps (streaming ONLY — no shell).
+const runtimeNoShell = new TestRuntime((t) => `[no-shell] ${t.prompt}`, undefined, 'no-shell');
 
 test('Gate 6: runtime with shell → workflow starts and completes', async () => {
   const { dir, artifacts } = env();
