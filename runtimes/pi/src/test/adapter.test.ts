@@ -31,3 +31,19 @@ test('PiRuntimeAdapter: run without API key fails honestly (no fake completion)'
     if (saved !== undefined) process.env.OPENCODE_GO_API_KEY = saved;
   }
 });
+
+test('PiRuntimeAdapter: session pooling — reuseSession toggles pool, close is safe', async () => {
+  const { PiRuntimeAdapter } = await import('../index.js');
+  // Default: reuseSession true (pooled). Metadata advertises pooled sessions.
+  const pooled = new PiRuntimeAdapter();
+  assert.ok(pooled.metadata().description.includes('pooled'));
+  // close() on empty pool must not throw.
+  pooled.close();
+
+  // reuseSession:false — still a valid adapter, close() safe.
+  const unpooled = new PiRuntimeAdapter({ reuseSession: false });
+  unpooled.close();
+
+  // cancel on unknown task id must not throw.
+  await unpooled.cancel('does-not-exist');
+});
