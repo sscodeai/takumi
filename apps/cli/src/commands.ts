@@ -16,10 +16,16 @@ import { PiRuntimeAdapter } from '@takumi/runtime-pi';
 /**
  * Interactive approval gate. Prompts the user with [a] approve / [r] reject /
  * [v] view. Auto-approves when stdin is not a TTY (pipelines, CI).
+ * `input` is injectable for tests (defaults to process.stdin).
  */
-export async function interactiveApprove(stepId: string, prompt: string): Promise<boolean> {
+export async function interactiveApprove(
+  stepId: string,
+  prompt: string,
+  input: NodeJS.ReadableStream = process.stdin,
+): Promise<boolean> {
+  const isTTY = (input as { isTTY?: boolean }).isTTY;
   // Non-interactive (pipe/CI): auto-approve, still record the decision.
-  if (!process.stdin.isTTY) {
+  if (!isTTY) {
     console.log(`  [auto] ${stepId} approved (non-interactive)`);
     return true;
   }
@@ -30,18 +36,18 @@ export async function interactiveApprove(stepId: string, prompt: string): Promis
   console.log('    [a] approve   [r] reject   [v] view prompt');
 
   return new Promise<boolean>((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const rl = createInterface({ input: input as NodeJS.ReadableStream, output: process.stdout });
     rl.setPrompt('    > ');
     rl.prompt();
     rl.on('line', (line) => {
-      const input = line.trim().toLowerCase();
-      if (input === 'a' || input === 'approve' || input === 'y' || input === 'yes') {
+      const inputStr = line.trim().toLowerCase();
+      if (inputStr === 'a' || inputStr === 'approve' || inputStr === 'y' || inputStr === 'yes') {
         rl.close();
         resolve(true);
-      } else if (input === 'r' || input === 'reject' || input === 'n' || input === 'no') {
+      } else if (inputStr === 'r' || inputStr === 'reject' || inputStr === 'n' || inputStr === 'no') {
         rl.close();
         resolve(false);
-      } else if (input === 'v' || input === 'view') {
+      } else if (inputStr === 'v' || inputStr === 'view') {
         console.log(`\n  --- prompt ---\n${prompt}\n  --- end ---`);
         rl.prompt();
       } else {
