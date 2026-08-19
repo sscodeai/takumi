@@ -13,6 +13,9 @@ import {
   validateCapabilities,
 } from './index.js';
 import { randomUUID } from 'node:crypto';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
+const execAsync = promisify(exec);
 
 export interface WorkflowExecutionContext {
   /** Project working directory (steps run here). */
@@ -75,6 +78,11 @@ export function stepArtifactKind(step: WorkflowStep, fallback: string): string {
 /** Render a step prompt by resolving {placeholders} from the run context. */
 export function renderPrompt(template: string, vars: Record<string, string>): string {
   return template.replace(/\{(\w+)\}/g, (m, key: string) => vars[key] ?? m);
+}
+
+/** Resolve trace ids carried in the run vars (REQ-001, DESIGN-001, ...). */
+function taskTraceFor(_step: WorkflowStep, vars: Record<string, string>): string[] {
+  return vars['trace.ids'] ? vars['trace.ids'].split(',') : [];
 }
 
 /**
@@ -226,6 +234,40 @@ export async function executeWorkflow(
         }
         run.stepStatus[stepId] = 'completed';
         stepResults.push({ stepId, status: 'completed', summary: 'approved', artifacts: [], tests: [] });
+        done.add(stepId);
+        continue;
+      }
+
+      // Tool step: run a real shell command in the project cwd (Gate 9).
+      // A tool step's `prompt` is the command to execute with {placeholders}
+      // resolved. Its stdout becomes the step summary and is persisted as an
+      // artifact — so Tool Plugins are real, not a TODO.
+      if (step.type === 'tool') {
+        run.stepStatus[stepId] = 'running';
+        const cmd = renderPrompt(step.prompt ?? '', vars);
+        try {
+          ctx.onEvent?.(stepId, `tool run: ${cmd}`);
+          const { stdout, stderr } = await execAsync(cmd, { cwd: ctx.cwd, timeout: step.timeoutMs ?? 120000 });
+          const out = (stdout?.trim() || stderr?.trim() || '(no output)').slice(0, 4000);
+          const kind = step.id.split('_')[0] ?? 'tool';
+          const artifact = await ctx.artifacts.write({
+            taskId: `${runId}:${stepId}`,
+            kind,
+            fileName: `${stepId}.output.txt`,
+            content: `$ ${cmd}\n${out}`,
+            contentType: 'text/plain',
+            trace: taskTraceFor(step, vars),
+          });
+          run.stepStatus[stepId] = 'completed';
+          stepResults.push({ stepId, status: 'completed', summary: out, artifacts: [artifact.path], tests: [] });
+          ctx.onEvent?.(stepId, `tool completed (${artifact.path})`);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          run.stepStatus[stepId] = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary: `tool failed: ${msg}`, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `tool failed: ${msg}`);
+        }
         done.add(stepId);
         continue;
       }
