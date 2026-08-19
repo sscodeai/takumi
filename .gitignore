@@ -4,4 +4,5 @@ dist/
 .DS_Store
 examples/minimal-vmodel/node_modules/
 examples/minimal-vmodel/dist/
-.takumi/
+examples/pigate5/
+examples/pigate5/.takumi/
