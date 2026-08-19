@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ArtifactStore, executeWorkflow, runTaskAndCollect, validateCapabilities, WorkflowDefinition } from '../index.js';
+import { ArtifactStore, executeWorkflow, renderTraceabilityMatrix, runTaskAndCollect, validateCapabilities, WorkflowDefinition } from '../index.js';
 import { FakeRuntime } from '@takumi/runtime-fake';
 
 // Consent acceptance gates that need a real (non-LLM) harness: Gate 4 (Fake),
@@ -158,6 +158,47 @@ test('Gate 16: unsupported capability, missing runtime, invalid workflow all fai
         }),
       /unknown step|ghost/,
     );
+  } finally {
+    rmSync(e.dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Gate 13 — Traceability: full REQ→DESIGN→CODE→UT→EVIDENCE chain ----
+test('Gate 13: full traceability chain answerable + matrix rendered', async () => {
+  const e = env();
+  try {
+    await e.artifacts.write({ taskId: 'r', kind: 'requirements', fileName: 'REQ-001.md', content: 'login', contentType: 'text/markdown', trace: ['REQ-001'] });
+    const design = await e.artifacts.write({ taskId: 'd', kind: 'design', fileName: 'DESIGN-001.md', content: 'design', contentType: 'text/markdown', trace: ['REQ-001', 'DESIGN-001'] });
+    const code = await e.artifacts.write({ taskId: 'c', kind: 'code', fileName: 'USER-ctrl.ts', content: 'class', contentType: 'text/plain', trace: ['REQ-001', 'DESIGN-001', 'CODE-CHANGE-001'] });
+    const ut = await e.artifacts.write({ taskId: 't', kind: 'test', fileName: 'UT-001.md', content: 'test', contentType: 'text/markdown', trace: ['REQ-001', 'CODE-CHANGE-001', 'UT-001'] });
+    await e.artifacts.write({ taskId: 'ev', kind: 'evidence', fileName: 'EVIDENCE-001.md', content: 'log', contentType: 'text/markdown', trace: ['UT-001', 'EVIDENCE-001'] });
+
+    // Answer: "REQ-001 由什么代码实现?" → code artifact traced to REQ-001
+    const all = await e.artifacts.list();
+    const reqImpl = all.filter((a) => a.kind === 'code' && a.trace.includes('REQ-001'));
+    assert.equal(reqImpl.length, 1);
+    assert.ok(reqImpl[0]?.path.includes('USER-ctrl'));
+
+    // "哪些测试验证了 REQ-001?" → test artifacts traced to REQ-001
+    const reqTests = all.filter((a) => a.kind === 'test' && a.trace.includes('REQ-001'));
+    assert.equal(reqTests.length, 1);
+    assert.ok(reqTests[0]?.path.includes('UT-001'));
+
+    // "Evidence 在哪?" → evidence artifact traced to UT-001
+    const evid = all.filter((a) => a.kind === 'evidence' && a.trace.includes('UT-001'));
+    assert.equal(evid.length, 1);
+    assert.ok(evid[0]?.path.includes('EVIDENCE-001'));
+
+    // Traceability Matrix renders without uncovered-REQ warning
+    const matrix = renderTraceabilityMatrix(all);
+    assert.ok(matrix.includes('REQ-001'));
+    assert.ok(matrix.includes('DESIGN-001'));
+    assert.ok(!matrix.includes('Uncovered requirements'));
+
+    // provenance for the chain is preserved
+    assert.deepEqual(design.trace, ['REQ-001', 'DESIGN-001']);
+    assert.deepEqual(code.trace, ['REQ-001', 'DESIGN-001', 'CODE-CHANGE-001']);
+    assert.deepEqual(ut.trace, ['REQ-001', 'CODE-CHANGE-001', 'UT-001']);
   } finally {
     rmSync(e.dir, { recursive: true, force: true });
   }
