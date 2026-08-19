@@ -2,7 +2,10 @@ import type { RuntimeCapability } from './types.js';
 
 /**
  * Workflow model (ADR-003): declarative YAML/JSON workflows.
- * Steps are sequential by default; `depends_on` forms a DAG for parallel steps.
+ * Steps run in TOPOLOGICAL order; `depends_on` expresses the DAG and the
+ * engine executes it in a deterministic serial order today (parallel step
+ * execution is declared in the model but NOT yet executed concurrently —
+ * honest scope note; see docs/acceptance-report.md Gate 10).
  */
 
 export type StepType = 'agent' | 'approval' | 'tool';

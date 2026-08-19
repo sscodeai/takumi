@@ -47,7 +47,7 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
     this.options.reuseSession ??= true;
   }
 
-  /** Drop all pooled sessions (free Pi resources). */
+  /** Drop all pooled sessions and per-task bookkeeping (free Pi resources). */
   close(): void {
     for (const { unsubscribe } of this.pool.values()) {
       try {
@@ -57,6 +57,12 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
       }
     }
     this.pool.clear();
+    this.statuses.clear();
+    this.usages.clear();
+    this.artifacts.clear();
+    this.eventsCount.clear();
+    this.lastMessages.clear();
+    this.sessions.clear();
   }
 
   metadata(): RuntimeMetadata {

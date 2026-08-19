@@ -25,7 +25,8 @@ async function main(argv: string[]): Promise<number> {
         console.log(`default runtime: ${config.runtime}`);
         console.log('available runtimes:');
         console.log('  fake   Deterministic in-process runtime');
-        console.log('  pi     (Phase 3 — not yet implemented)');
+        console.log('  pi     Real Pi agent (opt-in; needs Pi SDK installed)');
+        console.log('  cli:<cmd>  Bridge any external harness CLI (harness-agnostic)');
         return 0;
       }
       console.log('usage: takumi runtime list');

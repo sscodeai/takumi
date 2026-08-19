@@ -14,7 +14,7 @@ import type {
  * FakeRuntime — deterministic, in-process runtime for tests and vertical-slice work.
  * Contract-identical to a real runtime: same AgentRuntimeAdapter interface,
  * same event stream shape. Used to prove the Core↔Runtime contract before
- * wiring any real harness (Phase 3 switches to Pi by config, no Core changes).
+ * wiring any real harness (real runtimes plug in by config, no Core changes).
  */
 export class FakeRuntime implements AgentRuntimeAdapter {
   private readonly events = new Map<TaskId, AgentEvent[]>();
