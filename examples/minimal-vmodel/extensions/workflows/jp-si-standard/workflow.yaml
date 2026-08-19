@@ -42,6 +42,11 @@ steps:
     skill: jp-unit-test
     prompt: 为实现的代码生成并执行单元测试（正常系/異常系/境界値）。
     dependsOn: [implementation]
+  - id: integration_test
+    type: agent
+    skill: jp-integration-test
+    prompt: 结合体（模块間・サービス間・API層）の連携を検証する結合試験を設計・実行する。
+    dependsOn: [unit_test]
   - id: quality_gate
     type: quality_gate
     # Auto-detect the project's test runner instead of assuming Node:
@@ -55,7 +60,7 @@ steps:
       elif [ -f build.gradle ] || [ -f settings.gradle ]; then gradle test 2>&1 | tee /tmp/takumi-qg.log;
       else node --test 2>&1 | tee /tmp/takumi-qg.log; fi;
       grep -E "^# tests|Tests run:|BUILD SUCCESS|BUILD FAILURE" /tmp/takumi-qg.log | tail -5
-    dependsOn: [unit_test]
+    dependsOn: [integration_test]
     timeoutMs: 300000
   - id: independent_review
     type: independent_review
