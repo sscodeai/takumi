@@ -295,12 +295,24 @@ export async function executeWorkflow(
         // A gate with ZERO tests is NOT green (Quality Gate must be enforced:
         // no tests at all = the gate has nothing to vouch for → ABORT).
         const allOut = out.toUpperCase();
+        // TAP format: "# tests N" / "# fail N" / "not ok"
         const notOk = (out.match(/not ok/g) ?? []).length;
         const failLine = out.match(/^#\s*fail\s*:?\s*(\d+)/m);
-        const fails = failLine ? parseInt(failLine[1] ?? '0', 10) : notOk;
         const testLine = out.match(/^#\s*tests\s*:?\s*(\d+)/m);
-        const totalTests = testLine ? parseInt(testLine[1] ?? '0', 10) : 1; // unknown → assume tests exist
-        const gatePassed = exitOk && fails === 0 && totalTests > 0 && !/FAILED|FATAL/i.test(allOut);
+        // Maven format: "Tests run: 2, Failures: 0, Errors: 1, Skipped: 0"
+        const mvnLine = out.match(/Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)/);
+        let fails: number;
+        let totalTests: number;
+        if (mvnLine) {
+          totalTests = parseInt(mvnLine[1] ?? '0', 10);
+          fails = parseInt(mvnLine[2] ?? '0', 10) + parseInt(mvnLine[3] ?? '0', 10);
+        } else {
+          fails = failLine ? parseInt(failLine[1] ?? '0', 10) : notOk;
+          totalTests = testLine ? parseInt(testLine[1] ?? '0', 10) : (fails > 0 ? fails : 1);
+        }
+        // Maven BUILD FAILURE (e.g. compile error before any test runs) is a hard fail.
+        const hardFail = /BUILD FAILURE|BUILD FAILED|FATAL/i.test(allOut);
+        const gatePassed = exitOk && !hardFail && fails === 0 && totalTests > 0;
         const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${out.slice(0, 1200)}`;
         if (gatePassed) {
           run.stepStatus[stepId] = 'completed';

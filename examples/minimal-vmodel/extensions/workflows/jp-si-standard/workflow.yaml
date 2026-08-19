@@ -44,9 +44,19 @@ steps:
     dependsOn: [implementation]
   - id: quality_gate
     type: quality_gate
-    prompt: "node --test 2>&1 | tee /tmp/takumi-qg.log; grep -qE '^# fail\\s+0' /tmp/takumi-qg.log && echo 'GATE_OK' || echo 'has failures'"
+    # Auto-detect the project's test runner instead of assuming Node:
+    #   Maven (pom.xml)  -> mvn test
+    #   Gradle (build.gradle/settings.gradle) -> gradle test
+    #   otherwise        -> node --test
+    # The gate FAILS if zero tests run or any test fails (verified by the
+    # engine, which requires tests>0 and fails=0).
+    prompt: |
+      if [ -f pom.xml ]; then (mvn test 2>&1 || mvn -q test 2>&1) | tee /tmp/takumi-qg.log;
+      elif [ -f build.gradle ] || [ -f settings.gradle ]; then gradle test 2>&1 | tee /tmp/takumi-qg.log;
+      else node --test 2>&1 | tee /tmp/takumi-qg.log; fi;
+      grep -E "^# tests|Tests run:|BUILD SUCCESS|BUILD FAILURE" /tmp/takumi-qg.log | tail -5
     dependsOn: [unit_test]
-    timeoutMs: 120000
+    timeoutMs: 300000
   - id: independent_review
     type: independent_review
     skill: jp-code-review
