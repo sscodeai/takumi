@@ -58,3 +58,18 @@ test('CliRuntimeAdapter: shared runtime contract suite (echo CLI)', async () => 
   const out = await runRuntimeContractSuite(r, { id: 'echo', prompt: 'wrap', cwd: '/tmp' });
   assert.equal(out.result, 'PASS');
 });
+
+// Test-Quality review M6: cancellation of a REAL spawned process must surface
+// as cancelled (never failed) and runTaskAndCollect must settle (no hang).
+test('CliRuntimeAdapter: cancel of a live subprocess → cancelled, not failed (M6)', async () => {
+  const r = new CliRuntimeAdapter({ id: 'sleepy', name: 'Sleepy', command: 'sh', args: ['-c', 'sleep 30'] });
+  const events: string[] = [];
+  const p = runTaskAndCollect(r, { id: 'm6', prompt: 'x', cwd: '/tmp' }, (ev) => events.push(ev.type));
+  // Let the subprocess spawn, then cancel it mid-flight.
+  await new Promise((res) => setTimeout(res, 150));
+  await r.cancel('m6');
+  const res = await p;
+  assert.equal(res.status, 'cancelled', 'cancel of a live process must report cancelled');
+  assert.ok(events.includes('task.cancelled'), 'must emit task.cancelled');
+  assert.ok(!events.includes('task.failed'), 'must NOT emit task.failed for a cancel');
+});
