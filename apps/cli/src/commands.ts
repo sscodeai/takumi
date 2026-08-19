@@ -67,6 +67,8 @@ export interface ProjectConfig {
     runtimes: string;
   };
   artifacts: string;
+  /** Audit trail dir (default `.takumi/audit`). */
+  audit?: string;
 }
 
 export function loadConfig(cwd: string): ProjectConfig {
@@ -154,6 +156,22 @@ export async function runTask(opts: RunOptions): Promise<{
   const store = new ArtifactStore(join(opts.cwd, opts.config.artifacts));
   const events: string[] = [];
 
+  /** Persist an audit trail for the run (Gate 19: auditable execution). */
+  const writeAudit = async (payload: Record<string, unknown>) => {
+    try {
+      const fs = await import('node:fs/promises');
+      const dir = join(opts.cwd, opts.config.audit ?? '.takumi/audit');
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}.json`),
+        JSON.stringify({ ...payload, events, ts: Date.now() }, null, 2),
+        'utf8',
+      );
+    } catch {
+      // audit is best-effort; never fail the run over logging
+    }
+  };
+
   if (opts.workflow) {
     const wf = await loadWorkflow(opts.cwd, opts.config, opts.workflow);
     const result = await executeWorkflow(
@@ -190,6 +208,13 @@ export async function runTask(opts: RunOptions): Promise<{
     } catch {
       matrix = '';
     }
+    await writeAudit({
+      kind: 'workflow',
+      workflow: opts.workflow,
+      runtimeId: opts.runtimeId,
+      status: result.status,
+      steps: result.steps.map((s) => ({ stepId: s.stepId, status: s.status, summary: s.summary })),
+    });
     return {
       events,
       summary: `workflow "${opts.workflow}" ${result.status}`,
@@ -215,6 +240,12 @@ export async function runTask(opts: RunOptions): Promise<{
     events.push(`artifact: ${art.path}`);
   }
 
+  await writeAudit({
+    kind: 'task',
+    runtimeId: opts.runtimeId,
+    status: result.status,
+    summary: result.summary,
+  });
   return {
     events,
     summary: result.summary,
