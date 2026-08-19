@@ -37,25 +37,30 @@ Takumi はプラットフォーム層です。Pi のラッパーでも、DeepSee
 
 ## クイックスタート
 
+> ソースからインストール（npm パッケージ公開は **Planned** — 未公開）。
+> Node ≥ 20 と [pnpm](https://pnpm.io) が必要。
+
 ```bash
-# 1. インストール
-npm install -g takumi
+# 1. クローン & ビルド
+git clone <repo-url> && cd takumi
+pnpm install
+pnpm build
 
 # 2. プロジェクトを初期化
-takumi init
+pnpm exec takumi init
 
-# 3. 決定的なフェイクランタイムでタスクを実行
-takumi run "Implement user login API"
+# 3. 決定的なフェイクランタイムでタスクを実行（API キー不要）
+pnpm exec takumi run "Implement user login API"
 
-# 4. Pi ランタイムで本物のワークフローを実行
-takumi run requirements.md --workflow jp-si-standard --runtime pi
+# 4. Pi ランタイムで本物のワークフローを実行（OPENCODE_GO_API_KEY が必要）
+pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime pi
 ```
 
 **Bring your own harness** — Core を変更せず設定だけでランタイムを切り替え:
 
 ```bash
-takumi run requirements.md --workflow jp-si-standard --runtime fake   # 決定的（テスト用）
-takumi run requirements.md --workflow jp-si-standard --runtime pi     # 実 Pi エージェント
+pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime fake   # 決定的（テスト用）
+pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime pi     # 実 Pi エージェント
 ```
 
 ## アーキテクチャ
