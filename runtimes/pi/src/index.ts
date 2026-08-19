@@ -30,10 +30,11 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly artifacts = new Map<TaskId, Artifact[]>();
   private readonly lastMessages = new Map<TaskId, string>();
   private readonly eventsCount = new Map<TaskId, number>();
-  // Session pool keyed by cwd: reuse one AgentSession across consecutive
-  // workflow steps in the same directory (followUp chaining), avoiding the
-  // per-step cold-start cost. Disabled when reuseSession:false.
-  private readonly pool = new Map<string, { session: Awaited<ReturnType<typeof createAgentSession>>['session']; unsubscribe: () => void }>();
+  // Session pool keyed by cwd: holds ONE session at a time for a single task
+  // id, reused only by a retry of the SAME task (keeps retry context). A new
+  // workflow step always starts a FRESH session (prevents long-session
+  // degradation to empty/echo replies seen in the 10-step E2E).
+  private readonly pool = new Map<string, { session: Awaited<ReturnType<typeof createAgentSession>>['session']; unsubscribe: () => void; taskId: TaskId }>();
   private readonly poolLocks = new Map<string, Promise<unknown>>();
 
   constructor(
@@ -103,9 +104,24 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
     await prev;
 
     try {
-      const existing = this.options.reuseSession ? this.pool.get(cwd) : undefined;
-      if (existing) {
+      // Session strategy: work is per-task independent. Reuse the pooled
+      // session ONLY for a retry of the SAME task id (so a retry keeps its
+      // own context), never across different workflow steps — a long shared
+      // session degrades to empty/echo replies (observed in 10-step E2E:
+      // assistant content became [] after several followUp prompts).
+      const existing = this.pool.get(cwd);
+      if (existing && existing.taskId === taskId && this.options.reuseSession) {
         return { session: existing.session, isReused: true };
+      }
+      // A previous session exists for a DIFFERENT task: retire it (close the
+      // listener) so the next task starts fresh — no cross-step bleed.
+      if (existing && existing.taskId !== taskId) {
+        try {
+          existing.unsubscribe();
+        } catch {
+          // ignore
+        }
+        this.pool.delete(cwd);
       }
 
       const result = await createAgentSession({
@@ -118,9 +134,7 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
         // Per-task event mapping happens in run() via its own listener;
         // the pool entry just holds the session alive for reuse.
       });
-      if (this.options.reuseSession) {
-        this.pool.set(cwd, { session, unsubscribe });
-      }
+      this.pool.set(cwd, { session, unsubscribe, taskId });
       return { session, isReused: false };
     } finally {
       release();
