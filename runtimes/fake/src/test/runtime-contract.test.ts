@@ -1,36 +1,32 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runTaskAndCollect, validateCapabilities } from '@takumi/core';
+import { runRuntimeContractSuite } from '@takumi/core';
+import { validateCapabilities } from '@takumi/core';
 import { FakeRuntime } from '../index.js';
 
-test('runTaskAndCollect: FakeRuntime full chain Core→Runtime→Event→Result', async () => {
+// FakeRuntime runs the SHARED Runtime Contract Suite (Gate 3).
+// The same suite is executed against PiRuntime — proving the Core↔Runtime
+// contract is identical and Core never depends on a real harness.
+test('FakeRuntime: shared runtime contract suite', async () => {
   const runtime = new FakeRuntime((task: { prompt: string }) => `analyzed: ${task.prompt}`);
+  const out = await runRuntimeContractSuite(runtime, {
+    id: 'fake',
+    prompt: 'Implement user login API',
+    cwd: '/tmp',
+  });
+  assert.equal(out.result, 'PASS');
+});
+
+// Extra: failure simulation (contract suite covers success; this covers retry/fail).
+test('FakeRuntime: simulate failure when task throws', async () => {
+  const flaky = new FakeRuntime(() => {
+    throw new Error('boom');
+  });
   const events: string[] = [];
-  const result = await runTaskAndCollect(
-    runtime,
-    { id: 't1', prompt: 'Implement user login API', cwd: '/tmp' },
-    (ev: { type: string }) => events.push(ev.type),
-  );
-
-  // event stream shape
-  assert.ok(events.includes('task.started'));
-  assert.ok(events.includes('agent.message'));
-  assert.ok(events.includes('command.completed'));
-  assert.ok(events.includes('test.completed'));
-  assert.ok(events.includes('task.completed'));
-  assert.equal(events[0], 'task.started');
-  assert.equal(events.at(-1), 'task.completed');
-
-  // result contract
-  assert.equal(result.status, 'completed');
-  assert.ok(result.summary.includes('analyzed: Implement user login API'));
-  assert.equal(result.taskId, 't1');
-  assert.equal(result.usage.runtimeId, 'fake');
-
-  // runtime queries
-  assert.equal(await runtime.getStatus('t1'), 'completed');
-  const usage = await runtime.getUsage('t1');
-  assert.equal(usage.totalTokens, 0);
+  const { runTaskAndCollect } = await import('@takumi/core');
+  const res = await runTaskAndCollect(flaky, { id: 'fail-1', prompt: 'x', cwd: '/tmp' }, (ev) => events.push(ev.type));
+  assert.equal(res.status, 'failed');
+  assert.ok(events.includes('task.failed'));
 });
 
 test('validateCapabilities: ok when satisfied, reports missing otherwise', () => {

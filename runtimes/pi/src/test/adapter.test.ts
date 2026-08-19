@@ -47,3 +47,29 @@ test('PiRuntimeAdapter: session pooling — reuseSession toggles pool, close is 
   // cancel on unknown task id must not throw.
   await unpooled.cancel('does-not-exist');
 });
+
+// PiRuntime runs the SAME shared Runtime Contract Suite as FakeRuntime (Gate 3).
+// With OPENCODE_GO_API_KEY it does a real Pi run; without (CI) it reports
+// NOT_RUN rather than faking a pass — we never call a fake "Pi success".
+test('PiRuntimeAdapter: shared runtime contract suite (real Pi, gated on key)', async () => {
+  const { PiRuntimeAdapter } = await import('../index.js');
+  const { runRuntimeContractSuite } = await import('@takumi/core');
+  const hasKey = !!process.env.OPENCODE_GO_API_KEY;
+  const runtime = new PiRuntimeAdapter();
+  try {
+    const out = await runRuntimeContractSuite(runtime, {
+      id: 'pi',
+      prompt: 'Reply with exactly: CONTRACT_OK',
+      cwd: '/tmp',
+      skipRealRun: !hasKey,
+    });
+    // When no key, we assert we honestly did NOT run (NOT_RUN), never a fake pass.
+    if (!hasKey) {
+      assert.equal(out.result, 'PASS_WITH_NOT_RUN');
+    } else {
+      assert.equal(out.result, 'PASS');
+    }
+  } finally {
+    runtime.close();
+  }
+});
