@@ -1,14 +1,27 @@
 import { runBenchmark, renderLeaderboard } from './index.js';
+import type { AgentRuntimeAdapter } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
+import { PiRuntimeAdapter } from '@takumi/runtime-pi';
 
-// Example: run the benchmark with the deterministic fake runtime first
-// (no API cost, verifies the plumbing). Add Pi runtime when OPENCODE_GO_API_KEY
-// is present:
-//   import { PiRuntimeAdapter } from '@takumi/runtime-pi';
-//   runtimes.push({ id: 'pi', make: () => new PiRuntimeAdapter() });
+// Japan SWE-Agent Benchmark runner.
+// - Always runs the deterministic FakeRuntime (no API cost, sanity check).
+// - When OPENCODE_GO_API_KEY is set, ALSO runs the real Pi runtime to produce
+//   honest harness-quality numbers (tokens/cost/duration/pass).
+// Add more runtimes (DeepSeek Harness, Codex CLI bridge) here later.
 async function main() {
-  const runtimes = [{ id: 'fake', make: () => new FakeRuntime((t) => `handled ${t.prompt}`) }];
+  const runtimes: { id: string; make: () => AgentRuntimeAdapter }[] = [
+    { id: 'fake', make: () => new FakeRuntime((t) => `handled ${t.prompt}`) },
+  ];
+
+  if (process.env.OPENCODE_GO_API_KEY) {
+    runtimes.push({ id: 'pi', make: () => new PiRuntimeAdapter() });
+    console.log('# Pi runtime enabled (OPENCODE_GO_API_KEY present)');
+  } else {
+    console.log('# No OPENCODE_GO_API_KEY — running FakeRuntime only (sanity check)');
+  }
+
   const results = await runBenchmark(runtimes);
+  console.log('');
   console.log('# Japan SWE-Agent Benchmark');
   console.log('');
   console.log(renderLeaderboard(results));
