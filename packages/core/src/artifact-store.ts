@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { resolve as pathResolve, sep as pathSep } from 'node:path';
 import type { Artifact, TraceId } from './types.js';
 
 /**
@@ -15,6 +16,19 @@ export class ArtifactStore {
     return this.root;
   }
 
+  /**
+   * Join under root, rejecting any path that escapes it (path traversal
+   * guard, security baseline). kind/fileName come from step/artifact inputs,
+   * which may be runtime-controlled — never let them write outside the store.
+   */
+  private safeJoin(...parts: string[]): string {
+    const abs = pathResolve(this.root, ...parts);
+    if (abs !== this.root && !abs.startsWith(this.root + pathSep)) {
+      throw new Error(`artifact path escapes store root: ${parts.join('/')}`);
+    }
+    return abs;
+  }
+
   async write(opts: {
     taskId: string;
     kind: string;
@@ -25,9 +39,9 @@ export class ArtifactStore {
   }): Promise<Artifact> {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
-    const dir = path.join(this.root, opts.kind);
+    const dir = this.safeJoin(opts.kind);
     await fs.mkdir(dir, { recursive: true });
-    const filePath = path.join(dir, opts.fileName);
+    const filePath = this.safeJoin(opts.kind, opts.fileName);
     const data = typeof opts.content === 'string' ? Buffer.from(opts.content, 'utf8') : opts.content;
     await fs.writeFile(filePath, data);
 

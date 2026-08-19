@@ -35,9 +35,12 @@ export class FakeRuntime implements AgentRuntimeAdapter {
   }
 
   capabilities(): RuntimeCapabilities {
+    // Honest capability set: the deterministic in-process stub only genuinely
+    // provides streaming + usage tracking. It must NOT claim filesystem/shell/
+    // subagents/parallel execution it never performs (Gate 22 / trust baseline).
     return {
-      capabilities: ['streaming', 'filesystem', 'shell', 'subagents', 'usageTracking', 'parallelExecution'],
-      maxParallelTasks: 16,
+      capabilities: ['streaming', 'usageTracking'],
+      maxParallelTasks: 1,
     };
   }
 

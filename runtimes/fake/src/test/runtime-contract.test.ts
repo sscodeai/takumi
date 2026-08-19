@@ -31,7 +31,10 @@ test('FakeRuntime: simulate failure when task throws', async () => {
 
 test('validateCapabilities: ok when satisfied, reports missing otherwise', () => {
   const runtime = new FakeRuntime();
-  assert.deepEqual(validateCapabilities(runtime, ['shell', 'filesystem']), { ok: true });
+  // FakeRuntime honestly declares only streaming + usageTracking (Gate 22:
+  // no capability it doesn't actually provide). shell/filesystem → rejected.
+  assert.deepEqual(validateCapabilities(runtime, ['streaming']), { ok: true });
+  assert.deepEqual(validateCapabilities(runtime, ['shell']), { ok: false, missing: ['shell'] });
   const missing = validateCapabilities(runtime, ['browser', 'sandbox']);
   assert.equal(missing.ok, false);
   if (!missing.ok) {

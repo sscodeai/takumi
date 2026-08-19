@@ -283,3 +283,46 @@ test('Gate 10/16: step.timeoutMs aborts a hung step as failed (no infinite hang)
     rmSync(e.dir, { recursive: true, force: true });
   }
 });
+
+// ---- Security: artifact-store path traversal guard ----
+test('Gate 20: artifact write rejects paths escaping the store root', async () => {
+  const e = env();
+  try {
+    await assert.rejects(
+      () =>
+        e.artifacts.write({
+          taskId: 't1',
+          kind: 'req',
+          fileName: '../../escape.txt',
+          content: 'x',
+          contentType: 'text/plain',
+          trace: [],
+        }),
+      /escapes store root/,
+    );
+    await assert.rejects(
+      () =>
+        e.artifacts.write({
+          taskId: 't1',
+          kind: '../evil',
+          fileName: 'x.txt',
+          content: 'x',
+          contentType: 'text/plain',
+          trace: [],
+        }),
+      /escapes store root/,
+    );
+    // legitimate write still works
+    const ok = await e.artifacts.write({
+      taskId: 't1',
+      kind: 'req',
+      fileName: 'ok.md',
+      content: 'fine',
+      contentType: 'text/markdown',
+      trace: ['REQ-001'],
+    });
+    assert.equal(ok.path, 'req/ok.md');
+  } finally {
+    rmSync(e.dir, { recursive: true, force: true });
+  }
+});
