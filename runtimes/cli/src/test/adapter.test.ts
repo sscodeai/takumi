@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CliRuntimeAdapter } from '../index.js';
-import { runTaskAndCollect } from '@takumi/core';
+import { runTaskAndCollect, runRuntimeContractSuite } from '@takumi/core';
 
 // Contract tests for CliRuntimeAdapter using a trivial real command ("echo")
 // as the external harness. This exercises the spawn→stream→result plumbing
@@ -48,4 +48,13 @@ test('CliRuntimeAdapter: metadata + capabilities', () => {
   const r = new CliRuntimeAdapter({ id: 'x', name: 'X', command: 'echo' });
   assert.equal(r.metadata().id, 'x');
   assert.ok(r.capabilities().capabilities.includes('streaming'));
+});
+
+// CliRuntimeAdapter must ALSO satisfy the SHARED Runtime Contract Suite
+// (Gate 3): fake, pi and cli all run the identical contract. Uses a real
+// external CLI (`echo`) so this is a genuine third-runtime contract check.
+test('CliRuntimeAdapter: shared runtime contract suite (echo CLI)', async () => {
+  const r = new CliRuntimeAdapter({ id: 'echo', name: 'Echo', command: 'echo', args: ['CONTRACT'] });
+  const out = await runRuntimeContractSuite(r, { id: 'echo', prompt: 'wrap', cwd: '/tmp' });
+  assert.equal(out.result, 'PASS');
 });
