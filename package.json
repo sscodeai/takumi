@@ -12,6 +12,9 @@
     "test": "pnpm -r --workspace-concurrency=1 test",
     "typecheck": "pnpm -r typecheck"
   },
+  "bin": {
+    "takumi": "apps/cli/dist/index.js"
+  },
   "devDependencies": {
     "typescript": "^5.6.0"
   }

@@ -37,25 +37,30 @@ Takumi is a platform layer — **not** a Pi wrapper, not a DeepSeek Harness fork
 
 ## Quick Start
 
+> Install from source (npm package publishing is **Planned**, not yet shipped).
+> Requires Node ≥ 20 and [pnpm](https://pnpm.io).
+
 ```bash
-# 1. Install
-npm install -g takumi
+# 1. Clone + build
+git clone <repo-url> && cd takumi
+pnpm install
+pnpm build                 # sequential workspace build (core → runtimes → cli)
 
 # 2. Scaffold a project
-takumi init
+pnpm exec takumi init
 
-# 3. Run a task with the deterministic fake runtime
-takumi run "Implement user login API"
+# 3. Run a task with the deterministic fake runtime (no API key needed)
+pnpm exec takumi run "Implement user login API"
 
-# 4. Run a real workflow with the Pi runtime
-takumi run requirements.md --workflow jp-si-standard --runtime pi
+# 4. Run a real workflow with the Pi runtime (needs OPENCODE_GO_API_KEY)
+pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime pi
 ```
 
 **Bring your own harness** — switch runtimes by configuration only, no Core changes:
 
 ```bash
-takumi run requirements.md --workflow jp-si-standard --runtime fake   # deterministic
-takumi run requirements.md --workflow jp-si-standard --runtime pi     # real Pi agent
+pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime fake   # deterministic
+pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime pi     # real Pi agent
 ```
 
 ## Architecture
