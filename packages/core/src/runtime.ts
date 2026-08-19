@@ -90,7 +90,42 @@ export function runTaskAndCollect(
         trace: artifacts.flatMap((a) => a.trace),
       });
     } catch (e) {
-      reject(e);
+      // A runtime SHOULD emit task.failed itself, but if it throws/errors
+      // internally we must still resolve a failed result (not reject/crash),
+      // so the orchestration loop can react — Gate 16: fail explicitly,
+      // record the error, preserve state. No silent failure, no fake success.
+      const message = e instanceof Error ? e.message : String(e);
+      resolve({
+        taskId: task.id,
+        status: 'failed',
+        summary: message,
+        changedFiles: [],
+        tests: [],
+        usage: await runtime.getUsage(task.id).catch(() => ({
+          runtimeId: 'unknown',
+          model: null,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          costUsd: 0,
+          durationMs: 0,
+        })),
+        artifacts: await runtime.getArtifacts(task.id).catch(() => [] as Artifact[]),
+        trace: [],
+        error: message,
+      });
+      // Ensure the caller's event stream also sees the failure (event integrity).
+      try {
+        onEvent?.({
+          id: `${task.id}-ev-runtime-error`,
+          taskId: task.id,
+          type: 'task.failed',
+          timestamp: Date.now(),
+          message,
+        });
+      } catch {
+        // ignore observer errors
+      }
     }
   });
 }
