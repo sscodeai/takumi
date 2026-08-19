@@ -92,6 +92,24 @@ takumi/
 - Architecture Decision Records: `docs/adr/` (runtime abstraction, extension system, workflow model, event model, artifact traceability)
 - Technical charter: `docs/CHATTER.md`
 - Project status: `docs/PROJECT_STATUS.md`
+- Acceptance: `docs/acceptance-report.md` (40-gate, 4 independent reviewer subagents, scorecard)
+
+## Known limitations
+
+Honest scope for the current **Developer Preview** (see `docs/acceptance-report.md` for full detail):
+
+- **Resume: not supported** across process crashes — `resume: false`. A long workflow
+  killed mid-run cannot be resumed; restart from the beginning. Pi does reuse a
+  session *within* one process (context continuity across steps), but there is no
+  durable cross-process resume.
+- **No parallel step execution yet** — the engine executes the workflow in
+  topological serial order; parallel execution is declared in the model but not
+  concurrent.
+- **Pi events are not streamed in real time** — events are delivered once the
+  task finishes (buffered), not live during generation.
+- **Traceability is by ID-naming convention** (REQ-001 links), not structural foreign keys.
+- **Tool plugins** run shell commands directly (no sandbox) — only run trusted steps.
+- **Pi runtime is opt-in** (depends on an unpublished SDK): `pnpm install` does not ship it.
 
 ## Roadmap
 
