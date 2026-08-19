@@ -162,6 +162,7 @@ export async function runTask(opts: RunOptions): Promise<{
         cwd: opts.cwd,
         runtime,
         artifacts: store,
+        skillsRoot: join(opts.cwd, opts.config.registry.skills),
         onApproval: async (req) => {
           const line = `approval required [${req.stepId}]: ${req.prompt}`;
           events.push(line);

@@ -1,0 +1,8 @@
+name: jp-unit-test
+kind: skill
+version: 0.1.0
+description: 日本SIの単体テスト設計書・実施スキル
+prompts:
+  generate: prompts/generate.md
+resources:
+- SKILL.md

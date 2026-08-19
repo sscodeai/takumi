@@ -1,0 +1,8 @@
+name: jp-requirements
+kind: skill
+version: 0.1.0
+description: 日本SIの要件定義スキル：要件文書を標準REQ-xxxリストへ変換
+prompts:
+  analyze: prompts/analyze.md
+resources:
+- SKILL.md

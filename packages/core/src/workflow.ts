@@ -14,6 +14,8 @@ export interface WorkflowStep {
   prompt?: string;
   /** Skill id to load, e.g. "jp-requirements". */
   skill?: string;
+  /** Prompt action within the skill (prompts/<action>.md). Defaults to the first prompt. */
+  skillAction?: string;
   /** Tool ids required by this step. */
   tools?: string[];
   /** Runtime capability requirements (validated before run). */

@@ -1,0 +1,8 @@
+name: jp-basic-design
+kind: skill
+version: 0.1.0
+description: 日本SIの基本設計スキル：要件→基本設計書（概要/アーキ/画面/API/DB）
+prompts:
+  generate: prompts/generate.md
+resources:
+- SKILL.md

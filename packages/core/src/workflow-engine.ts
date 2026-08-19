@@ -29,6 +29,13 @@ export interface WorkflowExecutionContext {
   onEvent?: (stepId: string, message: string) => void;
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
+  /**
+   * Optional root of the skills registry (e.g. `<project>/extensions/skills`).
+   * When set and a step declares `skill`, the step's prompt is resolved from
+   * that skill's prompt template (prompts/<action>.md) — so skills drive
+   * behavior, not just artifact folder naming (acceptance Gate 8).
+   */
+  skillsRoot?: string;
 }
 
 export interface WorkflowStepResult {
@@ -56,30 +63,55 @@ export function extractTraceIds(text: string): string[] {
   return [...seen];
 }
 
-/** Drop the leading `jp-` prefix from a skill name to derive an artifact kind. */
-export function skillToKind(skill: string): string {
-  return skill.replace(/^jp-/, '');
-}
-
-/** True when the runtime is the deterministic fake. */
-export function isFakeRuntime(runtime: AgentRuntimeAdapter): boolean {
-  return runtime.metadata().id === 'fake';
-}
-
-/** True when the runtime is the real Pi harness. */
-export function isPiRuntime(runtime: AgentRuntimeAdapter): boolean {
-  return runtime.metadata().id === 'pi';
-}
-
 /** Determine the artifact kind for a completed workflow step. */
 export function stepArtifactKind(step: WorkflowStep, fallback: string): string {
-  const kind = step.skill ? skillToKind(step.skill) : fallback;
-  return kind === 'code-review' ? 'review' : kind;
+  // Artifact kind is driven by the declared step kind / workflow context, not
+  // by string-prefix stripping of a runtime name (architecture invariant:
+  // Core never special-cases a runtime or a vendor convention).
+  return step.type === 'approval' ? 'approval' : fallback;
 }
 
 /** Render a step prompt by resolving {placeholders} from the run context. */
 export function renderPrompt(template: string, vars: Record<string, string>): string {
   return template.replace(/\{(\w+)\}/g, (m, key: string) => vars[key] ?? m);
+}
+
+/**
+ * Resolve a step's prompt, honoring its skill (acceptance Gate 8).
+ *
+ * If `step.skill` is set AND `skillsRoot` is provided, load the skill's prompt
+ * template from `<skillsRoot>/<skill>/prompts/<action>.md` (action from
+ * `step.skillAction`, else the first entry declared in the skill manifest).
+ * The resolved template then has {placeholders} substituted. Falls back to
+ * `step.prompt` when no skill is configured or the skill isn't found —
+ * so a missing skill never silently hangs, but a configured skill genuinely
+ * drives the prompt the runtime receives.
+ */
+export async function resolveStepPrompt(
+  step: WorkflowStep,
+  skillsRoot: string | undefined,
+  vars: Record<string, string>,
+): Promise<string> {
+  const fallback: string = renderPrompt(step.prompt ?? `Execute workflow step "${step.id}"`, vars);
+  if (!step.skill || !skillsRoot) return fallback;
+  const path = await import('node:path');
+  const fsx = await import('node:fs');
+  const skillDir = path.join(skillsRoot, step.skill);
+  const manifestFile = [path.join(skillDir, 'manifest.yaml'), path.join(skillDir, 'manifest.json')].find(fsx.existsSync);
+  if (!manifestFile) return fallback;
+  const { parse } = await import('yaml');
+  const raw = fsx.readFileSync(manifestFile, 'utf8');
+  const manifest = (manifestFile.endsWith('.json') ? JSON.parse(raw) : parse(raw)) as {
+    prompts?: Record<string, string>;
+  };
+  const prompts = manifest.prompts ?? {};
+  const action = step.skillAction ?? Object.keys(prompts)[0];
+  const rel = action ? prompts[action] : undefined;
+  if (!rel) return fallback;
+  const templatePath = path.join(skillDir, rel);
+  if (!fsx.existsSync(templatePath)) return fallback;
+  const template = fsx.readFileSync(templatePath, 'utf8');
+  return renderPrompt(template, vars);
 }
 
 /**
@@ -174,7 +206,9 @@ export async function executeWorkflow(
         ctx.onEvent?.(stepId, `attempt ${attempt}/${maxAttempts}`);
         const task: AgentTask = {
           id: `${runId}:${stepId}:${attempt}`,
-          prompt: renderPrompt(step.prompt ?? `Execute workflow step "${stepId}"`, vars),
+          // Resolve the prompt from the step's skill template when configured,
+          // else the in-workflow prompt (acceptance Gate 8: skills drive behavior).
+          prompt: await resolveStepPrompt(step, ctx.skillsRoot, vars),
           cwd: ctx.cwd,
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
           context: { workflowStep: stepId, workflow: workflow.name, ...vars },
