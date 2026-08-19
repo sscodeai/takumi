@@ -292,12 +292,16 @@ export async function executeWorkflow(
           out = msg;
         }
         // Parse test outcome: fail count / "not ok" markers / explicit failure.
+        // A gate with ZERO tests is NOT green (Quality Gate must be enforced:
+        // no tests at all = the gate has nothing to vouch for → ABORT).
         const allOut = out.toUpperCase();
         const notOk = (out.match(/not ok/g) ?? []).length;
         const failLine = out.match(/^#\s*fail\s*:?\s*(\d+)/m);
         const fails = failLine ? parseInt(failLine[1] ?? '0', 10) : notOk;
-        const gatePassed = exitOk && fails === 0 && !/FAILED|FATAL/i.test(allOut);
-        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing, exit ${exitOk ? 0 : '!0'}\n${out.slice(0, 1200)}`;
+        const testLine = out.match(/^#\s*tests\s*:?\s*(\d+)/m);
+        const totalTests = testLine ? parseInt(testLine[1] ?? '0', 10) : 1; // unknown → assume tests exist
+        const gatePassed = exitOk && fails === 0 && totalTests > 0 && !/FAILED|FATAL/i.test(allOut);
+        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${out.slice(0, 1200)}`;
         if (gatePassed) {
           run.stepStatus[stepId] = 'completed';
           stepResults.push({ stepId, status: 'completed', summary, artifacts: [], tests: [] });

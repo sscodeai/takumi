@@ -30,8 +30,12 @@ steps:
     dependsOn: [detailed_design]
   - id: implementation
     type: agent
-    skill: jp-code-review
-    prompt: 基于詳細設計書实现代码（実装者が設計書に従ってコーディング）。
+    # NO skill here (was wrongly jp-code-review): this step MUST write the
+    # actual implementation files from the detailed design.
+    prompt: |
+      実装者として、詳細設計書に従って実際のソースコードをプロジェクト直下（src/ 等）に作成せよ。
+      設計書の画面仕様・API仕様・DBスキーマ・クラス設計に従い、実行可能なコードをファイルとして落とすこと。
+      コードファイルを作成し終えたら、作成したファイル一覧と実装サマリを返せ。
     dependsOn: [design_approval]
   - id: unit_test
     type: agent

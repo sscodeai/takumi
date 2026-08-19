@@ -45,6 +45,14 @@ test('Gate 10: quality_gate passes when tests are green, fails + aborts when red
     const gateRes = red.steps.find((s) => s.stepId === 'gate');
     assert.ok(gateRes && gateRes.status === 'failed', 'gate step is failed');
     assert.ok(/quality_gate FAILED/i.test(gateRes.summary), `summary flags FAILED (got: ${gateRes.summary.slice(0, 60)})`);
+
+    // ZERO tests = NOT green (quality gate must not pass vacuously).
+    writeFileSync(join(projectDir, 'z.sh'), '#!/bin/sh\necho "# tests 0"\necho "# pass 0"\necho "# fail 0"\nexit 0\n');
+    chmodSync(projectDir + '/z.sh', 0o755);
+    const zero = await runStep('sh z.sh');
+    const zeroRes = zero.steps.find((s) => s.stepId === 'gate');
+    assert.ok(zeroRes && zeroRes.status === 'failed', 'zero tests must NOT pass the gate');
+    assert.ok(/0 failing over 0 tests/.test(zeroRes.summary), `summary shows zero tests (got: ${zeroRes.summary.slice(0, 60)})`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
