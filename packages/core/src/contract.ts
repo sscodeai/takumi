@@ -56,13 +56,16 @@ export async function runRuntimeContractSuite(
   const events: string[] = [];
   const result = await runTaskAndCollect(runtime, task, (ev) => events.push(ev.type));
 
-  // Event ordering: task.started first, task.completed/failed last, no
-  // task.completed followed by a tool/command event (Gate 18 integrity).
+  // Event ordering: task.started first, task.completed LAST, and no tool/
+  // command event after task.completed (Gate 18 integrity). The happy-path
+  // contract is that the runtime COMPLETES the task — a 'failed' terminal
+  // must FAIL the suite, never pass (Test-Quality review H1).
   assert.equal(events[0], 'task.started', 'first event must be task.started');
   const terminator = events.at(-1);
-  assert.ok(
-    terminator === 'task.completed' || terminator === 'task.failed',
-    `terminating event must be task.completed or task.failed, got ${terminator}`,
+  assert.equal(
+    terminator,
+    'task.completed',
+    `happy-path contract requires terminal event task.completed, got ${terminator} (a failing run must NOT pass)`,
   );
   const completedIdx = events.indexOf('task.completed');
   if (completedIdx !== -1) {
@@ -77,10 +80,7 @@ export async function runRuntimeContractSuite(
 
   // --- status after completion ---
   const status = await runtime.getStatus(taskId);
-  assert.ok(
-    status === 'completed' || status === 'failed',
-    `status after run must be completed/failed, got ${status}`,
-  );
+  assert.equal(status, 'completed', `happy-path status must be completed, got ${status}`);
   notes.push(`status: PASS (${status})`);
 
   // --- usage ---
@@ -102,7 +102,7 @@ export async function runRuntimeContractSuite(
   notes.push('validateCapabilities: PASS');
 
   // --- result summary ---
-  assert.ok(result.status === 'completed' || result.status === 'failed', 'result.status valid');
+  assert.equal(result.status, 'completed', `happy-path result.status must be completed, got ${result.status}`);
   assert.equal(result.taskId, taskId, 'result.taskId matches');
   notes.push(`result: PASS (${result.status})`);
 

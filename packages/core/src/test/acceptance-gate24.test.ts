@@ -64,9 +64,7 @@ test('Gate 24: same workflow runs on FakeRuntime AND a second CLI runtime (no wo
   }
 });
 
-test('Gate 24: same workflow on Fake + Pi would need key; the definition is runtime-agnostic', () => {
-  // Static proof: the workflow definition carries NO runtime id / no pi coupling.
-  assert.equal(WORKFLOW.runtime, undefined, 'workflow declares no runtime hard dependency');
-  const requires = (WORKFLOW.requires ?? []).join(',');
-  assert.ok(!requires.toLowerCase().includes('pi'), 'no pi capability required');
-});
+// (Second test removed in Test-Quality review M2: it asserted properties of a
+// constant defined in this same file — tautological, could only fail if the
+// fixture itself was edited. The first test above is the real behavior proof:
+// the SAME workflow definition ran on two genuinely different runtimes.)

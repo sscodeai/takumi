@@ -224,6 +224,35 @@ test('Gate 17/16: cancel → status cancelled (not failed) via runTaskAndCollect
   }
 });
 
+test('Gate 17/16: MID-FLIGHT cancel → cancelled, not completed/failed (M1 fix)', async () => {
+  const e = env();
+  try {
+    // A runtime that blocks inside run() until we release it — so cancel()
+    // happens WHILE the task is running (the vacuous 'cancel after done' gap).
+    const runtime = new TestRuntime((t) => `done(${t.prompt})`, undefined, 'midflight');
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const originalRun = runtime.run.bind(runtime);
+    runtime.run = async function* (task: import('../types.js').AgentTask) {
+      yield { id: `${task.id}-s`, taskId: task.id, type: 'task.started', timestamp: Date.now() };
+      await gate; // block until released
+      yield* originalRun(task);
+    };
+    const events: string[] = [];
+    const p = runTaskAndCollect(runtime, { id: 'm1', prompt: 'x', cwd: e.dir }, (ev) => events.push(ev.type));
+    // Let the run reach the gate, then cancel mid-flight, then release.
+    await new Promise((r) => setTimeout(r, 20));
+    await runtime.cancel('m1');
+    release();
+    const res = await p;
+    assert.equal(res.status, 'cancelled', 'mid-flight cancel must report cancelled');
+    assert.ok(events.includes('task.cancelled'), 'must emit task.cancelled');
+    assert.ok(!events.includes('task.failed'), 'must NOT emit task.failed');
+  } finally {
+    rmSync(e.dir, { recursive: true, force: true });
+  }
+});
+
 test('Gate 17/16: workflow aborts (cancelled) when a step is cancelled', async () => {
   const e = env();
   try {
@@ -279,6 +308,36 @@ test('Gate 10/16: step.timeoutMs aborts a hung step as failed (no infinite hang)
     const elapsed = Date.now() - started;
     assert.ok(elapsed < 3000, `timeout must return fast (elapsed=${elapsed}ms)`);
     assert.equal(res.status, 'failed', 'timeout produces a failed step (not a hang)');
+    // M4: the failure must be distinguishable as a timeout, not an arbitrary error.
+    const slow = res.steps.find((s) => s.stepId === 'slow');
+    assert.ok(slow && /timeout/i.test(slow.summary), `timeout error message must mention timeout (got: ${slow?.summary})`);
+  } finally {
+    rmSync(e.dir, { recursive: true, force: true });
+  }
+});
+
+test('Gate 10/16: retry exhaustion — N fails with maxAttempts=N → failed, no more retries (M4)', async () => {
+  const e = env();
+  try {
+    let calls = 0;
+    const alwaysFail = new TestRuntime(() => {
+      calls++;
+      throw new Error('always fails');
+    }, undefined, 'retry-exhaust');
+    const res = await executeWorkflow(
+      {
+        name: 'retry-exhaust',
+        version: '0.1.0',
+        description: '',
+        steps: [{ id: 'flaky', type: 'agent', prompt: 'x', retry: { maxAttempts: 3, backoffSeconds: 0 } }],
+      },
+      { cwd: e.dir, runtime: alwaysFail, artifacts: e.artifacts, onApproval: () => true },
+    );
+    assert.equal(calls, 3, 'must attempt exactly maxAttempts times, no more');
+    assert.equal(res.status, 'failed', 'workflow must end failed after exhaustion');
+    const step = res.steps.find((s) => s.stepId === 'flaky');
+    assert.ok(step && step.status === 'failed', 'the exhausted step is failed');
+    assert.ok(/always fails/.test(step?.summary ?? ''), 'last error surfaced');
   } finally {
     rmSync(e.dir, { recursive: true, force: true });
   }

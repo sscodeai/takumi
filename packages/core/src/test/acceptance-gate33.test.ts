@@ -44,13 +44,6 @@ test('Gate 33: rapid-mvp (non-Japanese) workflow runs to completion', async () =
   }
 });
 
-test('Gate 33: workflow definition carries ZERO Japanese-SI coupling', () => {
-  const json = JSON.stringify(RAPID_MVP).toLowerCase();
-  // No jp-* skill refs, no Japanese SI capability needs.
-  assert.ok(!json.includes('jp-'), 'workflow must not reference any jp- skill');
-  for (const step of RAPID_MVP.steps) {
-    assert.ok(!(step.skill ?? '').toLowerCase().startsWith('jp-'), `step ${step.id} must not use jp- skill`);
-    const req = (step.requires ?? []).join(',');
-    assert.ok(!req.toLowerCase().includes('evidence'), 'no Japanese evidence capability needed');
-  }
-});
+// (Second test removed in Test-Quality review M2: it asserted properties of a
+// constant defined in this same file — tautological. The first test above is
+// the real proof: the rapid-mvp workflow actually RAN to completion.)
