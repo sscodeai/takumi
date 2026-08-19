@@ -69,8 +69,20 @@ test('runTask: fake runtime full chain produces event stream + summary', async (
   }
 });
 
-test('resolveRuntime: fake works, unknown throws', () => {
-  const r = resolveRuntime('fake');
+test('resolveRuntime: fake works, unknown throws', async () => {
+  const r = await resolveRuntime('fake');
   assert.equal(r.metadata().id, 'fake');
-  assert.throws(() => resolveRuntime('nope'), /unknown runtime/);
+  await assert.rejects(() => resolveRuntime('nope'), /unknown runtime/);
+});
+
+// Gate 24/31: a THIRD runtime (external harness CLI) is resolvable by config
+// via the cli:<command> scheme — proving runtime change is config-only, and
+// the CLI does not hardcode fake/pi.
+test('resolveRuntime: cli:<command> bridges an external harness CLI (Gate 24/31)', async () => {
+  const r = await resolveRuntime('cli:echo');
+  assert.equal(r.metadata().name, 'CLI (echo)');
+  // pi is opt-in: without the Pi SDK installed it reports BLOCKED (never a fake).
+  if (!process.env.OPENCODE_GO_API_KEY) {
+    await assert.rejects(() => resolveRuntime('pi'), /BLOCKED_BY_EXTERNAL_DEPENDENCY/);
+  }
 });

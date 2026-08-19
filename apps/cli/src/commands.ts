@@ -11,7 +11,7 @@ import {
 } from '@takumi/core';
 import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
-import { PiRuntimeAdapter } from '@takumi/runtime-pi';
+import { CliRuntimeAdapter } from '@takumi/runtime-cli';
 
 /**
  * Interactive approval gate. Prompts the user with [a] approve / [r] reject /
@@ -80,17 +80,39 @@ export function loadConfig(cwd: string): ProjectConfig {
 
 /**
  * Runtime registry: resolve a runtime id to an AgentRuntimeAdapter.
- * Built-ins: "fake" (deterministic), "pi" (real Pi AgentSession).
+ *
+ * Built-ins: "fake" (deterministic). "pi" (real Pi AgentSession) is OPT-IN —
+ * it depends on the unpublished @earendil-works/pi-coding-agent SDK, so it is
+ * dynamically imported and reports BLOCKED_BY_EXTERNAL_DEPENDENCY when absent
+ * (never a fake stand-in). "cli:<command>" bridges ANY external harness CLI
+ * (the harness-agnostic third-runtime seam that Gate 24/31 require).
  */
-export function resolveRuntime(id: string): AgentRuntimeAdapter {
-  switch (id) {
-    case 'fake':
-      return new FakeRuntime();
-    case 'pi':
-      return new PiRuntimeAdapter();
-    default:
-      throw new Error(`unknown runtime "${id}" (available: fake, pi)`);
+export async function resolveRuntime(id: string): Promise<AgentRuntimeAdapter> {
+  if (id === 'fake') {
+    return new FakeRuntime();
   }
+  if (id.startsWith('cli:')) {
+    const cmd = id.slice(4);
+    if (!cmd) throw new Error('cli: runtime requires a command, e.g. --runtime cli:echo');
+    return new CliRuntimeAdapter({ id: `cli-${cmd}`, name: `CLI (${cmd})`, command: cmd });
+  }
+  if (id === 'pi') {
+    try {
+      // Dynamic import of the opt-in pi-runtime package. Using an indirect
+      // specifier keeps this from being statically resolved at build time so
+      // the CLI builds without the Pi SDK installed (BLOCKED_BY_EXTERNAL_DEP).
+      const mod = `@takumi/runtime-${'pi'}`;
+      const m = (await import(mod)) as { PiRuntimeAdapter: new () => AgentRuntimeAdapter };
+      return new m.PiRuntimeAdapter();
+    } catch {
+      throw new Error(
+        `runtime "pi" is not installed on this machine (BLOCKED_BY_EXTERNAL_DEPENDENCY). ` +
+          `It requires the unpublished @earendil-works/pi-coding-agent SDK. ` +
+          `Set it up with: cd runtimes/pi && pnpm install && pnpm build, then build this CLI.`,
+      );
+    }
+  }
+  throw new Error(`unknown runtime "${id}" (available: fake, pi, cli:<command>)`);
 }
 
 /** Load a workflow extension from the project's workflows registry dir by name. */
@@ -128,7 +150,7 @@ export async function runTask(opts: RunOptions): Promise<{
   artifacts: string[];
   traceabilityMatrix?: string;
 }> {
-  const runtime = resolveRuntime(opts.runtimeId);
+  const runtime = await resolveRuntime(opts.runtimeId);
   const store = new ArtifactStore(join(opts.cwd, opts.config.artifacts));
   const events: string[] = [];
 

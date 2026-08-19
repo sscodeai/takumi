@@ -1,4 +1,17 @@
+# Workspace members.
+#
+# runtimes/pi is deliberately NOT a workspace member: it depends on the
+# unpublished `@earendil-works/pi-coding-agent` SDK via an absolute local path
+# (a private dependency that only exists on the author's machine). Including it
+# here would make `pnpm install` fail on every other machine (RELEASE BLOCKER).
+#
+# Takumi's installable core is therefore: packages/* + apps/* + runtimes/fake +
+# runtimes/cli. The Pi runtime is opt-in:
+#   cd runtimes/pi && pnpm install && pnpm build
+# (on a machine that has the Pi SDK configured). The rest of Takumi builds and
+# runs without it — see README "Installable without the Pi runtime".
 packages:
   - "packages/*"
   - "apps/*"
-  - "runtimes/*"
+  - "runtimes/fake"
+  - "runtimes/cli"

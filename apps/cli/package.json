@@ -14,8 +14,8 @@
   },
   "dependencies": {
     "@takumi/core": "workspace:*",
+    "@takumi/runtime-cli": "workspace:*",
     "@takumi/runtime-fake": "workspace:*",
-    "@takumi/runtime-pi": "workspace:*",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
