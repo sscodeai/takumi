@@ -89,7 +89,7 @@ export function loadConfig(cwd: string): ProjectConfig {
  * (never a fake stand-in). "cli:<command>" bridges ANY external harness CLI
  * (the harness-agnostic third-runtime seam that Gate 24/31 require).
  */
-export async function resolveRuntime(id: string): Promise<AgentRuntimeAdapter> {
+export async function resolveRuntime(id: string, sandbox?: 'none' | 'unshare'): Promise<AgentRuntimeAdapter> {
   if (id === 'fake') {
     return new FakeRuntime();
   }
@@ -127,9 +127,9 @@ export async function resolveRuntime(id: string): Promise<AgentRuntimeAdapter> {
       // member and installable everywhere. Key from COMMANDCODE_API_KEY env
       // or the custom:commandcode credential pool.
       const m = (await import('@takumi/runtime-deepseek')) as {
-        DeepSeekRuntimeAdapter: new () => AgentRuntimeAdapter;
+        DeepSeekRuntimeAdapter: new (opts?: { sandbox?: 'none' | 'unshare' }) => AgentRuntimeAdapter;
       };
-      return new m.DeepSeekRuntimeAdapter();
+      return new m.DeepSeekRuntimeAdapter({ sandbox });
     } catch {
       throw new Error(
         `runtime "deepseek" is not available. It is a workspace member — run ` +
@@ -168,6 +168,8 @@ export interface RunOptions {
   config: ProjectConfig;
   /** Stream workflow step events to stdout as they happen. */
   verbose?: boolean;
+  /** Sandbox mode for runtimes that support it ('none' | 'unshare'). */
+  sandbox?: 'none' | 'unshare';
 }
 
 export async function runTask(opts: RunOptions): Promise<{
@@ -176,7 +178,7 @@ export async function runTask(opts: RunOptions): Promise<{
   artifacts: string[];
   traceabilityMatrix?: string;
 }> {
-  const runtime = await resolveRuntime(opts.runtimeId);
+  const runtime = await resolveRuntime(opts.runtimeId, opts.sandbox);
   const store = new ArtifactStore(join(opts.cwd, opts.config.artifacts));
   const events: string[] = [];
 

@@ -39,3 +39,6 @@ export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
+export type { Sandbox, SandboxOptions, SandboxResult } from './sandbox.js';
+export { DockerSandbox, NoopSandbox, dockerAvailable } from './sandbox-docker.js';
+export { UnshareSandbox } from './sandbox-unshare.js';

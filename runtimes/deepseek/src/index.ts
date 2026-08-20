@@ -11,8 +11,10 @@ import type {
 } from '@takumi/core';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, writeFile, mkdir, readdir, stat } from 'node:fs/promises';
-import { join, resolve, normalize } from 'node:path';
+import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import type { Sandbox } from '@takumi/core';
+import { NoopSandbox, UnshareSandbox } from '@takumi/core';
 
 const execFileAsync = promisify(execFile);
 
@@ -107,6 +109,7 @@ export class DeepSeekRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly model: string;
   private readonly apiKey: string;
   private readonly maxTurns: number;
+  private readonly sandbox: Sandbox;
 
   constructor(
     private readonly options: {
@@ -115,6 +118,8 @@ export class DeepSeekRuntimeAdapter implements AgentRuntimeAdapter {
       apiKey?: string;
       apiKeyEnv?: string;
       maxTurns?: number;
+      /** Sandbox for bash tool. 'none' (default) | 'unshare' | Sandbox instance. */
+      sandbox?: 'none' | 'unshare' | Sandbox;
     } = {},
   ) {
     this.baseUrl = options.baseUrl ?? 'https://api.commandcode.ai/provider/v1';
@@ -122,6 +127,11 @@ export class DeepSeekRuntimeAdapter implements AgentRuntimeAdapter {
     const env = options.apiKeyEnv ?? 'COMMANDCODE_API_KEY';
     this.apiKey = options.apiKey ?? process.env[env] ?? '';
     this.maxTurns = options.maxTurns ?? 30;
+    if (typeof options.sandbox === 'string') {
+      this.sandbox = options.sandbox === 'unshare' ? new UnshareSandbox() : new NoopSandbox();
+    } else {
+      this.sandbox = options.sandbox ?? new NoopSandbox();
+    }
   }
 
   metadata(): RuntimeMetadata {
@@ -135,7 +145,7 @@ export class DeepSeekRuntimeAdapter implements AgentRuntimeAdapter {
 
   capabilities(): RuntimeCapabilities {
     return {
-      capabilities: ['streaming', 'filesystem', 'shell', 'usageTracking'],
+      capabilities: ['streaming', 'filesystem', 'shell', 'usageTracking', ...(this.sandbox.id !== 'none' ? (['sandbox'] as const) : [])],
       maxParallelTasks: 2,
     };
   }
@@ -200,10 +210,11 @@ export class DeepSeekRuntimeAdapter implements AgentRuntimeAdapter {
       case 'bash': {
         const cmd = a.command ?? '';
         try {
-          const { stdout, stderr } = await execFileAsync('/bin/sh', ['-c', cmd], { cwd, timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
-          return `${stdout}\n${stderr}`.trim() || '(no output)';
+          const res = await this.sandbox.run(cwd, cmd, { timeoutMs: 60_000 });
+          const out = `${res.stdout}\n${res.stderr}`.trim() || '(no output)';
+          return res.code === 0 ? out : `(exit ${res.code}) ${out}`;
         } catch (e: any) {
-          return `(exit ${e.code ?? '?'}) ${e.stdout ?? ''}\n${e.stderr ?? ''}`.trim();
+          return `(error) ${e.message}`;
         }
       }
       case 'read_file': {
