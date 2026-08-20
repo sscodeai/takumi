@@ -120,7 +120,25 @@ export async function resolveRuntime(id: string): Promise<AgentRuntimeAdapter> {
       );
     }
   }
-  throw new Error(`unknown runtime "${id}" (available: fake, pi, cli:<command>)`);
+  if (id === 'deepseek') {
+    try {
+      // DeepSeek Harness runtime (OpenAI-compatible tool loop via
+      // commandcode.ai). Pure HTTP — no private SDK — so it is a workspace
+      // member and installable everywhere. Key from COMMANDCODE_API_KEY env
+      // or the custom:commandcode credential pool.
+      const m = (await import('@takumi/runtime-deepseek')) as {
+        DeepSeekRuntimeAdapter: new () => AgentRuntimeAdapter;
+      };
+      return new m.DeepSeekRuntimeAdapter();
+    } catch {
+      throw new Error(
+        `runtime "deepseek" is not available. It is a workspace member — run ` +
+          `pnpm install && pnpm -C runtimes/deepseek build. Requires COMMANDCODE_API_KEY ` +
+          `(or apiKey option) for ${'deepseek/deepseek-v4-flash'}`,
+      );
+    }
+  }
+  throw new Error(`unknown runtime "${id}" (available: fake, pi, deepseek, cli:<command>)`);
 }
 
 /** Load a workflow extension from the project's workflows registry dir by name. */

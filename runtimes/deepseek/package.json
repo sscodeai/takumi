@@ -1,11 +1,10 @@
 {
-  "name": "@takumi/cli",
+  "name": "@takumi/runtime-deepseek",
   "version": "0.1.0",
-  "description": "Takumi CLI: takumi init / runtime list / extension list / run",
+  "description": "DeepSeek Harness runtime: OpenAI-compatible chat completions + tool loop via commandcode.ai (deepseek/deepseek-v4-flash).",
   "type": "module",
-  "bin": {
-    "takumi": "./dist/index.js"
-  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc -p tsconfig.json",
@@ -14,11 +13,7 @@
     "pretest": "pnpm build"
   },
   "dependencies": {
-    "@takumi/core": "workspace:*",
-    "@takumi/runtime-cli": "workspace:*",
-    "@takumi/runtime-deepseek": "workspace:*",
-    "@takumi/runtime-fake": "workspace:*",
-    "yaml": "^2.9.0"
+    "@takumi/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
