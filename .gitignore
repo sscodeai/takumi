@@ -6,3 +6,5 @@ examples/minimal-vmodel/node_modules/
 examples/minimal-vmodel/dist/
 examples/pigate5/
 examples/pigate5/.takumi/
+eval/.compiled/
+eval/results/*.json
