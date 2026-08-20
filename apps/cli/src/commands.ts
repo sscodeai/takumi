@@ -8,6 +8,7 @@ import {
   executeWorkflow,
   renderTraceabilityMatrix,
   WorkflowDefinition,
+  WorkflowStepResult,
 } from '@takumi/core';
 import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
@@ -203,7 +204,7 @@ export async function runTask(opts: RunOptions): Promise<{
   if (opts.workflow) {
     const wf = await loadWorkflow(opts.cwd, opts.config, opts.workflow);
     // Durable resume: rebuild completed steps from the newest audit record.
-    let resumeCtx: { completed: Map<string, { stepId: string; status: 'completed'; summary: string; artifacts: string[]; tests: string[] }> } | undefined;
+    let resumeCtx: { completed: Map<string, WorkflowStepResult> } | undefined;
     if (opts.resume) {
       const fs = await import('node:fs');
       const { readdirSync } = fs;
@@ -217,7 +218,7 @@ export async function runTask(opts: RunOptions): Promise<{
       }
       if (latest) {
         const rec = JSON.parse(fs.readFileSync(latest, 'utf8')) as { steps?: { stepId: string; status: string; summary: string }[] };
-        const completed = new Map<string, { stepId: string; status: 'completed'; summary: string; artifacts: string[]; tests: string[] }>();
+        const completed = new Map<string, WorkflowStepResult>();
         for (const s of rec.steps ?? []) {
           if (s.status === 'completed') {
             completed.set(s.stepId, { stepId: s.stepId, status: 'completed' as const, summary: s.summary ?? '(resumed)', artifacts: [], tests: [] });
