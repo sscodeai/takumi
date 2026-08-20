@@ -96,3 +96,24 @@ export function topoSort(steps: WorkflowStep[]): string[] {
   for (const step of steps) visit(step.id);
   return out;
 }
+
+/**
+ * Group a topo-ordered step list into CONCURRENCY LEVELS (P2 parallel).
+ * Steps in the same level have no dependency on each other (all deps are in
+ * earlier levels), so they MAY run in parallel. Levels are ordered: level[i]
+ * only depends on levels [0..i-1]. Returns e.g. [['a','b'], ['c'], ['d','e']].
+ */
+export function groupByLevel(steps: WorkflowStep[], order: string[]): string[][] {
+  const byId = new Map(steps.map((s) => [s.id, s]));
+  const levelOf = new Map<string, number>();
+  const levels: string[][] = [];
+  for (const id of order) {
+    const step = byId.get(id);
+    const deps = step?.dependsOn ?? [];
+    const depLevels = deps.map((d) => levelOf.get(d) ?? 0);
+    const level = depLevels.length === 0 ? 0 : Math.max(...depLevels) + 1;
+    levelOf.set(id, level);
+    (levels[level] ??= []).push(id);
+  }
+  return levels;
+}

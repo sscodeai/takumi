@@ -12,6 +12,7 @@ import {
   topoSort,
   validateCapabilities,
 } from './index.js';
+import { groupByLevel } from './workflow.js';
 import { randomUUID } from 'node:crypto';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -209,11 +210,63 @@ export async function executeWorkflow(
   const failedIds = new Set<string>();
 
   try {
+    // P2 parallel: pre-execute all no-dependency AGENT steps concurrently.
+    // (Independent steps at topo level 0 can run in parallel; their results
+    // are cached and the main loop replays them from cache.)
+    const levels = groupByLevel(workflow.steps, order);
+    const preRun = new Map<string, WorkflowStepResult>();
+    if (levels[0] && levels[0].length > 1 && ctx.runtime.capabilities().capabilities.includes('parallelExecution')) {
+      const lvl0 = levels[0].filter((id) => byId.get(id)?.type === 'agent');
+      if (lvl0.length > 1) {
+        const runOne = async (stepId: string): Promise<WorkflowStepResult> => {
+          const step = byId.get(stepId)!;
+          run.stepStatus[stepId] = 'running';
+          ctx.onEvent?.(stepId, `parallel run`);
+          const task: AgentTask = {
+            id: `${runId}:${stepId}:1`,
+            prompt: await resolveStepPrompt(step, ctx.skillsRoot, vars),
+            cwd: ctx.cwd,
+            trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
+            context: { workflowStep: stepId, workflow: workflow.name, ...vars },
+          };
+          try {
+            const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
+            if (res.status === 'completed') {
+              const art = res.summary ? await ctx.artifacts.write({
+                taskId: task.id, kind: stepArtifactKind(step, stepId.split('_')[0] ?? 'output'),
+                fileName: `${stepId}.md`, content: `# ${stepId}\n\n${res.summary}\n`,
+                contentType: 'text/markdown', trace: task.trace ?? [],
+              }).catch(() => null) : null;
+              return { stepId, status: 'completed', summary: res.summary, artifacts: art ? [art.path] : [], tests: res.tests };
+            }
+            return { stepId, status: 'failed', summary: res.error ?? res.summary, artifacts: [], tests: res.tests };
+          } catch (e) {
+            return { stepId, status: 'failed', summary: e instanceof Error ? e.message : String(e), artifacts: [], tests: [] };
+          }
+        };
+        const results = await Promise.all(lvl0.map(runOne));
+        for (const r of results) {
+          preRun.set(r.stepId, r);
+          vars[`step.${r.stepId}`] = r.summary;
+        }
+      }
+    }
     for (const stepId of order) {
       const step = byId.get(stepId);
       if (!step) {
         run.stepStatus[stepId] = 'failed';
         throw new Error(`workflow step ${stepId} not found in definition`);
+      }
+
+      // Replay a concurrently pre-executed level-0 agent step.
+      const pre = preRun.get(stepId);
+      if (pre) {
+        run.stepStatus[stepId] = pre.status;
+        stepResults.push(pre);
+        if (pre.status === 'completed') done.add(stepId);
+        else failedIds.add(stepId);
+        ctx.onEvent?.(stepId, `parallel result: ${pre.status}`);
+        continue;
       }
 
       // Skip a step whose dependencies failed.

@@ -24,7 +24,7 @@ export class TestRuntime implements AgentRuntimeAdapter {
   private readonly usages = new Map<TaskId, Usage>();
   private readonly cancelled = new Set<TaskId>();
   constructor(
-    private readonly onResult: (task: AgentTask) => string | void = () => 'ok',
+    private readonly onResult: (task: AgentTask) => string | void | Promise<string | void> = () => 'ok',
     private readonly caps: RuntimeCapabilities = { capabilities: ['streaming'], maxParallelTasks: 4 },
     private readonly id = 'test',
   ) {}
@@ -53,7 +53,7 @@ export class TestRuntime implements AgentRuntimeAdapter {
     }
 
     try {
-      const summary = this.onResult(task) ?? 'ok';
+      const summary = await this.onResult(task) ?? 'ok';
       this.statuses.set(task.id, 'completed');
       this.usages.set(task.id, {
         runtimeId: 'test',
