@@ -170,6 +170,8 @@ export interface RunOptions {
   verbose?: boolean;
   /** Sandbox mode for runtimes that support it ('none' | 'unshare'). */
   sandbox?: 'none' | 'unshare';
+  /** Durable resume: continue from the last audit record's completed steps. */
+  resume?: boolean;
 }
 
 export async function runTask(opts: RunOptions): Promise<{
@@ -200,6 +202,34 @@ export async function runTask(opts: RunOptions): Promise<{
 
   if (opts.workflow) {
     const wf = await loadWorkflow(opts.cwd, opts.config, opts.workflow);
+    // Durable resume: rebuild completed steps from the newest audit record.
+    let resumeCtx: { completed: Map<string, { stepId: string; status: 'completed'; summary: string; artifacts: string[]; tests: string[] }> } | undefined;
+    if (opts.resume) {
+      const fs = await import('node:fs');
+      const { readdirSync } = fs;
+      const auditDir = join(opts.cwd, opts.config.audit ?? '.takumi/audit');
+      let latest: string | undefined;
+      try {
+        const files = readdirSync(auditDir).filter((f) => f.endsWith('.json')).sort();
+        latest = files.length > 0 ? join(auditDir, files[files.length - 1]!) : undefined;
+      } catch {
+        latest = undefined;
+      }
+      if (latest) {
+        const rec = JSON.parse(fs.readFileSync(latest, 'utf8')) as { steps?: { stepId: string; status: string; summary: string }[] };
+        const completed = new Map<string, { stepId: string; status: 'completed'; summary: string; artifacts: string[]; tests: string[] }>();
+        for (const s of rec.steps ?? []) {
+          if (s.status === 'completed') {
+            completed.set(s.stepId, { stepId: s.stepId, status: 'completed' as const, summary: s.summary ?? '(resumed)', artifacts: [], tests: [] });
+          }
+        }
+        resumeCtx = { completed };
+        events.push(`resume: ${completed.size} completed step(s) from ${latest}`);
+        if (opts.verbose) console.log(`  resume: ${completed.size} completed step(s) from ${latest}`);
+      } else {
+        events.push('resume: no audit record found — starting fresh');
+      }
+    }
     const result = await executeWorkflow(
       wf,
       {
@@ -207,6 +237,7 @@ export async function runTask(opts: RunOptions): Promise<{
         runtime,
         artifacts: store,
         skillsRoot: join(opts.cwd, opts.config.registry.skills),
+        resume: resumeCtx,
         onApproval: async (req) => {
           const line = `approval required [${req.stepId}]: ${req.prompt}`;
           events.push(line);

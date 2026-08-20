@@ -57,6 +57,7 @@ async function main(argv: string[]): Promise<number> {
       let workflow: string | undefined;
       let verbose = false;
       let sandbox: 'none' | 'unshare' | undefined;
+      let resume = false;
 
       for (let i = 0; i < rest.length; i++) {
         const arg = rest[i] ?? '';
@@ -68,6 +69,8 @@ async function main(argv: string[]): Promise<number> {
           verbose = true;
         } else if (arg === '--sandbox') {
           sandbox = (rest[++i] as 'none' | 'unshare') ?? 'none';
+        } else if (arg === '--resume') {
+          resume = true;
         } else if (arg.startsWith('--runtime=')) {
           runtimeId = arg.slice('--runtime='.length);
         } else if (arg.startsWith('--workflow=')) {
@@ -98,7 +101,7 @@ async function main(argv: string[]): Promise<number> {
       console.log(`  prompt: ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`);
       console.log('');
 
-      const { events, summary, traceabilityMatrix, artifacts } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox });
+      const { events, summary, traceabilityMatrix, artifacts } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox, resume });
 
       for (const ev of events) console.log(`  ${ev}`);
       console.log('');

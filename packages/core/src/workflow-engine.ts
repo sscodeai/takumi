@@ -40,6 +40,17 @@ export interface WorkflowExecutionContext {
    * behavior, not just artifact folder naming (acceptance Gate 8).
    */
   skillsRoot?: string;
+  /**
+   * Durable resume (P2): previously-completed steps to skip.
+   * `completed` maps stepId → its recorded result; any step in `completed`
+   * is replayed from history instead of re-executed, so a long workflow can
+   * continue after a crash/timeout from where it left off.
+   */
+  resume?: {
+    completed: Map<string, WorkflowStepResult>;
+    /** Set true when the whole run was previously completed (all steps done). */
+    fullyCompleted?: boolean;
+  };
 }
 
 export interface WorkflowStepResult {
@@ -210,6 +221,22 @@ export async function executeWorkflow(
       if (deps.some((d) => failedIds.has(d))) {
         run.stepStatus[stepId] = 'skipped';
         stepResults.push({ stepId, status: 'skipped', summary: 'skipped (dependency failed)', artifacts: [], tests: [] });
+        continue;
+      }
+
+      // Durable resume: replay a previously-completed step from history
+      // instead of re-executing it (P2). Its recorded result is reused as-is.
+      const resumed = ctx.resume?.completed.get(stepId);
+      if (resumed) {
+        run.stepStatus[stepId] = 'completed';
+        stepResults.push(resumed);
+        done.add(stepId);
+        ctx.onEvent?.(stepId, `resumed from history (${resumed.status})`);
+        continue;
+      }
+      // A fully-completed prior run means everything is already done.
+      if (ctx.resume?.fullyCompleted) {
+        run.stepStatus[stepId] = 'completed';
         continue;
       }
 
