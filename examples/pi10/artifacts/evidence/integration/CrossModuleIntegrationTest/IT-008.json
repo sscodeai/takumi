@@ -1,0 +1,24 @@
+{
+  "evidence_id": "EVIDENCE-054",
+  "type": "test-result",
+  "test_case_id": "IT-008",
+  "test_method": "it008_commonErrorShapePropagatesAcrossModules",
+  "suite": "com.example.inventory.CrossModuleIntegrationTest",
+  "traceability": "REQ-011 / REQ-010（UT-AUTH-004 / UT-PROD-008 / UT-ORD-008 の結合確認）",
+  "status": "PASS",
+  "time_seconds": 0.192,
+  "environment": {
+    "collected_at": "2026-08-20T01:07:25Z",
+    "project": "在庫管理システム (com.example.inventory)",
+    "module": "pi10",
+    "java": {
+      "version": "17.0.20",
+      "distribution": "Temurin-17.0.20+8",
+      "path": "<home>/tools/jdk-17.0.20+8"
+    },
+    "maven": "3.9.9 (<home>/tools/apache-maven-3.9.9)",
+    "test_command": "mvn test",
+    "db": "H2 (MODE=PostgreSQL) + Flyway V1__init.sql",
+    "note": "Docker デーモン非接続のため PostgreSQL 15 実機検証は未実施（UT-ORD-015 の実ロック検証は順次実行で代替）"
+  }
+}

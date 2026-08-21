@@ -1,0 +1,237 @@
+# 在庫管理システム 標準化要件リスト
+# 入力文書: requirements.md（REQ-INV / REQ-ORDER / REQ-USER）
+# 補助文書: 基本設計書.md / 詳細設計書.md（トレーサビリティ参照のため）
+
+requirements:
+  - id: REQ-001
+    title: "商品マスタ管理（登録・参照・更新・削除）"
+    description: >
+      誰が(Who): 管理者（admin）。何を(What): 商品（ID・名称・単価・在庫数）を登録・参照・更新・削除する。
+      いつ(When): システム運用中、商品の新規追加や情報変更時。どこで(Where): 商品マスタ（products テーブル）。
+      なぜ(Why): 在庫・受注の基盤となる商品情報を正しく維持するため。どのように(How): REST API（/api/products）経由。
+      なお商品マスタ CRUD は要件書に明記がなく、設計側で仮定として追加された（要確認: 要件として正式に含めるか）。
+    acceptance_criteria:
+      - 商品を登録すると ID・名称・単価・在庫数が保存され、参照できること
+      - 既存商品の名称・単価・在庫数を更新できること
+      - 受注明細から参照されている商品は削除時にエラー（409）となり削除されないこと
+      - admin ロールのみが登録・更新・削除を実行できること（user は 403）
+    priority: High
+    source: "要件書 REQ-INV / 基本設計書 §4・§5 / 詳細設計書 A-02"
+    traceability: ["REQ-INV"]
+
+  - id: REQ-002
+    title: "在庫照会"
+    description: >
+      誰が(Who): admin および user。何を(What): 商品一覧・商品ごとの在庫数を照会する。
+      いつ(When): 画面表示・検索時。どこで(Where): 在庫照会画面（SC-INV-001）/ GET /api/products。
+      なぜ(Why): 現在の在庫状況を把握できるようにするため。どのように(How): 商品名キーワードによる部分一致検索、ページネーション。
+    acceptance_criteria:
+      - 商品の一覧（ID・名称・単価・在庫数）を取得できること
+      - 商品名で部分一致検索ができること
+      - ページング（page / size）により一覧を取得できること
+      - 認証済みユーザー（admin / user）のみ照会できること
+    priority: High
+    source: "要件書 REQ-INV / 基本設計書 §3 SC-INV-001・§4 API-INV-001"
+    traceability: ["REQ-INV"]
+
+  - id: REQ-003
+    title: "入庫処理（在庫加算）"
+    description: >
+      誰が(Who): 管理者（admin。要確認: user への権限付与可否）。何を(What): 指定商品の在庫数を入庫数量分加算する。
+      いつ(When): 商品が入荷した時。どこで(Where): 入庫画面（SC-INV-002）/ POST /api/inventory/receipt。
+      なぜ(Why): 実際の在庫を正確に反映するため。どのように(How): 商品 ID と正の整数の入庫数量を受け取り、在庫を加算する。
+    acceptance_criteria:
+      - 正の整数の入庫数量を指定すると、在庫が加算されること
+      - 処理後に更新後在庫数を返すこと
+      - 数量が 0 以下・非整数の場合は 400（E-400）を返すこと
+      - 存在しない商品 ID の場合は 404（E-404）を返すこと
+    priority: High
+    source: "要件書 REQ-INV / 基本設計書 §3 SC-INV-002・§4 API-INV-003・§7 V-005"
+    traceability: ["REQ-INV"]
+
+  - id: REQ-004
+    title: "出庫処理（在庫減算）"
+    description: >
+      誰が(Who): 管理者（admin。要確認: user への権限付与可否）。何を(What): 指定商品の在庫数を出庫数量分減算する。
+      いつ(When): 商品を払い出す時。どこで(Where): 出庫画面（SC-INV-003）/ POST /api/inventory/shipment。
+      なぜ(Why): 払い出しによる在庫減少を正確に反映するため。どのように(How): 商品 ID と正の整数の出庫数量を受け取り、在庫を減算する。
+      要確認: 出庫と受注確定（引き当て）の在庫減算が同一操作か、別操作（受注外の払い出しを許容）か。
+    acceptance_criteria:
+      - 正の整数の出庫数量を指定すると、在庫が減算されること
+      - 出庫数量が現在在庫を超える場合は 409（E-409）を返し、在庫を変更しないこと
+      - 在庫が 0 になる出庫（数量 = 現在在庫）は成功すること
+      - 数量が 0 以下・非整数の場合は 400（E-400）を返すこと
+    priority: High
+    source: "要件書 REQ-INV / 基本設計書 §3 SC-INV-003・§4 API-INV-004・§7 V-005・§8 E-409"
+    traceability: ["REQ-INV"]
+
+  - id: REQ-005
+    title: "受注管理（作成・参照・更新・キャンセル）"
+    description: >
+      誰が(Who): admin および user。何を(What): 受注（商品・数量・顧客名を含む）を作成・参照・更新・キャンセルする。
+      いつ(When): 顧客からの注文発生時および注文内容の変更・取消時。どこで(Where): 受注各画面（SC-ORD-001〜003）/ /api/orders。
+      なぜ(Why): 注文を記録・追跡し、後続の在庫引き当てに繋げるため。どのように(How): REST API で受注（DRAFT/CONFIRMED/CANCELED 状態）を操作する。
+      要確認: 要件書は単一「商品」だが、設計では複数明細（1:N）を許容（詳細設計 A-06）。どちらに確定するか。
+    acceptance_criteria:
+      - 商品・数量・顧客名を指定して受注を作成できること（作成時は DRAFT）
+      - 受注を ID で参照できること
+      - DRAFT 状態の受注のみ更新できること（確定・取消済みは 409）
+      - 受注をキャンセルできること
+      - 明細が 0 件、数量 0 以下、存在しない商品の場合はエラーを返すこと
+    priority: High
+    source: "要件書 REQ-ORDER / 基本設計書 §4 API-ORD-001〜004・§7 V-006〜008"
+    traceability: ["REQ-ORDER"]
+
+  - id: REQ-006
+    title: "受注確定時の在庫引き当て"
+    description: >
+      誰が(Who): admin および user。何を(What): 受注確定時に明細の各商品の在庫を引き当て（減算）する。
+      いつ(When): 受注を確定する操作時。どこで(Where): /api/orders/{id}/confirm。
+      なぜ(Why): 確定した注文分の在庫を確保し、在庫の二重引き当てを防ぐため。
+      どのように(How): 受注状態を CONFIRMED に遷移し、明細ごとに在庫を減算する。同一トランザクションで処理し、在庫不足時は全量ロールバックする。
+    acceptance_criteria:
+      - 在庫が十分な場合、受注が CONFIRMED になり在庫が減算されること
+      - 在庫不足の場合、409（E-409）を返し、全明細の減算を行わず在庫を不変に保つこと
+      - 確定済み受注を再確定した場合は 409（E-409）を返すこと
+      - 減算処理は同一トランザクションで原子的に実行されること
+    priority: High
+    source: "要件書 REQ-ORDER / 基本設計書 §5.2・§8.2 / 詳細設計書 API-ORD-005"
+    traceability: ["REQ-ORDER"]
+
+  - id: REQ-007
+    title: "ユーザー管理（登録・参照・更新・削除）"
+    description: >
+      誰が(Who): 管理者（admin）。何を(What): ユーザー（ID・パスワード・ロール）を登録・参照・更新・削除する。
+      いつ(When): システム利用者の追加・変更・削除時。どこで(Where): ユーザー管理画面（SC-USR-001）/ /api/users。
+      なぜ(Why): システムへのアクセスを適切に制御するため。どのように(How): ロールは admin / user の 2 種のみ。
+      要確認: ユーザー ID の形式（半角英数字 3〜32 文字等）は要件書に明記なし（設計側で仮定）。
+    acceptance_criteria:
+      - admin がユーザーを作成・一覧参照・更新・削除できること
+      - パスワードは平文でなくハッシュ化して保存し、レスポンスに含めないこと
+      - username の重複は 409（E-409）で拒否されること
+      - ロールは admin / user 以外を受け付けないこと
+      - user ロールによるユーザー管理 API 呼び出しは 403（E-403）となること
+    priority: High
+    source: "要件書 REQ-USER / 基本設計書 §4 API-USR-002〜005・§6・§7 V-009〜011"
+    traceability: ["REQ-USER"]
+
+  - id: REQ-008
+    title: "認証（ログイン・ログアウト）"
+    description: >
+      誰が(Who): 全ユーザー。何を(What): ID・パスワードによる認証と、認証トークン発行・破棄。
+      いつ(When): システム利用開始時（ログイン）・終了時（ログアウト）。どこで(Where): ログイン画面（SC-USR-002）/ POST /api/login。
+      なぜ(Why): 未認証アクセスを防ぎ、本人確認を行うため。どのように(How): セッショントークン方式（JWT）。認証成功でトークンを発行し、以降の API は Bearer トークンで保護する。
+      要確認: トークン有効期限・ログアウトのサーバ側失効方式（ブラックリスト等）は要件書に明記なし。
+    acceptance_criteria:
+      - 正しい ID・パスワードでログインするとトークンとユーザー情報が返ること
+      - ID またはパスワード不一致は 401（E-401）を返すこと
+      - 未入力は 400（E-400）を返すこと
+      - 無効・期限切れトークンでの保護 API アクセスは 401（E-401）となること
+    priority: High
+    source: "要件書 REQ-USER / 基本設計書 §4 API-USR-001・§8 E-401"
+    traceability: ["REQ-USER"]
+
+  - id: REQ-009
+    title: "認可（ロールによるアクセス制御）"
+    description: >
+      誰が(Who): システムが主体（ユーザーのロールに応じて）。何を(What): 機能ごとのアクセス可否をロールで制御する。
+      いつ(When): 各 API 呼び出し・画面表示時。どこで(Where): 権限マトリクス（基本設計書 §6.2）。
+      なぜ(Why): 管理者専用機能（ユーザー管理・商品マスタ操作・入出庫）を保護するため。どのように(How): admin=全機能、user=在庫照会・受注操作のみ。
+      要確認: 入庫・出庫の実行権限を user に許可するか（要件書に明記なし、設計では admin のみ）。
+    acceptance_criteria:
+      - user がユーザー管理 API を呼び出すと 403（E-403）となること
+      - user が入庫・出庫 API を呼び出すと 403（E-403）となること（要確認）
+      - 権限不足の画面・ボタンが非表示またはアクセス不可となること
+    priority: High
+    source: "要件書 REQ-USER / 基本設計書 §6 権限設計・§8 E-403"
+    traceability: ["REQ-USER", "REQ-INV"]
+
+  - id: REQ-010
+    title: "入力検証"
+    description: >
+      誰が(Who): システム。何を(What): 入力値（商品・在庫・受注・ユーザー項目）の形式・範囲を検証する。
+      いつ(When): API リクエスト受信時。どこで(Where): 全 API / 各画面。なぜ(Why): 不正データの登録・処理を防ぐため。
+      どのように(How): 必須・数値・範囲・文字数・一意性・ロール値のチェック（V-001〜V-011）。
+    acceptance_criteria:
+      - 必須項目の欠落・空文字は 400（E-400）を返すこと
+      - 単価が 0 未満、数量が 0 以下、名称 256 文字以上は 400 を返すこと
+      - パスワードは最小長 8 文字以上を満たすこと（要確認: 複雑度ポリシーの正式要件）
+      - ロールは admin / user 以外を拒否すること
+      - エラーはフィールド単位で返されること
+    priority: Medium
+    source: "基本設計書 §7 入力検証 V-001〜V-011"
+    traceability: ["REQ-INV", "REQ-ORDER", "REQ-USER"]
+
+  - id: REQ-011
+    title: "エラー応答の共通形式"
+    description: >
+      誰が(Who): システム。何を(What): 全てのエラーを共通形式（コード・メッセージ・フィールドエラー）で返す。
+      いつ(When): エラー発生時。どこで(Where): 全 API。なぜ(Why): クライアントがエラーを一貫して処理・リカバリできるようにするため。
+      どのように(How): E-400〜E-500 のコード体系と HTTP ステータスを対応付け、共通レスポンス形式で返す。
+    acceptance_criteria:
+      - エラー応答に code / message / timestamp / errors が含まれること
+      - 入力検証エラーは E-400、認証は E-401、認可は E-403、不存在は E-404、状態不正・在庫不足・重複は E-409、システム障害は E-500 にマッピングされること
+    priority: Medium
+    source: "基本設計書 §8 例外処理"
+    traceability: ["REQ-INV", "REQ-ORDER", "REQ-USER"]
+
+  - id: REQ-012
+    title: "非機能: 性能"
+    description: >
+      誰が(Who): システム。何を(What): 在庫照会・受注一覧の応答性能を実用的な範囲に抑える。
+      いつ(When): 通常運用時・同時アクセス時。どこで(Where): 一覧系 API・DB。
+      なぜ(Why): 利用者の待ち時間を許容範囲に収めるため。どのように(How): インデックス整備・ページング。
+      要確認: 目標応答時間・スループット・同時利用ユーザー数・データ規模は要件書に未定義。
+    acceptance_criteria:
+      - 一覧系 API がページング（page / size）に対応していること
+      - 検索・一覧で利用する列（商品名・受注状態・顧客名・外部キー）にインデックスが定義されること
+      - 目標応答時間・スループットの具体的数値は「要確認」として扱うこと
+    priority: Medium
+    source: "基本設計書 §10 非機能要件"
+    traceability: ["REQ-INV", "REQ-ORDER"]
+
+  - id: REQ-013
+    title: "非機能: セキュリティ"
+    description: >
+      誰が(Who): システム。何を(What): パスワードのハッシュ化保存、API 保護、SQL インジェクション対策を実施する。
+      いつ(When): 常時（設計・実装を通じて）。どこで(Where): 認証基盤・DB アクセス層。
+      なぜ(Why): 情報漏えい・不正アクセス・改ざんを防ぐため。どのように(How): BCrypt ハッシュ化、JWT による API 保護、プリペアドステートメント、ロールによる認可制御。
+    acceptance_criteria:
+      - パスワードが平文でなくハッシュ化されて保存されること
+      - 認証トークンで保護 API が保護され、未認証アクセスが 401 となること
+      - SQL インジェクション対策（プリペアドステートメント等）が実装されること
+      - パスワードがレスポンス・画面・ログに露出しないこと
+    priority: High
+    source: "基本設計書 §10 非機能要件 / 詳細設計書 §4.1 SecurityConfig"
+    traceability: ["REQ-USER", "REQ-INV", "REQ-ORDER"]
+
+  - id: REQ-014
+    title: "非機能: 可用性・データ整合性（トランザクション）"
+    description: >
+      誰が(Who): システム。何を(What): 受注確定と在庫引き当て（およびキャンセル時の在庫戻し）をトランザクションで処理し、データ不整合を防止する。
+      いつ(When): 受注確定・キャンセル時。どこで(Where): /api/orders/{id}/confirm・/cancel。
+      なぜ(Why): 部分的な更新による在庫・受注の不整合を防ぐため。どのように(How): 同一トランザクション、商品行ロック（SELECT ... FOR UPDATE）による同時実行制御。
+      要確認: バックアップ/DR 方針は要件書に未定義。
+    acceptance_criteria:
+      - 確定時の在庫減算が全明細まとめて原子的に実行されること
+      - 在庫不足時は全量ロールバックされ、在庫が不変であること
+      - 確定済み受注のキャンセルで在庫が戻し入れされること（要確認: 戻し入れ実施の正式要件）
+      - 同一商品への同時確定時に在庫整合が保たれること（行ロック）
+    priority: High
+    source: "基本設計書 §5.2・§8.2・§10 / 詳細設計書 §3.2"
+    traceability: ["REQ-ORDER", "REQ-INV"]
+
+  - id: REQ-015
+    title: "入出庫履歴の記録（監査）"
+    description: >
+      誰が(Who): システム。何を(What): 入庫・出庫・受注確定/キャンセルに伴う在庫変動の履歴を記録する。
+      いつ(When): 在庫変動が発生する度に。どこで(Where): stock_transactions テーブル / GET /api/inventory/transactions。
+      なぜ(Why): 在庫変動の追跡・監査を可能にするため。どのように(How): 種別（IN/OUT）・数量・関連受注・実行者の記録。
+      要確認: 監査ログ要件は要件書に明記なし（設計側で仮定として追加）。
+    acceptance_criteria:
+      - 入出庫・受注確定・キャンセルの在庫変動ごとに履歴が記録されること
+      - 履歴を商品 ID で絞り込んで一覧参照できること（admin 専用）
+      - 受注由来の変動には relatedOrderId が記録されること
+    priority: Low
+    source: "基本設計書 §10 非機能要件 / 詳細設計書 A-07"
+    traceability: ["REQ-INV", "REQ-ORDER"]

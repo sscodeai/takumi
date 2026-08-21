@@ -1,0 +1,8 @@
+name: spring-security-review
+kind: skill
+version: 0.1.0
+description: Spring Boot アプリのセキュリティレビュー（認証・認可・セッション・SQL注入）
+prompts:
+  review: prompts/review.md
+resources:
+- SKILL.md

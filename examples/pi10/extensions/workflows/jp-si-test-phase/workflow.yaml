@@ -1,0 +1,45 @@
+name: jp-si-test-phase
+version: 0.1.0
+description: 日本 SI V-model テストフェーズのみ（単体→結合→品質門→レビュー→エビデンス→納品）。implementation 済みコードに対して実行する。
+steps:
+  - id: unit_test
+    type: agent
+    skill: jp-unit-test
+    prompt: |
+      既存の実装コード（src/main/java）に対して単体テストを**実際に作成**せよ。
+      src/test/java 配下に JUnit テストクラスを書き、mvn test で実行可能にすること。
+      テスト仕様書（単体テスト仕様書.md）を参照しつつ、**テストコードをファイルとして落とす**こと。
+      作成したテストファイル一覧と実行結果を返せ。
+    dependsOn: []
+  - id: integration_test
+    type: agent
+    skill: jp-integration-test
+    prompt: |
+      既存実装のモジュール間連携（Controller→Service→Repository/API 層）を検証する
+      結合テストを src/test/java 配下に**実際に作成**せよ。JUnit で実行可能にすること。
+      IT-001 から連番でテストケースを定義し、トレーサビリティ（REQ/UT 紐付け）を含めること。
+      作成したファイル一覧と実行結果を返せ。
+    dependsOn: [unit_test]
+  - id: quality_gate
+    type: quality_gate
+    prompt: |
+      if [ -f pom.xml ]; then (mvn test 2>&1 || mvn -q test 2>&1) | tee /tmp/takumi-qg.log;
+      elif [ -f build.gradle ] || [ -f settings.gradle ]; then gradle test 2>&1 | tee /tmp/takumi-qg.log;
+      else node --test 2>&1 | tee /tmp/takumi-qg.log; fi;
+      grep -E "^# tests|Tests run:|BUILD SUCCESS|BUILD FAILURE" /tmp/takumi-qg.log | tail -5
+    dependsOn: [integration_test]
+    timeoutMs: 600000
+  - id: evidence
+    type: agent
+    skill: jp-evidence
+    prompt: |
+      テスト実行結果（mvn test の surefire レポート）とビルド結果を収集し、
+      トレーサビリティ付きエビデンス（EVIDENCE-xxx）をまとめよ。
+    dependsOn: [quality_gate]
+  - id: delivery
+    type: delivery
+    prompt: |
+      {{#each artifacts}}
+      {{kind}}: {{path}}
+      {{/each}}
+    dependsOn: [evidence]

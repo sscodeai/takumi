@@ -1,0 +1,8 @@
+name: jp-evidence
+kind: skill
+version: 0.1.0
+description: 日本SIのエビデンス収集スキル（テスト結果・型チェック・ログ）
+prompts:
+  collect: prompts/collect.md
+resources:
+- SKILL.md

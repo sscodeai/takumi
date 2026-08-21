@@ -1,0 +1,85 @@
+{
+  "environment": {
+    "collected_at": "2026-08-20T01:07:25Z",
+    "project": "在庫管理システム (com.example.inventory)",
+    "module": "pi10",
+    "java": {
+      "version": "17.0.20",
+      "distribution": "Temurin-17.0.20+8",
+      "path": "<home>/tools/jdk-17.0.20+8"
+    },
+    "maven": "3.9.9 (<home>/tools/apache-maven-3.9.9)",
+    "test_command": "mvn test",
+    "db": "H2 (MODE=PostgreSQL) + Flyway V1__init.sql",
+    "note": "Docker デーモン非接続のため PostgreSQL 15 実機検証は未実施（UT-ORD-015 の実ロック検証は順次実行で代替）"
+  },
+  "suites": [
+    {
+      "class": "com.example.inventory.AuthIntegrationTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 0.588,
+      "txt": "com.example.inventory.AuthIntegrationTest.txt",
+      "xml": "TEST-com.example.inventory.AuthIntegrationTest.xml"
+    },
+    {
+      "class": "com.example.inventory.CrossModuleIntegrationTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 1.079,
+      "txt": "com.example.inventory.CrossModuleIntegrationTest.txt",
+      "xml": "TEST-com.example.inventory.CrossModuleIntegrationTest.xml"
+    },
+    {
+      "class": "com.example.inventory.InventoryIntegrationTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 4.937,
+      "txt": "com.example.inventory.InventoryIntegrationTest.txt",
+      "xml": "TEST-com.example.inventory.InventoryIntegrationTest.xml"
+    },
+    {
+      "class": "com.example.inventory.OrderIntegrationTest",
+      "tests": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 1.179,
+      "txt": "com.example.inventory.OrderIntegrationTest.txt",
+      "xml": "TEST-com.example.inventory.OrderIntegrationTest.xml"
+    },
+    {
+      "class": "com.example.inventory.ProductIntegrationTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 0.737,
+      "txt": "com.example.inventory.ProductIntegrationTest.txt",
+      "xml": "TEST-com.example.inventory.ProductIntegrationTest.xml"
+    },
+    {
+      "class": "com.example.inventory.UserIntegrationTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 1.084,
+      "txt": "com.example.inventory.UserIntegrationTest.txt",
+      "xml": "TEST-com.example.inventory.UserIntegrationTest.xml"
+    }
+  ],
+  "totals": {
+    "tests": 59,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "evidence_count": 59
+}

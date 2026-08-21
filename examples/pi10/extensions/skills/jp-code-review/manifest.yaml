@@ -1,0 +1,8 @@
+name: jp-code-review
+kind: skill
+version: 0.1.0
+description: 日本SIのコードレビュースキル（レビュー観点・チェックリスト）
+prompts:
+  review: prompts/review.md
+resources:
+- SKILL.md

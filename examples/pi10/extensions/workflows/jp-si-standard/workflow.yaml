@@ -1,0 +1,82 @@
+name: jp-si-standard
+version: 0.2.0
+description: Japanese SI standard V-model flow (requirements → detailed design → approval → implementation → unit test → quality gate → independent review → evidence → delivery)
+runtime: fake
+requires:
+  - filesystem
+  - shell
+steps:
+  - id: requirements
+    type: agent
+    skill: jp-requirements
+    prompt: |
+      分析以下需求，输出标准化 Requirement 清单（REQ-001, REQ-002, ...）：
+      {input}
+  - id: basic_design
+    type: agent
+    skill: jp-basic-design
+    prompt: |
+      基于 Requirements 生成日本风格基本設計書（概述/架构/画面/API/DB/权限/校验/异常处理）。
+    dependsOn: [requirements]
+  - id: detailed_design
+    type: agent
+    skill: jp-detailed-design
+    prompt: |
+      基于基本設計書生成詳細設計書：画面仕様・API仕様・DBスキーマ・クラス設計・単体テスト仕様・実装手順（実装者がそのままコーディングできる粒度）。
+    dependsOn: [basic_design]
+  - id: design_approval
+    type: approval
+    prompt: 基本設計書・詳細設計書が完成しました。実装フェーズに進むことを承認しますか？
+    dependsOn: [detailed_design]
+  - id: implementation
+    type: agent
+    # NO skill here (was wrongly jp-code-review): this step MUST write the
+    # actual implementation files from the detailed design.
+    prompt: |
+      実装者として、詳細設計書に従って実際のソースコードをプロジェクト直下（src/ 等）に作成せよ。
+      設計書の画面仕様・API仕様・DBスキーマ・クラス設計に従い、実行可能なコードをファイルとして落とすこと。
+      コードファイルを作成し終えたら、作成したファイル一覧と実装サマリを返せ。
+    dependsOn: [design_approval]
+  - id: unit_test
+    type: agent
+    skill: jp-unit-test
+    prompt: 为实现的代码生成并执行单元测试（正常系/異常系/境界値）。
+    dependsOn: [implementation]
+  - id: integration_test
+    type: agent
+    skill: jp-integration-test
+    prompt: 结合体（模块間・サービス間・API層）の連携を検証する結合試験を設計・実行する。
+    dependsOn: [unit_test]
+  - id: quality_gate
+    type: quality_gate
+    # Auto-detect the project's test runner instead of assuming Node:
+    #   Maven (pom.xml)  -> mvn test
+    #   Gradle (build.gradle/settings.gradle) -> gradle test
+    #   otherwise        -> node --test
+    # The gate FAILS if zero tests run or any test fails (verified by the
+    # engine, which requires tests>0 and fails=0).
+    prompt: |
+      if [ -f pom.xml ]; then (mvn test 2>&1 || mvn -q test 2>&1) | tee /tmp/takumi-qg.log;
+      elif [ -f build.gradle ] || [ -f settings.gradle ]; then gradle test 2>&1 | tee /tmp/takumi-qg.log;
+      else node --test 2>&1 | tee /tmp/takumi-qg.log; fi;
+      grep -E "^# tests|Tests run:|BUILD SUCCESS|BUILD FAILURE" /tmp/takumi-qg.log | tail -5
+    dependsOn: [integration_test]
+    timeoutMs: 300000
+  - id: independent_review
+    type: independent_review
+    skill: jp-code-review
+    prompt: |
+      独立レビューを実施せよ。対象プロジェクト: {projectDir}。
+      実装が詳細設計書・品質基準を満たすか、テストが全てグリーンかを独立の視点で判断し、
+      重大な欠陥（Critical/High/セキュリティ）があれば指摘せよ。なければ合格とする。
+    dependsOn: [quality_gate]
+  - id: evidence
+    type: agent
+    skill: jp-evidence
+    prompt: |
+      收集测试日志・品質ゲート結果・レビュー結果・ビルド結果を集約し、エビデンス一覧（EVIDENCE-xxx）を生成する。
+    dependsOn: [independent_review]
+  - id: delivery
+    type: delivery
+    prompt: 纳品物をまとめる（delivery manifest 生成）。
+    dependsOn: [evidence]

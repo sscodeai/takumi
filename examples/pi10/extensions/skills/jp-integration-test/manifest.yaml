@@ -1,0 +1,8 @@
+name: jp-integration-test
+kind: skill
+version: 0.1.0
+description: 日本SIの結合試験（Integration Test）設計書・実施スキル — モジュール間／サービス間／API層の連携テスト
+prompts:
+  generate: prompts/generate.md
+resources:
+- SKILL.md

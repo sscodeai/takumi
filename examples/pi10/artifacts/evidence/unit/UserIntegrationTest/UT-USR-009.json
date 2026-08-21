@@ -1,0 +1,24 @@
+{
+  "evidence_id": "EVIDENCE-044",
+  "type": "test-result",
+  "test_case_id": "UT-USR-009",
+  "test_method": "utUsr009_deleteSelf",
+  "suite": "com.example.inventory.UserIntegrationTest",
+  "traceability": "REQ-USER / API-USR-005 / E-409（異常: 自分自身の削除）",
+  "status": "PASS",
+  "time_seconds": 0.069,
+  "environment": {
+    "collected_at": "2026-08-20T01:07:25Z",
+    "project": "在庫管理システム (com.example.inventory)",
+    "module": "pi10",
+    "java": {
+      "version": "17.0.20",
+      "distribution": "Temurin-17.0.20+8",
+      "path": "<home>/tools/jdk-17.0.20+8"
+    },
+    "maven": "3.9.9 (<home>/tools/apache-maven-3.9.9)",
+    "test_command": "mvn test",
+    "db": "H2 (MODE=PostgreSQL) + Flyway V1__init.sql",
+    "note": "Docker デーモン非接続のため PostgreSQL 15 実機検証は未実施（UT-ORD-015 の実ロック検証は順次実行で代替）"
+  }
+}
