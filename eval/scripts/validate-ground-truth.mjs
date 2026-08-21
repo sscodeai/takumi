@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
-const FIX_ROOTS = [join(import.meta.dirname, '..', 'fixtures', 'ts'), join(import.meta.dirname, '..', 'fixtures', 'hard')];
+const FIX_ROOTS = [join(import.meta.dirname, '..', 'fixtures', 'ts'), join(import.meta.dirname, '..', 'fixtures', 'hard'), join(import.meta.dirname, '..', 'fixtures', 'trap')];
 const CORRECT_CODE = {
   'even': `export function sumEven(numbers) {\n  return numbers.reduce((acc, n) => (n % 2 === 0 ? acc + n : acc), 0);\n}\n`,
   'money': `export function formatMoney(n) {\n  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n}\n`,
@@ -24,12 +24,17 @@ const CORRECT_CODE = {
   'password': `export function isValidPassword(pw) {\n  if (typeof pw !== 'string' || pw.length < 8) return false;\n  if (!/[A-Z]/.test(pw)) return false;\n  if (!/[a-z]/.test(pw)) return false;\n  if (!/[0-9]/.test(pw)) return false;\n  if (pw.toLowerCase().includes('password')) return false;\n  return true;\n}\n`,
   'integration': `export const records = [];\nexport function saveRecord(record) {\n  records.push(record);\n  return true;\n}\n`,
   'parse': `export function parseInput(raw) {\n  if (raw === '' || raw === null || raw === undefined) return 'invalid';\n  const n = Number(raw);\n  return Number.isNaN(n) ? 'invalid' : n;\n}\n`,
+  // trap
+  'process': `export function processItems(items) {\n  const sorted = [...items].sort((a, b) => {\n    const rank = (x) => (x < 0 ? 0 : x === 0 ? 1 : 2);\n    return rank(a) - rank(b) || a - b;\n  });\n  return sorted;\n}\n`,
+  'encode': `export function encode(input) {\n  return input.split('').map((c) => c.charCodeAt(0).toString(16)).join('-');\n}\n`,
+  'deep': `export function deepEquals(a, b) {\n  if (a === b) return true;\n  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;\n  if (Array.isArray(a) !== Array.isArray(b)) return false;\n  if (Array.isArray(a)) {\n    if (a.length !== b.length) return false;\n    return a.every((v, i) => deepEquals(v, b[i]));\n  }\n  const ka = Object.keys(a); const kb = Object.keys(b);\n  if (ka.length !== kb.length) return false;\n  return ka.every((k) => deepEquals(a[k], b[k]));\n}\n`,
 };
 const SRC_FILE = {
   'even': 'src/even.js', 'money': 'src/format.js', 'flatten': 'src/flatten.js',
   'sort': 'src/sort.js', 'counter': null, 'api': 'src/api.js',
   'order': 'src/order.js', 'password': 'src/validate.js', 'integration': 'src/db.js',
   'parse': 'src/legacy.js',
+  'process': 'src/process.js', 'encode': 'src/encoder.js', 'deep': 'src/deep.js',
 };
 
 function runHidden(fixture, applyFix) {
