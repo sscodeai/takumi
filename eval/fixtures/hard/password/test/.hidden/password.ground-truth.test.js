@@ -1,0 +1,10 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { isValidPassword } from '../src/validate.js';
+test('valid', () => assert.equal(isValidPassword('Abcdef1!'), true));
+test('too short', () => assert.equal(isValidPassword('Ab1!'), false));
+test('no uppercase', () => assert.equal(isValidPassword('abcdef1!'), false));
+test('no digit', () => assert.equal(isValidPassword('Abcdefgh'), false));
+test('contains password', () => assert.equal(isValidPassword('mypassword123'), false));
+test('contains PassWord mixed', () => assert.equal(isValidPassword('xPassWord1x'), false));
+test('leet 0 in password is valid (no substring)', () => assert.equal(isValidPassword('Passw0rdX'), true));

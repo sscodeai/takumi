@@ -1,0 +1,10 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { parseInput } from '../src/legacy.js';
+test('empty string invalid', () => assert.equal(parseInput(''), 'invalid'));
+test('null invalid', () => assert.equal(parseInput(null), 'invalid'));
+test('undefined invalid', () => assert.equal(parseInput(undefined), 'invalid'));
+test('zero string valid -> 0', () => assert.equal(parseInput('0'), 0));
+test('42 parses', () => assert.equal(parseInput('42'), 42));
+test('negative parses', () => assert.equal(parseInput('-1'), -1));
+test('non-numeric invalid', () => assert.equal(parseInput('abc'), 'invalid'));
