@@ -1,0 +1,10 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { normalizeUrl } from '../src/url.js';
+test('lowercase host', () => assert.equal(normalizeUrl('http://EXAMPLE.com/a'), 'http://example.com/a'));
+test('keep path case', () => assert.equal(normalizeUrl('http://example.com/Path/To'), 'http://example.com/Path/To'));
+test('strip default http port', () => assert.equal(normalizeUrl('http://example.com:80/a'), 'http://example.com/a'));
+test('strip default https port', () => assert.equal(normalizeUrl('https://example.com:443/a'), 'https://example.com/a'));
+test('keep non-default port', () => assert.equal(normalizeUrl('http://example.com:8080/a'), 'http://example.com:8080/a'));
+test('strip fragment', () => assert.equal(normalizeUrl('http://example.com/a#frag'), 'http://example.com/a'));
+test('keep query', () => assert.equal(normalizeUrl('http://example.com/a?x=1'), 'http://example.com/a?x=1'));

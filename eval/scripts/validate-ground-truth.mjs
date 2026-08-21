@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
-const FIX_ROOTS = [join(import.meta.dirname, '..', 'fixtures', 'ts'), join(import.meta.dirname, '..', 'fixtures', 'hard'), join(import.meta.dirname, '..', 'fixtures', 'trap')];
+const FIX_ROOTS = [join(import.meta.dirname, '..', 'fixtures', 'ts'), join(import.meta.dirname, '..', 'fixtures', 'hard'), join(import.meta.dirname, '..', 'fixtures', 'trap'), join(import.meta.dirname, '..', 'fixtures', 'noselftest')];
 const CORRECT_CODE = {
   'even': `export function sumEven(numbers) {\n  return numbers.reduce((acc, n) => (n % 2 === 0 ? acc + n : acc), 0);\n}\n`,
   'money': `export function formatMoney(n) {\n  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n}\n`,
@@ -28,6 +28,10 @@ const CORRECT_CODE = {
   'process': `export function processItems(items) {\n  const sorted = [...items].sort((a, b) => {\n    const rank = (x) => (x < 0 ? 0 : x === 0 ? 1 : 2);\n    return rank(a) - rank(b) || a - b;\n  });\n  return sorted;\n}\n`,
   'encode': `export function encode(input) {\n  return input.split('').map((c) => c.charCodeAt(0).toString(16)).join('-');\n}\n`,
   'deep': `export function deepEquals(a, b) {\n  if (a === b) return true;\n  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;\n  if (Array.isArray(a) !== Array.isArray(b)) return false;\n  if (Array.isArray(a)) {\n    if (a.length !== b.length) return false;\n    return a.every((v, i) => deepEquals(v, b[i]));\n  }\n  const ka = Object.keys(a); const kb = Object.keys(b);\n  if (ka.length !== kb.length) return false;\n  return ka.every((k) => deepEquals(a[k], b[k]));\n}\n`,
+  // noselftest
+  'csv': `export function parseCsv(text) {\n  const rows = [];\n  let row = [];\n  let field = '';\n  let inQuotes = false;\n  const s = text.replace(/\\r\\n/g, '\\n');\n  for (let i = 0; i < s.length; i++) {\n    const c = s[i];\n    if (inQuotes) {\n      if (c === '"') {\n        if (s[i + 1] === '"') { field += '"'; i++; }\n        else inQuotes = false;\n      } else field += c;\n    } else if (c === '"') inQuotes = true;\n    else if (c === ',') { row.push(field); field = ''; }\n    else if (c === '\\n') { row.push(field); rows.push(row); row = []; field = ''; }\n    else field += c;\n  }\n  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }\n  return rows;\n}\n`,
+  'dates': `export function daysBetween(a, b) {\n  const [ay, am, ad] = a.split('-').map(Number);\n  const [by, bm, bd] = b.split('-').map(Number);\n  const d1 = Date.UTC(ay, am - 1, ad);\n  const d2 = Date.UTC(by, bm - 1, bd);\n  return Math.round((d2 - d1) / 86400000);\n}\n`,
+  'url': `export function normalizeUrl(raw) {\n  const u = new URL(raw);\n  u.hostname = u.hostname.toLowerCase();\n  if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) {\n    u.port = '';\n  }\n  u.hash = '';\n  return u.toString().replace(/\\/$/, '');\n}\n`,
 };
 const SRC_FILE = {
   'even': 'src/even.js', 'money': 'src/format.js', 'flatten': 'src/flatten.js',
@@ -35,6 +39,7 @@ const SRC_FILE = {
   'order': 'src/order.js', 'password': 'src/validate.js', 'integration': 'src/db.js',
   'parse': 'src/legacy.js',
   'process': 'src/process.js', 'encode': 'src/encoder.js', 'deep': 'src/deep.js',
+  'csv': 'src/csv.js', 'dates': 'src/dates.js', 'url': 'src/url.js',
 };
 
 function runHidden(fixture, applyFix) {
@@ -57,7 +62,13 @@ function runHidden(fixture, applyFix) {
   }
   try { execFileSync('npm', ['install', '--no-audit', '--no-fund'], { cwd: wd, stdio: 'pipe' }); } catch {}
   try {
-    const out = execFileSync('npm', ['test'], { cwd: wd, encoding: 'utf8' });
+    let out;
+    try {
+      out = execFileSync('npm', ['test'], { cwd: wd, encoding: 'utf8' });
+    } catch (e) {
+      // fixture without a test script (no-self-test design) → run node --test directly
+      out = execFileSync('node', ['--test', 'test/**/*.test.js'], { cwd: wd, encoding: 'utf8', shell: true });
+    }
     const fail = (out.match(/# fail\s+(\d+)/) ?? [])[1];
     return { pass: fail === '0', failCount: Number(fail ?? 1) };
   } catch (e) {
