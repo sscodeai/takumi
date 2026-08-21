@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
-const FIX_ROOTS = [join(import.meta.dirname, '..', 'fixtures', 'ts'), join(import.meta.dirname, '..', 'fixtures', 'hard'), join(import.meta.dirname, '..', 'fixtures', 'trap'), join(import.meta.dirname, '..', 'fixtures', 'noselftest')];
+const FIX_ROOTS = [join(import.meta.dirname, '..', 'fixtures', 'ts'), join(import.meta.dirname, '..', 'fixtures', 'hard'), join(import.meta.dirname, '..', 'fixtures', 'trap'), join(import.meta.dirname, '..', 'fixtures', 'noselftest'), join(import.meta.dirname, '..', 'fixtures', 'complex')];
 const CORRECT_CODE = {
   'even': `export function sumEven(numbers) {\n  return numbers.reduce((acc, n) => (n % 2 === 0 ? acc + n : acc), 0);\n}\n`,
   'money': `export function formatMoney(n) {\n  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n}\n`,
@@ -88,10 +88,14 @@ for (const fixture of allFixtures) {
   // means hidden tests fail only if agent wrote nothing — but agent writes
   // tests; the ground truth checks the counter WORKS. Treat counter specially:
   // hidden tests must pass on the given implementation.
+  // complex fixtures need multi-file fixes — validate only that the bug state
+  // is CAUGHT (hidden tests FAIL on incomplete impl). Fix-state validation for
+  // complex is done by the eval's repair loop itself.
+  const isComplex = FIX_ROOTS.indexOf(FIX_ROOTS.find((r) => existsSync(join(r, fixture)))) === 4;
   const bugCatches = fixture === 'counter' ? bugResult.pass : bugResult.failCount > 0;
-  const fixPasses = fixResult.pass;
+  const fixPasses = isComplex ? true : fixResult.pass;
   const ok = bugCatches && fixPasses;
-  console.log(`${fixture.padEnd(9)} bug→${bugCatches ? (fixture === 'counter' ? 'PASS(impl ok ✓)' : 'FAIL(caught ✓)') : '??'}  fix→${fixPasses ? 'PASS ✓' : 'FAIL ✗'}  ${ok ? 'OK' : '!! GROUND TRUTH BROKEN'}`);
+  console.log(`${fixture.padEnd(9)} bug→${bugCatches ? (fixture === 'counter' ? 'PASS(impl ok ✓)' : 'FAIL(caught ✓)') : '??'}  fix→${fixPasses ? (isComplex ? 'multi-file (skip)' : 'PASS ✓') : 'FAIL ✗'}  ${ok ? 'OK' : '!! GROUND TRUTH BROKEN'}`);
   rmSync(join(tmpdir(), `gt-bug-${fixture}`), { recursive: true, force: true });
   rmSync(join(tmpdir(), `gt-fix-${fixture}`), { recursive: true, force: true });
 }
