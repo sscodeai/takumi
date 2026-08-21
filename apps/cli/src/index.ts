@@ -125,6 +125,23 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'loop': {
+      const positional: string[] = [];
+      let runtimeId = 'fake';
+      let maxRounds = 5;
+      for (let i = 0; i < rest.length; i++) {
+        const arg = rest[i] ?? '';
+        if (arg === '--runtime') runtimeId = rest[++i] ?? 'fake';
+        else if (arg === '--max-rounds') maxRounds = Number(rest[++i] ?? 5);
+        else if (arg.startsWith('--runtime=')) runtimeId = arg.slice('--runtime='.length);
+        else if (arg.startsWith('--max-rounds=')) maxRounds = Number(arg.slice('--max-rounds='.length));
+        else positional.push(arg);
+      }
+      const task = positional.join(' ') || 'Complete the task described in the workspace';
+      const { runLoop } = await import('./loop-command.js');
+      return await runLoop({ cwd, task, runtimeId, maxRounds });
+    }
+
     case 'help':
     case undefined:
     case '--help':
