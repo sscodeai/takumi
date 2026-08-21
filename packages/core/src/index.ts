@@ -42,3 +42,5 @@ export { runRuntimeContractSuite } from './contract.js';
 export type { Sandbox, SandboxOptions, SandboxResult } from './sandbox.js';
 export { DockerSandbox, NoopSandbox, dockerAvailable } from './sandbox-docker.js';
 export { UnshareSandbox } from './sandbox-unshare.js';
+export { runManagerLoop } from './manager-loop.js';
+export type { LoopRecord, TaskState, LoopDecision, LoopContract, AuditResult, LoopHost } from './manager-loop.js';
