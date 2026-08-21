@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
-const FIX_ROOTS = [join(import.meta.dirname, '..', 'fixtures', 'ts'), join(import.meta.dirname, '..', 'fixtures', 'hard'), join(import.meta.dirname, '..', 'fixtures', 'trap'), join(import.meta.dirname, '..', 'fixtures', 'noselftest'), join(import.meta.dirname, '..', 'fixtures', 'complex')];
+const FIX_ROOTS = [join(import.meta.dirname, '..', 'fixtures', 'ts'), join(import.meta.dirname, '..', 'fixtures', 'hard'), join(import.meta.dirname, '..', 'fixtures', 'trap'), join(import.meta.dirname, '..', 'fixtures', 'noselftest'), join(import.meta.dirname, '..', 'fixtures', 'complex'), join(import.meta.dirname, '..', 'fixtures', 'implicit')];
 const CORRECT_CODE = {
   'even': `export function sumEven(numbers) {\n  return numbers.reduce((acc, n) => (n % 2 === 0 ? acc + n : acc), 0);\n}\n`,
   'money': `export function formatMoney(n) {\n  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n}\n`,
@@ -32,6 +32,9 @@ const CORRECT_CODE = {
   'csv': `export function parseCsv(text) {\n  const rows = [];\n  let row = [];\n  let field = '';\n  let inQuotes = false;\n  const s = text.replace(/\\r\\n/g, '\\n');\n  for (let i = 0; i < s.length; i++) {\n    const c = s[i];\n    if (inQuotes) {\n      if (c === '"') {\n        if (s[i + 1] === '"') { field += '"'; i++; }\n        else inQuotes = false;\n      } else field += c;\n    } else if (c === '"') inQuotes = true;\n    else if (c === ',') { row.push(field); field = ''; }\n    else if (c === '\\n') { row.push(field); rows.push(row); row = []; field = ''; }\n    else field += c;\n  }\n  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }\n  return rows;\n}\n`,
   'dates': `export function daysBetween(a, b) {\n  const [ay, am, ad] = a.split('-').map(Number);\n  const [by, bm, bd] = b.split('-').map(Number);\n  const d1 = Date.UTC(ay, am - 1, ad);\n  const d2 = Date.UTC(by, bm - 1, bd);\n  return Math.round((d2 - d1) / 86400000);\n}\n`,
   'url': `export function normalizeUrl(raw) {\n  const u = new URL(raw);\n  u.hostname = u.hostname.toLowerCase();\n  if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) {\n    u.port = '';\n  }\n  u.hash = '';\n  return u.toString().replace(/\\/$/, '');\n}\n`,
+  // implicit
+  'scheduler': `export const jobs = [];\nexport function scheduleDaily(hour, minute, fn) {\n  const exists = jobs.some((j) => j.hour === hour && j.minute === minute && j.fn === fn);\n  if (!exists) {\n    jobs.push({ hour, minute, fn });\n    jobs.sort((a, b) => a.hour - b.hour || a.minute - b.minute);\n  }\n}\n`,
+  'stats': `export function summarize(numbers) {\n  if (numbers.length === 0) return { min: null, max: null, avg: null, count: 0 };\n  const sum = numbers.reduce((a, b) => a + b, 0);\n  return {\n    min: Math.min(...numbers),\n    max: Math.max(...numbers),\n    avg: Math.round((sum / numbers.length) * 100) / 100,\n    count: numbers.length,\n  };\n}\n`,
 };
 const SRC_FILE = {
   'even': 'src/even.js', 'money': 'src/format.js', 'flatten': 'src/flatten.js',
@@ -40,6 +43,7 @@ const SRC_FILE = {
   'parse': 'src/legacy.js',
   'process': 'src/process.js', 'encode': 'src/encoder.js', 'deep': 'src/deep.js',
   'csv': 'src/csv.js', 'dates': 'src/dates.js', 'url': 'src/url.js',
+  'scheduler': 'src/scheduler.js', 'stats': 'src/stats.js',
 };
 
 function runHidden(fixture, applyFix) {
