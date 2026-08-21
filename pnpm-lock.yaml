@@ -20,12 +20,31 @@ importers:
       '@takumi/runtime-cli':
         specifier: workspace:*
         version: link:../../runtimes/cli
+      '@takumi/runtime-deepseek':
+        specifier: workspace:*
+        version: link:../../runtimes/deepseek
       '@takumi/runtime-fake':
         specifier: workspace:*
         version: link:../../runtimes/fake
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  apps/console:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@takumi/runtime-fake':
+        specifier: workspace:*
+        version: link:../../runtimes/fake
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -58,6 +77,19 @@ importers:
         version: 22.20.1
       typescript:
         specifier: ^5.9.3
+        version: 5.9.3
+
+  runtimes/deepseek:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
         version: 5.9.3
 
   runtimes/fake:
