@@ -43,9 +43,10 @@ mkdirSync(OUT_DIR, { recursive: true });
 
 // ---- harness resolution ----
 async function makeRuntime() {
+  const model = process.env.TAKUMI_EVAL_MODEL;
   if (HARNESS === 'deepseek') {
     const { DeepSeekRuntimeAdapter } = await import('../../runtimes/deepseek/dist/index.js');
-    return new DeepSeekRuntimeAdapter({ maxTurns: 20 });
+    return new DeepSeekRuntimeAdapter({ maxTurns: 20, ...(model ? { model } : {}) });
   }
   if (HARNESS === 'pi') {
     const explicit = process.env.TAKUMI_PI_RUNTIME;
@@ -182,6 +183,7 @@ const avgLatency = results.reduce((s, r) => s + r.latency_ms, 0) / n;
 
 const report = {
   harness: HARNESS,
+  model: process.env.TAKUMI_EVAL_MODEL ?? 'default',
   generated_at: new Date().toISOString(),
   sample_size: n,
   metrics: {
