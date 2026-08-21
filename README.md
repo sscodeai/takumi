@@ -4,7 +4,7 @@
 
 > **"Agents propose. Takumi verifies."** — AI coding agents propose; Takumi independently verifies.
 
-Takumi is a platform layer — **not** a Pi wrapper, not a DeepSeek Harness fork, not another coding agent. It orchestrates software-engineering workflows across pluggable agent runtimes, with built-in support for the Japanese SI development process (要件定義 → 基本設計 → 詳細設計 → 実装 → 単体テスト → 結合テスト → エビデンス → レビュー → 納品).
+Takumi is a platform layer — **not** a Pi wrapper, not a DeepSeek Harness fork, not another coding agent. It orchestrates software-engineering workflows across pluggable agent runtimes, with built-in support for the Japanese SI development process (要件定義 requirements definition → 基本設計 basic design → 詳細設計 detailed design → 実装 implementation → 単体テスト unit test → 結合テスト integration test → エビデンス evidence → レビュー review → 納品 delivery).
 
 ```
                           Takumi
