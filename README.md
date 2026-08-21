@@ -104,7 +104,7 @@ takumi/
 ├── eval/                  # Agent Eval (23 tasks × 6 groups, hidden ground truth)
 ├── bench/                 # System benchmark (B1-B4: reliability/quality-gate/artifacts/parity)
 ├── examples/              # end-to-end demos (pi10: 53 Java + 59 tests green)
-└── docs/                  # ADRs, evaluation.md, final-state-audit.md, finalization-protocol.md
+└── docs/                  # ADRs, evaluation.md
 ```
 
 ### Core principles
@@ -130,12 +130,23 @@ takumi/
 | **Manager Loop — MEA (`takumi loop`, arXiv 2608.01964 aligned)** | ✅ |
 | Golden Path real E2E (53 Java + 59 tests green, mvn BUILD SUCCESS) | ✅ |
 
+## References — Inspired by
+
+Takumi's Manager Loop (MEA: Manage-Execute-Audit) follows the research and ideas of **LongHorizon-Harness** — loop engineering for long-horizon agent tasks: the manager owns task state and decides the next subtask, the executor performs it in a fresh context, and the auditor independently verifies the resulting environment state (only clean audit evidence changes the task state).
+
+**LongHorizon-Harness**
+
+- GitHub: https://github.com/AMAP-ML/LongHorizon-Harness
+- Paper (arXiv): https://arxiv.org/abs/2608.01964
+- Website: https://lh-harness.pages.dev/
+- Hugging Face Daily Papers: https://huggingface.co/papers/2608.01964 (2026-W32 weekly #1)
+
+Takumi implements this loop independently in TypeScript/Node (`packages/core/src/manager-loop.ts`, `takumi loop`), model-agnostic and verified with real runs.
+
 ## Documentation
 
 - Architecture Decision Records: `docs/adr/` (runtime abstraction, extension system, workflow model, event model, artifact traceability)
 - Agent Evaluation: `docs/evaluation.md` (methodology, 23-task results, honest limitations)
-- Current State Audit: `docs/final-state-audit.md` (re-verified PASS/PARTIAL/FAIL per capability)
-- Acceptance: `docs/acceptance-report.md` (40-gate, 4 independent reviewer subagents, scorecard)
 
 ## Known limitations
 
