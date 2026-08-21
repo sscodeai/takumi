@@ -49,7 +49,9 @@ rm -rf /tmp/takumi-demo-loop && cp -r "$ROOT/eval/fixtures/ts/even" /tmp/takumi-
   echo "  (fixtures not built — run node eval/scripts/create-fixtures.mjs)"
 }
 if [ -d /tmp/takumi-demo-loop ]; then
-  (cd /tmp/takumi-demo-loop && node "$ROOT/apps/cli/dist/index.js" loop "Fix sumEven to sum only even numbers and add tests" --runtime fake --max-rounds 2 2>&1 | head -10)
+  LOOP_RT="fake"
+  if [ -n "${COMMANDCODE_API_KEY:-}" ]; then LOOP_RT="deepseek"; fi
+  (cd /tmp/takumi-demo-loop && node "$ROOT/apps/cli/dist/index.js" loop "Fix sumEven to sum only even numbers and add tests" --runtime "$LOOP_RT" --max-rounds 2 2>&1 | head -12)
 fi
 echo ""
 
