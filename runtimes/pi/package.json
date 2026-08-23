@@ -1,6 +1,7 @@
 {
   "name": "@takumi/runtime-pi",
   "version": "0.1.0",
+  "description": "PiRuntimeAdapter: wraps the Pi coding-agent AgentSession into the Takumi AgentRuntimeAdapter contract.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,7 +13,13 @@
     "pretest": "pnpm build"
   },
   "dependencies": {
-    "@takumi/core": "workspace:*",
+    "@takumi/core": "workspace:*"
+  },
+  "peerDependencies": {
+  },
+  "peerDependenciesMeta": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

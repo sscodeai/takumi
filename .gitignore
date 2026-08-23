@@ -12,3 +12,4 @@ eval/results/*.json
 .takumi/
 # maven build output
 examples/pi10/target/
+bench/results/*.json

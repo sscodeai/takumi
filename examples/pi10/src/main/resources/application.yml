@@ -21,6 +21,6 @@ spring:
 
 app:
   jwt:
-    # HS256 に必要な 256bit 以上の秘密鍵（環境変数で上書き推奨）
+    # DEV-ONLY default secret — override with JWT_SECRET in any non-local environment.
     secret: ${JWT_SECRET:inventory-management-system-jwt-secret-key-0123456789abcdef}
     expiration-ms: 3600000
