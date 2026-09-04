@@ -15,6 +15,10 @@
   <img alt="Developer Preview" src="https://img.shields.io/badge/status-developer_preview-F97316.svg" />
 </p>
 
+<p align="center">
+  English | <a href="./README_ja.md">日本語</a>
+</p>
+
 ---
 
 Takumi is an open-source orchestration layer for AI software delivery. It is not

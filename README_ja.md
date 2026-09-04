@@ -1,181 +1,209 @@
-# Takumi
+<p align="center">
+  <img src="./assets/brand/takumi-logo.svg" alt="Takumi" width="720">
+</p>
 
-> **モデル非依存の Agentic Software Engineering Platform — 検証可能な AI ソフトウェアデリバリーを支える基盤。**
+<p align="center">
+  <strong>検証可能な Agentic Software Delivery のためのモデル非依存プラットフォーム。</strong>
+  <br>
+  Workflows、traceability、evidence-native testing、agent evals、verify-before-done loops。
+</p>
 
-> **"Agents propose. Takumi verifies."** — 生成AIエージェントは提案する。Takumi は独立検証する。
+<p align="center">
+  <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111827.svg" /></a>
+  <img alt="Node 20 plus" src="https://img.shields.io/badge/node-20%2B-2DD4BF.svg" />
+  <img alt="TypeScript 5.x" src="https://img.shields.io/badge/typescript-5.x-3178C6.svg" />
+  <img alt="Developer Preview" src="https://img.shields.io/badge/status-developer_preview-F97316.svg" />
+</p>
 
-Takumi はプラットフォーム層です。Pi のラッパーでも、DeepSeek Harness のフォークでも、単なるコーディングエージェントでもありません。プラグイン可能なエージェントランタイムの上で、ワークフロー、品質ゲート、成果物、トレーサビリティ、独立検証をオーケストレーションします。日本 SI / V-model はファーストパーティ workflow として提供されますが、Takumi 自体はより汎用的な AI ソフトウェアデリバリー基盤です。
+<p align="center">
+  <a href="./README.md">English</a> | 日本語
+</p>
 
-```
-                          Takumi
-                           │
-                 Orchestration Core
-                           │
-       ┌───────────────────┼───────────────────┐
-       │                   │                   │
-     Skills              Tools             Workflows
-       │                   │                   │
-       └───────────────────┼───────────────────┘
-                           │
-                     Runtime API
-                           │
-           ┌───────────────┼───────────────┐
-           ▼               ▼               ▼
-          Pi        DeepSeek Harness      Codex
-                           │
-                    More Runtimes
-```
+---
 
-**Core はプラットフォーム。Extensions はエコシステム。Runtimes はエンジン。**
+Takumi は AI ソフトウェアデリバリーのためのオープンソース orchestration layer です。単一の coding agent、Pi wrapper、DeepSeek fork ではありません。Takumi は複数の agent runtime を、明示的な workflow、quality gate、artifact、traceability、independent verification を通じて統合します。
 
-## Takumi が存在する理由
+> **Agents propose. Takumi verifies.**
 
-| 課題 | Takumi のアプローチ |
-|---|---|
-| AI ツールはコードを生成しても、デリバリーの根拠が残りにくい | 要件・設計・テスト・エビデンス・レビューをつなぐトレーサビリティ |
-| 特定のモデルや harness にロックインされやすい | fake / Pi / DeepSeek / CLI bridge などを扱うランタイム抽象 |
-| テストやエビデンスが後付けになりやすい | 単体・結合テストのエビデンスを第一級成果物として扱う |
-| **「できました」が信頼できない** | 品質ゲート、隠しテスト、独立検証で完了判定する |
-| 長期タスクはコンテキストをまたぐと状態が失われやすい | Manage-Execute-Audit loop と永続的なタスク状態 |
-| 現場ごとの開発プロセスを組み込みにくい | Workflow / Skill による拡張。日本 SI は組み込み例として提供 |
+Takumi は、AI agent が生成したソフトウェア変更を、レビュー可能・テスト可能・再開可能・監査可能・エビデンス付きで納品可能な形にするための基盤です。日本 SI / V-model delivery は first-party workflow として含まれますが、Takumi の適用範囲はそこに限定されません。
 
-## Agent Eval — エージェント信頼性の科学的測定
+## What You Can Do
 
-Takumi には **Agent Eval フレームワーク**（`eval/`）が付属：23 個の実 SWE タスク × 6 グループ（easy/hard/trap/no-self-test/complex/implicit）、すべて machine-verifiable な隠し Ground Truth 付き。
+- 要件から evidence まで、構造化された software delivery workflow を実行する。
+- Platform core を変更せずに agent runtime を切り替える。
+- Requirements、design、tests、evidence、review を traceability でつなぐ。
+- Agent output を実テストと独立収集された evidence で gate する。
+- Hidden-ground-truth SWE tasks で agent reliability を評価する。
+- Long-horizon agent work に Manage-Execute-Audit loop を適用する。
+
+## Quick Start
+
+ソースからインストールします。npm package publishing は planned ですが、まだ未リリースです。
 
 ```bash
-# モデルを切り替える = 環境変数を切り替える（モデル非依存、実証済み）
-TAKUMI_EVAL_HARNESS=deepseek TAKUMI_EVAL_MODEL=deepseek/deepseek-v4-flash node eval/scripts/run-eval.mjs
-TAKUMI_EVAL_HARNESS=deepseek TAKUMI_EVAL_MODEL=deepseek/deepseek-v4-pro    node eval/scripts/run-eval.mjs --tasks=ts-complex
-TAKUMI_EVAL_HARNESS=pi                                                     node eval/scripts/run-eval.mjs
-```
+git clone https://github.com/sscodeai/takumi.git
+cd takumi
 
-| モデル | first-pass | false completion | repair 発生 |
-|---|---|---|---|
-| deepseek v4-flash | 23/23 (100%) | 0% | 0 |
-| deepseek v4-pro (complex) | 4/5 (80%) | 0% | **1（自然発生 → 修復 → 100% final）** |
-| Pi (opencode-zen) | 6/6 (100%) | 0% | 0 |
-
-> **重要な発見**：制御可能で検証可能なタスクではエージェントは高い信頼性を示すが、強いモデルでも失敗することはある（v4-pro が並行処理タスクで初回失敗）— **独立検証レイヤーはどのモデルにも必要**。Eval フレームワーク自身も 2 つの測定バグを検出した（`docs/evaluation.md` 参照）—「測定ツールを先に検証してから結果を信じる」原則の証明。
-
-## クイックスタート
-
-> ソースからインストール（npm 公開は **Planned**、未リリース）。
-> Node ≥ 20 と [pnpm](https://pnpm.io) が必要。
-
-```bash
-# 1. クローン & ビルド
-git clone <repo-url> && cd takumi
 pnpm install
 pnpm build
+```
 
-# 2. プロジェクトを初期化
+API key なしで deterministic local task を実行します。
+
+```bash
 pnpm exec takumi init
-
-# 3. 決定的なフェイクランタイムでタスクを実行（API キー不要）
 pnpm exec takumi run "Implement user login API"
+```
 
-# 4. 本物のワークフローを実行（DeepSeek via commandcode.ai、COMMANDCODE_API_KEY が必要）
+Real runtime で workflow を実行します。
+
+```bash
+export COMMANDCODE_API_KEY=...
 pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime deepseek
+```
 
-# 5. MEA ループを実行（Manage-Execute-Audit、arXiv 2608.01964 準拠）
+MEA loop を実行します。
+
+```bash
 pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --max-rounds 5
 ```
 
-**Harness は設定だけで切り替え可能**（Core の変更なし）：
+## Why Takumi
+
+| Problem | Takumi approach |
+|---|---|
+| AI tools generate code but lose the delivery trail | Requirements、design、tests、evidence、review をつなぐ traceability matrix |
+| Products lock users into one model or harness | fake、Pi、DeepSeek、CLI bridge、future runtimes を扱う runtime adapter API |
+| Tests and evidence are treated as afterthoughts | Unit / integration test deliverables のための evidence-native pipeline |
+| Agents can claim "done" too early | Quality gates、hidden tests、independent verification |
+| Long tasks lose state across context windows | Persistent task state を持つ Manage-Execute-Audit loop |
+| Domain delivery processes are hard to encode | Workflow / skill extension system。Japanese SI は built-in example |
+
+## Architecture
+
+```text
+                          Takumi
+                            |
+                    Orchestration Core
+                            |
+        +-------------------+-------------------+
+        |                   |                   |
+      Skills              Tools             Workflows
+        |                   |                   |
+        +-------------------+-------------------+
+                            |
+                       Runtime API
+                            |
+          +-----------------+-----------------+
+          |                 |                 |
+         Pi              DeepSeek           CLI
+          |                                   |
+   More runtimes                       Any harness
+```
+
+```text
+takumi/
+├── apps/cli/              # takumi CLI: init, run, loop, runtime list, extension list
+├── apps/console/          # SSE live logs を備えた lightweight web console
+├── packages/core/         # workflow engine, runtime API, artifacts, traceability, MEA loop, sandbox
+├── runtimes/              # fake, pi, deepseek, cli adapters
+├── extensions/            # skills, tools, workflows
+├── eval/                  # agent reliability evaluation tasks
+├── bench/                 # system benchmark baselines
+├── examples/              # Japanese SI を含む end-to-end delivery examples
+└── docs/                  # ADRs and evaluation notes
+```
+
+## Core Ideas
+
+- **Small Core**: orchestration、task/event/artifact models、runtime abstraction、extension loading、approval、audit のみを core が持つ。
+- **Four extension kinds**: Skill、Tool Plugin、Workflow Plugin、Runtime Adapter。
+- **Harness agnostic**: `runTask`、`cancel`、`getStatus`、`getUsage`、`getArtifacts` を unified event stream 上で扱う。
+- **Traceability by default**: `REQ-001 -> DESIGN-001 -> UT-001 -> EVIDENCE-001`。
+- **Human in the loop**: workflow は approval gate を宣言できる。
+- **Independent verification**: agent の完了主張だけでは完了と見なさない。
+
+## Features
+
+| Capability | Status |
+|---|---|
+| Pluggable runtimes: fake / Pi / DeepSeek / CLI bridge | Done |
+| Declarative workflows, including Japanese SI / V-model | Done |
+| Requirements、basic design、detailed design、tests、evidence、review の skills | Done |
+| Traceability matrix generation | Done |
+| Approval gates | Done |
+| Durable resume from audit records | Done |
+| Parallel workflow step execution | Done |
+| Sandbox abstraction with unshare support | Done |
+| Web console with live logs | Done |
+| Agent Eval with hidden ground truth and repair loop | Done |
+| MEA loop: Manage, Execute, Audit | Done |
+| Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
+
+## Agent Eval
+
+Takumi は `eval/` に Agent Eval framework を含みます。easy、hard、trap、no-self-test、complex、implicit constraint の 6 グループ、合計 23 個の real SWE tasks を扱います。各 task には machine-verifiable ground truth があり、agent-written tests は ground truth として扱いません。
 
 ```bash
-pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime fake      # 決定的
-pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime pi        # Pi エージェント
-pnpm exec takumi run requirements.md --workflow jp-si-standard --runtime deepseek  # OpenAI 互換 LLM
+TAKUMI_EVAL_HARNESS=deepseek TAKUMI_EVAL_MODEL=deepseek/deepseek-v4-flash node eval/scripts/run-eval.mjs
+TAKUMI_EVAL_HARNESS=deepseek TAKUMI_EVAL_MODEL=deepseek/deepseek-v4-pro node eval/scripts/run-eval.mjs --tasks=ts-complex
+TAKUMI_EVAL_HARNESS=pi node eval/scripts/run-eval.mjs
 ```
 
-## アーキテクチャ
+| Model | First-pass | False completion | Repair triggered |
+|---|---:|---:|---:|
+| deepseek v4-flash | 23/23 | 0% | 0 |
+| deepseek v4-pro, complex | 4/5 | 0% | 1 natural repair |
+| Pi, opencode-zen | 6/6 | 0% | 0 |
 
-```
-takumi/
-├── apps/cli/              # takumi CLI (init/run/loop/runtime list/extension list)
-├── apps/console/          # 軽量 Web コンソール（SSE ライブログ、:8787）
-├── packages/core/         # オーケストレーション、ランタイム抽象、ワークフローエンジン、manager-loop (MEA)、sandbox、artifact store、traceability
-├── runtimes/              # ランタイムアダプタ (fake, pi, deepseek)
-├── extensions/            # ファーストパーティ拡張
-│   ├── skills/            #   jp-requirements, jp-basic-design, jp-unit-test, jp-integration-test, jp-evidence, jp-code-review...
-│   ├── tools/             #   (excel, jira, github, playwright — roadmap)
-│   └── workflows/         #   jp-si-standard (V-model, 11 steps), rapid-mvp
-├── eval/                  # Agent Eval (23 tasks × 6 groups, hidden ground truth)
-├── bench/                 # システムベンチマーク (B1-B4)
-├── examples/              # エンドツーエンドデモ (pi10: 53 Java + 59 tests green)
-└── docs/                  # ADRs, evaluation.md
-```
+Methodology、caveats、limitations は [docs/evaluation.md](./docs/evaluation.md) を参照してください。
 
-### コア原則
+## MEA Loop
 
-- **Small Core** — Core はオーケストレーション、タスク/イベント/アーティファクトモデル、ランタイム抽象、拡張ロード、承認、監査のみを所有。日本 SI 固有・ランタイム固有のものは持たない。
-- **4 種類の拡張** — Skill（知識/手順）、Tool Plugin（実行可能な能力）、Workflow Plugin（宣言的プロセス）、Runtime Adapter（ハーネスエンジン）。
-- **Harness 非依存のランタイム API** — 統一イベントストリーム上の `runTask / cancel / getStatus / getUsage / getArtifacts`。内部ツールコールは統一しない。
-- **デフォルトでトレーサビリティ** — すべてのアーティファクトはトレースリンク（REQ-001 → DESIGN-001 → UT-001 → EVIDENCE-001）を持つ。`takumi run` はトレーサビリティマトリクスを出力。
-- **ヒューマンインザループ** — ワークフローは承認ゲートを宣言。CLI は `[a] approve / [r] reject / [v] view` を促す。
-- **独立検証** — 品質ゲートは実際のテストを実行。Agent Eval は隠し Ground Truth を使用。MEA ループの Auditor は Executor の主張を信じない。
+Takumi の Manager Loop は Manage-Execute-Audit pattern に基づいています。
 
-## 機能
+1. **Manager** は persistent task state を保持し、次の subtask を決定する。
+2. **Executor** は fresh context で作業し、environment を変更できる。
+3. **Auditor** は結果の状態を独立検証する。
+4. Clean audit evidence のみが task record を completed にできる。
 
-| 機能 | ステータス |
-|---|---|
-| プラグイン可能ランタイム (fake / pi / deepseek) + `TAKUMI_EVAL_MODEL` モデル切替 | ✅ |
-| 宣言的 workflow（日本 SI / V-model を含む）| ✅ |
-| Durable Resume（`--resume`、audit から復元）| ✅ |
-| 並列ステップ実行（レイヤーベース、TDD 検証済み）| ✅ |
-| サンドボックス分離（unshare: ネットワークオフ / ホスト読み取り専用 / CPU 制限）| ✅ |
-| Web コンソール（SSE ライブログ）| ✅ |
-| Agent Eval（23 タスク、隠し Ground Truth、修復ループ）| ✅ |
-| **Manager Loop — MEA（`takumi loop`、arXiv 2608.01964 準拠）** | ✅ |
-| Golden Path 実 E2E（53 Java + 59 テスト全緑、mvn BUILD SUCCESS）| ✅ |
+実装は [packages/core/src/manager-loop.ts](./packages/core/src/manager-loop.ts) にあり、`takumi loop` から利用できます。
 
-## 参考文献 — 着想の元
-
-Takumi の Manager Loop（MEA: Manage-Execute-Audit）は **LongHorizon-Harness** の研究とアイデアに従っている — 長期タスクのループエンジニアリング：マネージャーがタスク状態を保持して次のサブタスクを決定し、エグゼキュータがフレッシュコンテキストで実行し、オーディターが結果の環境状態を独立検証する（クリーンな監査エビデンスのみがタスク状態を変更する）。
-
-**LongHorizon-Harness**
+Inspired by LongHorizon-Harness:
 
 - GitHub: https://github.com/AMAP-ML/LongHorizon-Harness
-- Paper (arXiv): https://arxiv.org/abs/2608.01964
+- Paper: https://arxiv.org/abs/2608.01964
 - Website: https://lh-harness.pages.dev/
-- Hugging Face Daily Papers: https://huggingface.co/papers/2608.01964 (2026-W32 weekly #1)
 
-Takumi はこのループを TypeScript/Node で独立実装（`packages/core/src/manager-loop.ts`、`takumi loop`）、モデル非依存で実実行検証済み。
+## Examples
 
-## ドキュメント
+- [examples/pi10](./examples/pi10): Japanese SI / V-model workflow に基づく Golden Path enterprise delivery project。Requirements、design documents、Spring Boot backend、Vue frontend、unit/integration tests、evidence summaries を含みます。
+- [examples/minimal-vmodel](./examples/minimal-vmodel): workflow と traceability 実験用の小さな V-model example。
 
-- Architecture Decision Records: `docs/adr/`（ランタイム抽象、拡張システム、ワークフローモデル、イベントモデル、アーティファクトトレーサビリティ）
-- Agent Evaluation: `docs/evaluation.md`（方法論、23 タスク結果、誠実な限界）
+## Known Limitations
 
-## 既知の制限
+Takumi は現在 Developer Preview です。
 
-現在の **Developer Preview** の誠実な範囲：
+- Agent Eval results are preliminary: 23 tasks は有用な evidence ですが、統計的に大規模な benchmark ではありません。
+- `takumi loop` is v1: manager decisions はまだ LLM-driven で non-deterministic です。
+- Pi runtime は opt-in で、external Pi SDK に依存します。
+- Traceability は現在 structural foreign keys ではなく ID naming conventions に依存しています。
+- Tool plugins は sandbox を明示的に選択しない限り user privileges で動作します。
+- Real-repo-scale evaluation は roadmap 上です。
 
-- **Agent Eval 結果は preliminary**（23 タスクの小サンプル、統計的に有意ではない）；制御タスクでは False Completion 未発生（現実の曖昧さが必要）
-- **`takumi loop`（MEA）は v1**：Manager は LLM 判断（非決定的状態機械）、GUI computer-use 未サポート
-- **Pi イベントはリアルタイムストリーミングされない**（タスク完了後にバッファリング配送）
-- **トレーサビリティは ID 命名規則**（REQ-001 リンク）、構造的外部キーではない
-- **Pi ランタイムはオプトイン**（未公開 SDK 依存）：`pnpm install` では同梱されない
-- Tool プラグインは `--sandbox unshare` 設定時にサンドボックスでシェル実行、デフォルトは非サンドボックス
+## Roadmap
 
-## ロードマップ
+- [x] Core types, runtime abstraction, and extension discovery
+- [x] Workflow engine with DAG, approval gates, retry, and capability validation
+- [x] Fake, Pi, DeepSeek, and CLI runtime adapters
+- [x] Japanese SI skills and V-model workflow
+- [x] Agent Eval and system benchmarks
+- [x] Durable resume, parallel execution, web console, sandbox, and MEA loop
+- [ ] Claude runtime adapter
+- [ ] Excel, Word, Jira, GitHub, and Playwright tool plugins
+- [ ] npm package publishing
+- [ ] Real-repo-scale evals
 
-- [x] Core 型 + ランタイム抽象 + 拡張ディスカバリ
-- [x] FakeRuntime + CLI 垂直スライス
-- [x] ワークフローエンジン（DAG、承認ゲート、リトライ、能力検証）
-- [x] Pi ランタイムアダプタ（AgentSession SDK、インプロセス）
-- [x] DeepSeek ランタイムアダプタ（OpenAI 互換ツールループ）+ TAKUMI_EVAL_MODEL
-- [x] 汎用デリバリースキル + 日本 SI スキル（要件定義、基本設計、単体テスト、結合テスト、エビデンス、コードレビュー）
-- [x] Agent Eval（23 タスク × 2+ モデル）+ システムベンチマーク（B1-B4）
-- [x] Durable Resume + Parallel + Web Console + Sandbox
-- [x] Manager Loop（MEA、`takumi loop`）
-- [ ] Claude（Anthropic Messages）ランタイムアダプタ
-- [ ] Excel/Word レンダリング、Jira/GitHub/Playwright ツール
-- [ ] npm 公開
-- [ ] 実リポジトリ規模の eval（SWE-bench スタイル）
+## License
 
-## ライセンス
-
-MIT
+Takumi は [MIT License](./LICENSE) の下で公開されています。
