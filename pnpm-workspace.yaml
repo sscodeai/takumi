@@ -1,9 +1,9 @@
 # Workspace members.
 #
-# runtimes/pi is deliberately NOT a workspace member: it depends on the
-# unpublished `@earendil-works/pi-coding-agent` SDK via an absolute local path
-# (a private dependency that only exists on the author's machine). Including it
-# here would make `pnpm install` fail on every other machine (RELEASE BLOCKER).
+# runtimes/pi is deliberately NOT a workspace member: it integrates with the
+# unpublished `@earendil-works/pi-coding-agent` SDK as an optional peer
+# dependency. Including it here would make workspace installs depend on a
+# private SDK that most users cannot access.
 #
 # Takumi's installable core is therefore: packages/* + apps/* + runtimes/fake +
 # runtimes/cli + runtimes/deepseek. The Pi runtime is opt-in:

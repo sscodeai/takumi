@@ -1,8 +1,22 @@
 import type { Sandbox, SandboxOptions, SandboxResult } from './sandbox.js';
 import { execFile } from 'node:child_process';
+import { platform } from 'node:os';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+
+export async function unshareAvailable(): Promise<boolean> {
+  if (platform() !== 'linux') return false;
+  try {
+    await execFileAsync('unshare', ['--user', '--map-root-user', '--net', '--mount', '--fork', '/bin/sh', '-c', 'true'], {
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * UnshareSandbox — user-namespace sandbox (P1-2).

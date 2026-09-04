@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DockerSandbox, NoopSandbox, dockerAvailable } from '../sandbox-docker.js';
-import { UnshareSandbox } from '../sandbox-unshare.js';
+import { UnshareSandbox, unshareAvailable } from '../sandbox-unshare.js';
 
 // P1-2 Sandbox isolation tests. Docker-gated: if no daemon, we assert the
 // availability probe honestly reports false (never a fake sandbox pass).
@@ -82,9 +82,14 @@ test('sandbox: NoopSandbox is the unsandboxed default', async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-// ---- UnshareSandbox: verifiable without docker/root ----
+// ---- UnshareSandbox: verifiable when the host supports Linux user namespaces ----
 
-test('sandbox: UnshareSandbox runs commands in project dir', async () => {
+test('sandbox: UnshareSandbox runs commands in project dir', async (t) => {
+  const avail = await unshareAvailable();
+  if (!avail) {
+    t.skip('unshare sandbox not available');
+    return;
+  }
   const sb = new UnshareSandbox();
   const dir = mkdtempSync(join(tmpdir(), 'sb-un-'));
   const res = await sb.run(dir, 'echo unshare-ok && pwd');
@@ -95,7 +100,12 @@ test('sandbox: UnshareSandbox runs commands in project dir', async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('sandbox: UnshareSandbox denies writes to host system paths', async () => {
+test('sandbox: UnshareSandbox denies writes to host system paths', async (t) => {
+  const avail = await unshareAvailable();
+  if (!avail) {
+    t.skip('unshare sandbox not available');
+    return;
+  }
   const sb = new UnshareSandbox();
   const dir = mkdtempSync(join(tmpdir(), 'sb-un-ro-'));
   const res = await sb.run(dir, 'touch /etc/evil-test 2>&1; echo "touch_rc=$?"');
@@ -105,7 +115,12 @@ test('sandbox: UnshareSandbox denies writes to host system paths', async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('sandbox: UnshareSandbox applies CPU resource limit', async () => {
+test('sandbox: UnshareSandbox applies CPU resource limit', async (t) => {
+  const avail = await unshareAvailable();
+  if (!avail) {
+    t.skip('unshare sandbox not available');
+    return;
+  }
   const sb = new UnshareSandbox();
   const dir = mkdtempSync(join(tmpdir(), 'sb-un-cpu-'));
   const t0 = Date.now();

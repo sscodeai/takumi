@@ -75,7 +75,7 @@ pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --m
 | AI tools generate code but lose the delivery trail | Requirements、design、tests、evidence、review をつなぐ traceability matrix |
 | Products lock users into one model or harness | fake、Pi、DeepSeek、CLI bridge、future runtimes を扱う runtime adapter API |
 | Tests and evidence are treated as afterthoughts | Unit / integration test deliverables のための evidence-native pipeline |
-| Agents can claim "done" too early | Quality gates、hidden tests、independent verification |
+| Agents can claim "done" too early | Quality gates、保留検証テスト、independent verification |
 | Long tasks lose state across context windows | Persistent task state を持つ Manage-Execute-Audit loop |
 | Domain delivery processes are hard to encode | Workflow / skill extension system。Japanese SI は built-in example |
 
@@ -136,13 +136,13 @@ takumi/
 | Parallel workflow step execution | Done |
 | Sandbox abstraction with unshare support | Done |
 | Web console with live logs | Done |
-| Agent Eval with hidden ground truth and repair loop | Done |
+| Agent Eval with 保留検証テスト and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
 
 ## Agent Eval
 
-Takumi は `eval/` に Agent Eval framework を含みます。easy、hard、trap、no-self-test、complex、implicit constraint の 6 グループ、合計 23 個の real SWE tasks を扱います。各 task には machine-verifiable ground truth があり、agent-written tests は ground truth として扱いません。
+Takumi は `eval/` に Agent Eval framework を含みます。easy、hard、trap、no-self-test、complex、implicit constraint の 6 グループ、合計 23 個の real SWE tasks を扱います。各 task には agent の prompt context から除外された machine-verifiable verifier tests があり、agent-written tests は ground truth として扱いません。
 
 ```bash
 TAKUMI_EVAL_HARNESS=deepseek TAKUMI_EVAL_MODEL=deepseek/deepseek-v4-flash node eval/scripts/run-eval.mjs

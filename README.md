@@ -39,7 +39,7 @@ boundary of the platform.
 - Swap agent runtimes without changing the platform core.
 - Keep traceability from requirements to design, tests, evidence, and review.
 - Gate agent output with real tests and independently collected evidence.
-- Evaluate agent reliability with hidden-ground-truth SWE tasks.
+- Evaluate agent reliability with held-out verifier SWE tasks.
 - Run a Manage-Execute-Audit loop for long-horizon agent work.
 
 ## Quick Start
@@ -81,7 +81,7 @@ pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --m
 | AI tools generate code but lose the delivery trail | Traceability matrix across requirements, design, tests, evidence, and review |
 | Products lock users into one model or harness | Runtime adapter API for fake, Pi, DeepSeek, CLI bridges, and future runtimes |
 | Tests and evidence are treated as afterthoughts | Evidence-native pipeline for unit and integration test deliverables |
-| Agents can claim "done" too early | Quality gates, hidden tests, and independent verification |
+| Agents can claim "done" too early | Quality gates, held-out verifier tests, and independent verification |
 | Long tasks lose state across context windows | Manage-Execute-Audit loop with persistent task state |
 | Domain delivery processes are hard to encode | Extensible workflow and skill system, with Japanese SI as a built-in example |
 
@@ -142,7 +142,7 @@ takumi/
 | Parallel workflow step execution | Done |
 | Sandbox abstraction with unshare support | Done |
 | Web console with live logs | Done |
-| Agent Eval with hidden ground truth and repair loop | Done |
+| Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
 
@@ -150,8 +150,8 @@ takumi/
 
 Takumi ships an Agent Eval framework under `eval/`: 23 real SWE tasks across
 easy, hard, trap, no-self-test, complex, and implicit constraint groups. Each
-task has machine-verifiable ground truth. Agent-written tests are never treated
-as the ground truth.
+task has machine-verifiable verifier tests that are excluded from the agent
+prompt context. Agent-written tests are never treated as the ground truth.
 
 ```bash
 TAKUMI_EVAL_HARNESS=deepseek TAKUMI_EVAL_MODEL=deepseek/deepseek-v4-flash node eval/scripts/run-eval.mjs

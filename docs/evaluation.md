@@ -22,7 +22,7 @@ This `eval/` is an **Agent Evaluation** (measures coding-agent reliability on re
 
 ## 3. Dataset
 
-**23 real SWE tasks**, 6 groups (all with machine-verifiable ground truth):
+**23 real SWE tasks**, 6 groups (all with machine-verifiable verifier tests):
 
 | Group | Tasks | Characteristics |
 |---|---|---|
@@ -34,7 +34,7 @@ This `eval/` is an **Agent Evaluation** (measures coding-agent reliability on re
 | implicit (2) | scheduler, stats | **Unstated implicit constraints** |
 
 **Ground-truth principles**:
-- Every task has hidden tests (invisible to the agent, injected at eval time)
+- Every task has held-out verifier tests (excluded from agent prompt context and injected at eval time)
 - All 23/23 validated effective: bug implementation → FAIL (caught) ✓ / correct implementation → PASS ✓
 - Agent-written tests are **never** the ground truth
 
@@ -75,11 +75,11 @@ This `eval/` is an **Agent Evaluation** (measures coding-agent reliability on re
 | avg latency | 74.5s | | | |
 
 > ⭐ **First naturally-triggered real repair**: `ts-complex-concurrency-001` (concurrent queue) —
-> agent claimed success → independent verification FAILED (hidden tests caught the ordering bug)
+> agent claimed success → independent verification FAILED (verifier tests caught the ordering bug)
 > → repair feedback → re-verify PASS. The first non-injected repair in the whole eval suite,
 > evidence for "Agents propose. Takumi verifies."
 >
-> **Model-agnostic evidence**: same eval, same ground truth, `TAKUMI_EVAL_MODEL` switches the model →
+> **Model-agnostic evidence**: same eval, same verifier set, `TAKUMI_EVAL_MODEL` switches the model →
 > flash (100% first-pass) vs pro (80% + 1 repair) — comparable data; the verification layer
 > backstops any model.
 
@@ -112,7 +112,7 @@ underlying models), not a pure harness benchmark. Harness ≠ Model ≠ Executio
    and the naturally-triggered v4-pro case
 6. **Methodology lesson** (this eval caught 2 of its own measurement bugs):
    - `expect_stdout: 'passing'` never matches node --test's `# pass N` → falsely reported 100% false completion
-   - complex hidden tests used `../../src` imports that resolve wrong from workdir/test → falsely reported 100% false completion
+   - complex verifier tests used `../../src` imports that resolve wrong from workdir/test → falsely reported 100% false completion
    - **Lesson: verify the measurement tool before trusting results** (the core principle of the protocol)
 
 ## 8b. Methodology conclusion (correction to RQ2)
@@ -137,7 +137,7 @@ node eval/scripts/create-complex-fixtures.mjs
 node eval/scripts/create-implicit-fixtures.mjs
 node eval/scripts/build-tasks.mjs
 
-# 2. Validate ground truth (23/23 OK)
+# 2. Validate verifier tests (23/23 OK)
 node eval/scripts/validate-ground-truth.mjs
 
 # 3. Run Agent Eval (deepseek)

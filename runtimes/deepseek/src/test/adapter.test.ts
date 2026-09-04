@@ -31,23 +31,7 @@ test('DeepSeekRuntimeAdapter: run without API key fails honestly (no fake comple
 test('DeepSeekRuntimeAdapter: shared runtime contract suite (real API, gated on key)', async () => {
   const { DeepSeekRuntimeAdapter } = await import('../index.js');
   const { runRuntimeContractSuite } = await import('@takumi/core');
-  // Key resolution: COMMANDCODE_API_KEY env, else the custom:commandcode pool
-  // in ~/auth.json (label key1), else none.
-  let apiKey = process.env.COMMANDCODE_API_KEY;
-  if (!apiKey) {
-    try {
-      const { readFileSync } = await import('node:fs');
-      const { join } = await import('node:path');
-      const { homedir } = await import('node:os');
-      const d = JSON.parse(readFileSync(join(homedir(), 'auth.json'), 'utf8'));
-      const pool = d.credential_pool?.['custom:commandcode'] ?? [];
-      for (const c of pool) {
-        if (c?.label === 'key1' && c?.access_token) apiKey = c.access_token;
-      }
-    } catch {
-      // ignore — treated as no key
-    }
-  }
+  const apiKey = process.env.COMMANDCODE_API_KEY;
   const runtime = new DeepSeekRuntimeAdapter({ apiKey });
   try {
     const out = await runRuntimeContractSuite(runtime, {
