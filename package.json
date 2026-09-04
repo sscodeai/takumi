@@ -2,7 +2,7 @@
   "name": "takumi",
   "version": "0.1.0",
   "private": true,
-  "description": "Open-source extensible Agentic Software Engineering Platform with first-class support for Japanese enterprise software development.",
+  "description": "Model-agnostic platform for verifiable agentic software delivery.",
   "type": "module",
   "engines": {
     "node": ">=20"

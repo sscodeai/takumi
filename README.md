@@ -3,9 +3,9 @@
 </p>
 
 <p align="center">
-  <strong>Agentic SWE platform for Japanese enterprise SI.</strong>
+  <strong>Model-agnostic platform for verifiable agentic software delivery.</strong>
   <br>
-  V-model workflows, traceability, evidence-native testing, agent evals, and verify-before-done loops.
+  Workflows, traceability, evidence-native testing, agent evals, and verify-before-done loops.
 </p>
 
 <p align="center">
@@ -24,13 +24,14 @@ traceability, and independent verification.
 
 > **Agents propose. Takumi verifies.**
 
-Takumi is built for the Japanese SI development process:
-
-`要件定義` -> `基本設計` -> `詳細設計` -> `実装` -> `単体テスト` -> `結合テスト` -> `エビデンス` -> `レビュー` -> `納品`
+Takumi is designed for teams that need AI agents to produce software changes
+that can be reviewed, tested, resumed, audited, and delivered with evidence.
+Japanese SI / V-model delivery is included as a first-party workflow, not a
+boundary of the platform.
 
 ## What You Can Do
 
-- Run a Japanese SI / V-model workflow from requirements to delivery evidence.
+- Run structured software delivery workflows from requirements to evidence.
 - Swap agent runtimes without changing the platform core.
 - Keep traceability from requirements to design, tests, evidence, and review.
 - Gate agent output with real tests and independently collected evidence.
@@ -56,7 +57,7 @@ pnpm exec takumi init
 pnpm exec takumi run "Implement user login API"
 ```
 
-Run a Japanese SI workflow with a real runtime:
+Run a workflow with a real runtime:
 
 ```bash
 export COMMANDCODE_API_KEY=...
@@ -73,11 +74,12 @@ pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --m
 
 | Problem | Takumi approach |
 |---|---|
-| Japanese SI automation is mostly closed SaaS | Open-source V-model workflow platform |
-| AI tools generate documents but lose delivery trails | Traceability matrix across requirements, design, tests, evidence, and review |
+| AI tools generate code but lose the delivery trail | Traceability matrix across requirements, design, tests, evidence, and review |
 | Products lock users into one model or harness | Runtime adapter API for fake, Pi, DeepSeek, CLI bridges, and future runtimes |
-| Test evidence is treated as an afterthought | Evidence-native pipeline for unit and integration test deliverables |
+| Tests and evidence are treated as afterthoughts | Evidence-native pipeline for unit and integration test deliverables |
 | Agents can claim "done" too early | Quality gates, hidden tests, and independent verification |
+| Long tasks lose state across context windows | Manage-Execute-Audit loop with persistent task state |
+| Domain delivery processes are hard to encode | Extensible workflow and skill system, with Japanese SI as a built-in example |
 
 ## Architecture
 
@@ -110,7 +112,7 @@ takumi/
 ├── extensions/            # skills, tools, workflows
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
-├── examples/              # end-to-end Japanese SI examples
+├── examples/              # end-to-end delivery examples, including Japanese SI
 └── docs/                  # ADRs and evaluation notes
 ```
 
@@ -128,7 +130,7 @@ takumi/
 | Capability | Status |
 |---|---|
 | Pluggable runtimes: fake / Pi / DeepSeek / CLI bridge | Done |
-| Japanese SI V-model workflow with 11 stages | Done |
+| Declarative workflows, including Japanese SI / V-model | Done |
 | Skills for requirements, basic design, detailed design, tests, evidence, review | Done |
 | Traceability matrix generation | Done |
 | Approval gates | Done |
@@ -182,7 +184,7 @@ Inspired by LongHorizon-Harness:
 
 ## Examples
 
-- [examples/pi10](./examples/pi10): Golden Path Japanese SI project, including requirements, design documents, Spring Boot backend, Vue frontend, unit/integration tests, and evidence summaries.
+- [examples/pi10](./examples/pi10): Golden Path enterprise delivery project based on a Japanese SI / V-model workflow, including requirements, design documents, Spring Boot backend, Vue frontend, unit/integration tests, and evidence summaries.
 - [examples/minimal-vmodel](./examples/minimal-vmodel): smaller V-model example for workflow and traceability experiments.
 
 ## Known Limitations
