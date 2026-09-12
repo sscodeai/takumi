@@ -10,19 +10,19 @@ steps:
     type: agent
     skill: jp-requirements
     prompt: |
-      分析以下需求，输出标准化 Requirement 清单（REQ-001, REQ-002, ...）：
+      以下の要件を分析し、標準化された要件リスト（REQ-001, REQ-002, ...）を出力せよ：
       {input}
   - id: basic_design
     type: agent
     skill: jp-basic-design
     prompt: |
-      基于 Requirements 生成日本风格基本設計書（概述/架构/画面/API/DB/权限/校验/异常处理）。
+      Requirements に基づき、日本式の基本設計書（概要/アーキテクチャ/画面/API/DB/権限/バリデーション/例外処理）を生成せよ。
     dependsOn: [requirements]
   - id: detailed_design
     type: agent
     skill: jp-detailed-design
     prompt: |
-      基于基本設計書生成詳細設計書：画面仕様・API仕様・DBスキーマ・クラス設計・単体テスト仕様・実装手順（実装者がそのままコーディングできる粒度）。
+      基本設計書に基づき詳細設計書を生成せよ：画面仕様・API仕様・DBスキーマ・クラス設計・単体テスト仕様・実装手順（実装者がそのままコーディングできる粒度）。
     dependsOn: [basic_design]
   - id: design_approval
     type: approval
@@ -40,12 +40,12 @@ steps:
   - id: unit_test
     type: agent
     skill: jp-unit-test
-    prompt: 为实现的代码生成并执行单元测试（正常系/異常系/境界値）。
+    prompt: 実装済みコードに対する単体テストを生成し実行せよ（正常系/異常系/境界値）。
     dependsOn: [implementation]
   - id: integration_test
     type: agent
     skill: jp-integration-test
-    prompt: 结合体（模块間・サービス間・API層）の連携を検証する結合試験を設計・実行する。
+    prompt: 結合体（モジュール間・サービス間・API層）の連携を検証する結合試験を設計・実行する。
     dependsOn: [unit_test]
   - id: quality_gate
     type: quality_gate
@@ -74,9 +74,9 @@ steps:
     type: agent
     skill: jp-evidence
     prompt: |
-      收集测试日志・品質ゲート結果・レビュー結果・ビルド結果を集約し、エビデンス一覧（EVIDENCE-xxx）を生成する。
+      テストログ・品質ゲート結果・レビュー結果・ビルド結果を収集し、エビデンス一覧（EVIDENCE-xxx）を生成する。
     dependsOn: [independent_review]
   - id: delivery
     type: delivery
-    prompt: 纳品物をまとめる（delivery manifest 生成）。
+    prompt: 納品物をまとめる（delivery manifest 生成）。
     dependsOn: [evidence]
