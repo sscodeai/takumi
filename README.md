@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/sscodeai/takumi/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/sscodeai/takumi/actions/workflows/ci.yml/badge.svg" /></a>
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111827.svg" /></a>
   <img alt="Node 20 plus" src="https://img.shields.io/badge/node-20%2B-2DD4BF.svg" />
   <img alt="TypeScript 5.x" src="https://img.shields.io/badge/typescript-5.x-3178C6.svg" />
