@@ -29,11 +29,15 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-  # Real Pi runtime integration is gated on OPENCODE_GO_API_KEY (secret).
+  # Real Pi runtime integration. Opt-in via the repository variable
+  # TAKUMI_PI_INTEGRATION=true — GitHub does not expose the `secrets` context to
+  # `jobs.<job_id>.if` (only github/needs/vars/inputs are allowed there), so a
+  # secret-presence check cannot be used as the gate; the secret is still handed
+  # to the step through env.
   pi-integration:
     runs-on: ubuntu-latest
     needs: build-test
-    if: ${{ secrets.OPENCODE_GO_API_KEY != '' }}
+    if: ${{ vars.TAKUMI_PI_INTEGRATION == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
