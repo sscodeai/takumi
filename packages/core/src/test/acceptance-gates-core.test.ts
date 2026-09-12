@@ -173,18 +173,18 @@ test('Gate 13: full traceability chain answerable + matrix rendered', async () =
     const ut = await e.artifacts.write({ taskId: 't', kind: 'test', fileName: 'UT-001.md', content: 'test', contentType: 'text/markdown', trace: ['REQ-001', 'CODE-CHANGE-001', 'UT-001'] });
     await e.artifacts.write({ taskId: 'ev', kind: 'evidence', fileName: 'EVIDENCE-001.md', content: 'log', contentType: 'text/markdown', trace: ['UT-001', 'EVIDENCE-001'] });
 
-    // Answer: "REQ-001 由什么代码实现?" → code artifact traced to REQ-001
+    // Answer: "Which code implements REQ-001?" → code artifact traced to REQ-001
     const all = await e.artifacts.list();
     const reqImpl = all.filter((a) => a.kind === 'code' && a.trace.includes('REQ-001'));
     assert.equal(reqImpl.length, 1);
     assert.ok(reqImpl[0]?.path.includes('USER-ctrl'));
 
-    // "哪些测试验证了 REQ-001?" → test artifacts traced to REQ-001
+    // "Which tests verify REQ-001?" → test artifacts traced to REQ-001
     const reqTests = all.filter((a) => a.kind === 'test' && a.trace.includes('REQ-001'));
     assert.equal(reqTests.length, 1);
     assert.ok(reqTests[0]?.path.includes('UT-001'));
 
-    // "Evidence 在哪?" → evidence artifact traced to UT-001
+    // "Where is the evidence?" → evidence artifact traced to UT-001
     const evid = all.filter((a) => a.kind === 'evidence' && a.trace.includes('UT-001'));
     assert.equal(evid.length, 1);
     assert.ok(evid[0]?.path.includes('EVIDENCE-001'));
