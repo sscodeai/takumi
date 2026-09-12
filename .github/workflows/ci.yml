@@ -29,29 +29,17 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-  # Real Pi runtime integration. Opt-in via the repository variable
-  # TAKUMI_PI_INTEGRATION=true — GitHub does not expose the `secrets` context to
-  # `jobs.<job_id>.if` (only github/needs/vars/inputs are allowed there), so a
-  # secret-presence check cannot be used as the gate; the secret is still handed
-  # to the step through env.
-  pi-integration:
-    runs-on: ubuntu-latest
-    needs: build-test
-    if: ${{ vars.TAKUMI_PI_INTEGRATION == 'true' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - name: Install
-        run: pnpm install --frozen-lockfile
-      - name: Build
-        run: pnpm build
-      - name: Pi runtime smoke
-        env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-        run: node scripts/pi-smoke.mjs
+  # The Pi runtime smoke test (scripts/pi-smoke.mjs) is intentionally NOT a CI job:
+  #
+  #   * runtimes/pi is not a pnpm workspace member (it depends on the unpublished
+  #     @earendil-works/pi-coding-agent SDK), so `pnpm install` / `pnpm build` at the
+  #     repo root never produce runtimes/pi/dist, and the smoke script cannot resolve
+  #     its import on a clean checkout.
+  #   * GitHub never exposes the `secrets` context in `jobs.<job_id>.if` — only
+  #     github/needs/vars/inputs are allowed there. The previous
+  #     `if: ${{ secrets.OPENCODE_GO_API_KEY != '' }}` made the whole workflow file
+  #     invalid, so every run failed before creating a single job.
+  #
+  # Run the Pi integration check locally instead:
+  #   cd runtimes/pi && pnpm install && pnpm build
+  #   cd ../.. && OPENCODE_GO_API_KEY=... node scripts/pi-smoke.mjs
