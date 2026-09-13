@@ -15,7 +15,7 @@
  * keeping Takumi model-agnostic.
  */
 
-/** A task-state record (论文的 requirement/artifact/fact). */
+/** A task-state record (requirement/artifact/fact). */
 export interface LoopRecord {
   id: string;
   type: 'requirement' | 'artifact' | 'fact';
