@@ -1,0 +1,19 @@
+name: fake-board
+kind: board
+version: 0.1.0
+description: "Deterministic in-memory task board for tests, board views and vertical slices."
+entry: dist/index.js
+package: "@takumi/board-fake"
+provider:
+  factory: FakeBoardProvider
+  transport: "in-memory: no network and no credentials"
+capabilities:
+  comments: true
+  editableComment: true
+  machineReadableState: true
+  atomicClaim: true
+  trustedAuthorFilter: true
+  delivery:
+    canOpenPullRequest: true
+    canRunChecks: true
+    canMerge: true

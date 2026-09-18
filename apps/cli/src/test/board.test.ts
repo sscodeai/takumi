@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { FakeBoardProvider } from '@takumi/board-fake';
+import { listExtensions, loadConfig } from '../commands.js';
+import { initProject } from '../init.js';
 import { createBoardProvider, parseBoardArgs, renderBoard, runBoardCommand } from '../board-command.js';
 
 /**
@@ -27,6 +32,44 @@ function captureStdout(fn: () => Promise<number> | number): Promise<{ code: numb
       console.log = original;
     });
 }
+
+test('extension discovery: a board provider is found by its manifest and surfaces the manifest name', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-board-discovery-'));
+  try {
+    initProject(dir);
+    mkdirSync(join(dir, 'boards/demo'), { recursive: true });
+    writeFileSync(
+      join(dir, 'boards/demo/manifest.yaml'),
+      'name: demo-board\nkind: board\nversion: 0.1.0\ndescription: "a demo board"\n',
+    );
+
+    const config = loadConfig(dir);
+    const entries = await listExtensions(config, dir);
+    const board = entries.find((e) => e.name === 'demo-board');
+    assert.ok(board, `a board manifest must be discovered: ${JSON.stringify(entries)}`);
+    assert.equal(board?.kind, 'board');
+
+    // A project that predates the board registry must not break the scan.
+    const legacy = { ...config, registry: { ...config.registry } };
+    delete (legacy.registry as Record<string, unknown>)['boards'];
+    const legacyEntries = await listExtensions(legacy, dir);
+    assert.ok(Array.isArray(legacyEntries));
+    assert.equal(legacyEntries.some((e) => e.name === 'demo-board'), false, 'no registry dir declared means no boards');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('initProject scaffolds the board registry dir and config key', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-board-init-'));
+  try {
+    initProject(dir);
+    assert.ok(existsSync(join(dir, 'boards')), 'boards/ is part of the layout');
+    assert.match(readFileSync(join(dir, 'takumi.yaml'), 'utf8'), /boards: boards/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('parseBoardArgs: defaults to the fake provider and no state filter', () => {
   assert.deepEqual(parseBoardArgs([]), { providerId: 'fake', providerOptions: {}, json: false });

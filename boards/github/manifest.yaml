@@ -1,0 +1,33 @@
+name: github-board
+kind: board
+version: 0.1.0
+description: GitHub Issues as the task board (labels carry the delivery state, a hidden comment block carries the versioned state record).
+entry: dist/index.js
+package: "@takumi/board-github"
+provider:
+  factory: createGitHubBoardProvider
+  transport: createGitHubTransport
+  auth:
+    header: "Authorization: Bearer"
+    env: GITHUB_TOKEN
+  api:
+    base: https://api.github.com
+    endpoints:
+      listIssues: GET /repos/:owner/:repo/issues?state=open&labels=:label
+      getIssue: GET /repos/:owner/:repo/issues/:number
+      addLabel: POST /repos/:owner/:repo/issues/:number/labels
+      removeLabel: DELETE /repos/:owner/:repo/issues/:number/labels/:name
+      listComments: GET /repos/:owner/:repo/issues/:number/comments
+      createComment: POST /repos/:owner/:repo/issues/:number/comments
+      updateComment: PATCH /repos/:owner/:repo/issues/comments/:comment_id
+    trustedAuthorField: author_association
+capabilities:
+  comments: true
+  editableComment: true
+  machineReadableState: true
+  atomicClaim: false
+  trustedAuthorFilter: true
+  delivery:
+    canOpenPullRequest: true
+    canRunChecks: true
+    canMerge: true
