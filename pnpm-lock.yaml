@@ -29,6 +29,9 @@ importers:
       '@takumi/board-notion':
         specifier: workspace:*
         version: link:../../boards/notion
+      '@takumi/board-redmine':
+        specifier: workspace:*
+        version: link:../../boards/redmine
       '@takumi/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -133,6 +136,19 @@ importers:
         specifier: ^5.6.0
         version: 5.9.3
 
+  boards/redmine:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
   deliveries/fake:
     dependencies:
       '@takumi/core':
@@ -147,6 +163,19 @@ importers:
         version: 5.9.3
 
   deliveries/github:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  deliveries/gitlab:
     dependencies:
       '@takumi/core':
         specifier: workspace:*
