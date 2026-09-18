@@ -108,9 +108,20 @@ const STATE_LABEL_SUFFIXES: readonly string[] = Object.values(STATE_LABEL_SUFFIX
 /** Fragment shared with `board-state-record.ts`; used to spot a record note cheaply. */
 const STATE_RECORD_FRAGMENT = 'takumi:boardstate:';
 
-/** The hidden marker that ties one progress note to one run (see `comment()`). */
+import { renderRunMarker } from '@takumi/core';
+
+/**
+ * The run marker is CORE's (`renderRunMarker`): one grammar for one thing, so a
+ * board comment and a pull request body cannot drift apart. A malformed run id is
+ * reported as a `precondition` through this port's own error family instead of
+ * escaping as a bare Error.
+ */
 function runMarker(runId: string): string {
-  return `<!-- takumi:run=${runId} -->`;
+  try {
+    return renderRunMarker(runId);
+  } catch (e) {
+    throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
+  }
 }
 
 /** The subset of GitLab's issue JSON this adapter reads/writes. */

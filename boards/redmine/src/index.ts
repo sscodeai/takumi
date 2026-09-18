@@ -758,12 +758,20 @@ export class RedmineBoardProvider implements TaskBoardProvider {
 
 // --- module-private helpers ------------------------------------------------
 
+import { renderRunMarker } from '@takumi/core';
+
 /**
- * The hidden marker that ties one progress journal to one run. The same marker on
- * every board, so a human reading a thread recognises it and a tool can grep it.
+ * The run marker is CORE's (`renderRunMarker`): one grammar for one thing, so a
+ * board comment and a pull request body cannot drift apart. A malformed run id is
+ * reported as a `precondition` through this port's own error family instead of
+ * escaping as a bare Error.
  */
 export function runMarker(runId: string): string {
-  return `<!-- takumi:run=${runId} -->`;
+  try {
+    return renderRunMarker(runId);
+  } catch (e) {
+    throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
+  }
 }
 
 /** Append the hidden marker unless the text already carries it. */

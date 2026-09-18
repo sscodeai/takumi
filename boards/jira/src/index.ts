@@ -452,9 +452,20 @@ export class JiraBoardProvider implements TaskBoardProvider {
   }
 }
 
-/** The marker that ties a comment to one run. */
+import { renderRunMarker } from '@takumi/core';
+
+/**
+ * The run marker is CORE's (`renderRunMarker`): one grammar for one thing, so a
+ * board comment and a pull request body cannot drift apart. A malformed run id is
+ * reported as a `precondition` through this port's own error family instead of
+ * escaping as a bare Error.
+ */
 export function runMarker(runId: string): string {
-  return `<!-- takumi:run=${runId} -->`;
+  try {
+    return renderRunMarker(runId);
+  } catch (e) {
+    throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
+  }
 }
 
 /** Flatten a Jira ADF document (or a legacy string) into plain text. */

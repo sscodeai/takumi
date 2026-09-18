@@ -12,14 +12,27 @@
  * raw body, which is what the reader parses.
  */
 
+import { ProviderError } from './provider-error.js';
+
 const RUN_ID_PATTERN = /^[0-9a-f]{8}$/;
 
 const MARKER_PATTERN = /<!--\s*takumi:run=([0-9a-f]{8})\s*-->/g;
 
-/** Render the marker for a run id. Fails fast on a malformed id. */
+/**
+ * Render the marker for a run id.
+ *
+ * A malformed id FAILS here rather than producing a marker: the reader matches
+ * exactly eight lowercase hex characters, so a marker written from any other id
+ * would be invisible to every reader — an unattributable comment is worse than a
+ * loud failure. The failure is classified (`precondition`), so a caller can
+ * branch on it like any other provider failure instead of catching a bare Error.
+ */
 export function renderRunMarker(runId: string): string {
   if (!RUN_ID_PATTERN.test(runId)) {
-    throw new Error(`invalid run id: ${JSON.stringify(runId)} (expected 8 lowercase hex characters)`);
+    throw new ProviderError(
+      'precondition',
+      `invalid run id: ${JSON.stringify(runId)} (expected 8 lowercase hex characters)`,
+    );
   }
   return `<!-- takumi:run=${runId} -->`;
 }

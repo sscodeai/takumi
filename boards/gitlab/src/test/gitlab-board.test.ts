@@ -164,7 +164,7 @@ test('GitLabBoardProvider: the exact request shape of every port method', async 
 
   // --- claim: read, decide, ONE label write, record, then RE-READ ---
   fake.clear();
-  const claim = await provider.claim('7', 'run-1');
+  const claim = await provider.claim('7', 'c0ffee01');
   assert.equal(claim.claimed, true);
   assert.deepEqual(fake.calls(), [
     `GET ${issue}`,
@@ -178,39 +178,39 @@ test('GitLabBoardProvider: the exact request shape of every port method', async 
   // Comma-separated STRINGS, never arrays: GitLab 400s on an array.
   assert.deepEqual(fake.bodies()[2], { add_labels: 'takumi-claimed', remove_labels: 'takumi-ready' });
   const claimRecord = recordIn(fake.bodies()[4]);
-  assert.equal(claimRecord.runId, 'run-1');
+  assert.equal(claimRecord.runId, 'c0ffee01');
   assert.equal(claimRecord.item, '7');
   assert.equal(claimRecord.schema, 1);
   assert.match(fake.calls()[4] ?? '', /^POST /, 'the first record for a run is a new note');
 
   // --- transition: read, assert the table, swap the state label, update the record ---
   fake.clear();
-  await provider.transition('7', 'pr_open', { runId: 'run-1', note: 'opened MR !3' });
+  await provider.transition('7', 'pr_open', { runId: 'c0ffee01', note: 'opened MR !3' });
   assert.deepEqual(fake.calls(), [`GET ${issue}`, `GET ${notes}`, `PUT ${issue}`, `GET ${notes}`, `PUT ${issue}/notes/1`]);
   assert.deepEqual(fake.bodies()[2], { add_labels: 'takumi-pr-open', remove_labels: 'takumi-claimed' });
   assert.deepEqual(Object.keys(fake.bodies()[4] as object), ['body'], 'a record write sends nothing but the block');
   const transitioned = recordIn(fake.bodies()[4]);
-  assert.equal(transitioned.runId, 'run-1');
+  assert.equal(transitioned.runId, 'c0ffee01');
   assert.equal(transitioned.note, 'opened MR !3');
   assert.equal(transitioned.reviewRound, 0);
   assert.deepEqual((await stateOf(provider, '7')) === 'pr_open', true);
 
   // --- comment: created once per run, then updated in place ---
   fake.clear();
-  const first = await provider.comment('7', 'working', { runId: 'run-1' });
+  const first = await provider.comment('7', 'working', { runId: 'c0ffee01' });
   assert.deepEqual(fake.calls(), [`GET ${issue}`, `GET ${notes}`, `POST ${issue}/notes`]);
-  assert.deepEqual(fake.bodies()[2], { body: 'working\n\n<!-- takumi:run=run-1 -->' });
+  assert.deepEqual(fake.bodies()[2], { body: 'working\n\n<!-- takumi:run=c0ffee01 -->' });
   assert.deepEqual(first, {
     item: '7',
     comment: '2',
-    runId: 'run-1',
+    runId: 'c0ffee01',
     url: `https://gitlab.test/${PROJECT}/-/issues/7#note_2`,
   });
 
   fake.clear();
-  const second = await provider.comment('7', 'still working', { runId: 'run-1' });
+  const second = await provider.comment('7', 'still working', { runId: 'c0ffee01' });
   assert.deepEqual(fake.calls(), [`GET ${issue}`, `GET ${notes}`, `PUT ${issue}/notes/2`]);
-  assert.deepEqual(fake.bodies()[2], { body: 'still working\n\n<!-- takumi:run=run-1 -->' });
+  assert.deepEqual(fake.bodies()[2], { body: 'still working\n\n<!-- takumi:run=c0ffee01 -->' });
   assert.equal(second.comment, first.comment, 'one progress note per run: the same ref comes back');
   assert.equal(fake.notesOf(7).length, 2, 'one record note + one progress note');
 
@@ -218,8 +218,8 @@ test('GitLabBoardProvider: the exact request shape of every port method', async 
   fake.clear();
   await provider.updateComment(first, 'final');
   assert.deepEqual(fake.calls(), [`PUT ${issue}/notes/2`]);
-  assert.deepEqual(fake.bodies()[0], { body: 'final\n\n<!-- takumi:run=run-1 -->' });
-  assert.equal(fake.notesOf(7)[1]?.body, 'final\n\n<!-- takumi:run=run-1 -->');
+  assert.deepEqual(fake.bodies()[0], { body: 'final\n\n<!-- takumi:run=c0ffee01 -->' });
+  assert.equal(fake.notesOf(7)[1]?.body, 'final\n\n<!-- takumi:run=c0ffee01 -->');
 
   fake.clear();
   const gone: BoardCommentRef = { ...first, comment: 'takumi-no-such-comment' };
@@ -233,7 +233,7 @@ test('GitLabBoardProvider: the exact request shape of every port method', async 
   fake.clear();
   const run2: BoardStateRecord = {
     schema: 1,
-    runId: 'run-2',
+    runId: 'c0ffee02',
     item: '7',
     reviewRound: 2,
     updatedAt: '2099-01-01T00:00:00.000Z',
@@ -256,13 +256,13 @@ test('GitLabBoardProvider: the exact request shape of every port method', async 
 test('readState: control flow only ever follows a TRUSTED author', async () => {
   const trustedRecord: BoardStateRecord = {
     schema: 1,
-    runId: 'trusted-run',
+    runId: 'deadbeef',
     item: '7',
     reviewRound: 0,
     updatedAt: '2026-01-01T00:00:00.000Z',
   };
   // NEWER than the trusted one, and still must lose: recency is not authority.
-  const hostileRecord: BoardStateRecord = { ...trustedRecord, runId: 'drive-by-run', updatedAt: '2099-01-01T00:00:00.000Z' };
+  const hostileRecord: BoardStateRecord = { ...trustedRecord, runId: 'cafebabe', updatedAt: '2099-01-01T00:00:00.000Z' };
 
   const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
   fake.seedIssue({
@@ -282,7 +282,7 @@ test('readState: control flow only ever follows a TRUSTED author', async () => {
     trustedAuthors: [TRUSTED],
   });
   assert.equal(guarded.capabilities().trustedAuthorFilter, true);
-  assert.equal((await guarded.readState('7'))?.runId, 'trusted-run');
+  assert.equal((await guarded.readState('7'))?.runId, 'deadbeef');
 
   // The allowlist is exact: a near-miss username is not trusted either.
   const nearMiss = new GitLabBoardProvider({
@@ -303,10 +303,10 @@ test('readState: control flow only ever follows a TRUSTED author', async () => {
     false,
     'without an allowlist GitLab offers no per-note trust signal, so the adapter must not pretend to have one',
   );
-  assert.equal((await unguarded.readState('7'))?.runId, 'drive-by-run');
+  assert.equal((await unguarded.readState('7'))?.runId, 'cafebabe');
   const refused = await unguarded.claim('7', 'my-run');
   assert.equal(refused.claimed, false);
-  assert.match(refused.reason ?? '', /already claimed by run drive-by-run/);
+  assert.match(refused.reason ?? '', /already claimed by run cafebabe/);
 });
 
 test('readState: a corrupt block is loud in a trusted note and ignored in an untrusted one', async () => {
@@ -380,10 +380,10 @@ test('claim: a lost race and a repeated claim are both refused with a reason', a
 
   // A repeated claim by the SAME run is a non-silent no-op too.
   const { fake: calm, provider: calmProvider } = board({ iid: 7, labels: ['takumi-ready'] });
-  assert.equal((await calmProvider.claim('7', 'run-1')).claimed, true);
-  const again = await calmProvider.claim('7', 'run-1');
+  assert.equal((await calmProvider.claim('7', 'c0ffee01')).claimed, true);
+  const again = await calmProvider.claim('7', 'c0ffee01');
   assert.equal(again.claimed, false);
-  assert.match(again.reason ?? '', /already claimed by run run-1/);
+  assert.match(again.reason ?? '', /already claimed by run c0ffee01/);
   assert.equal(calm.labelsOf(7).filter((label) => label === 'takumi-claimed').length, 1);
 
   // An item that is not ready is not ours to take.
@@ -395,12 +395,12 @@ test('claim: a lost race and a repeated claim are both refused with a reason', a
 
 test('transition: an illegal move is rejected before any write reaches the board', async () => {
   const { fake, provider } = board({ iid: 5, title: 'Delivery under human control', labels: ['takumi-merged'] });
-  await assert.rejects(() => provider.transition('5', 'claimed', { runId: 'run-1' }), BoardStateError);
+  await assert.rejects(() => provider.transition('5', 'claimed', { runId: 'c0ffee01' }), BoardStateError);
   assert.deepEqual(fake.calls(), [`GET ${ISSUES}/5`], 'one read, and no write at all');
   assert.ok(fake.calls().every((call) => call.startsWith('GET')));
 
   // A terminal state has no automated exit either.
-  await assert.rejects(() => provider.transition('5', 'ready', { runId: 'run-1' }), BoardStateError);
+  await assert.rejects(() => provider.transition('5', 'ready', { runId: 'c0ffee01' }), BoardStateError);
   assert.equal(await stateOf(provider, '5'), 'merged');
 });
 
@@ -435,14 +435,14 @@ test('HTTP failures are classified, never bare Errors', async () => {
   // The WRITE of a mutation is classified the same way (the reads succeeded).
   fake.failWhen((req) => req.method === 'PUT' && !req.url.includes('/notes'), 409);
   await assert.rejects(
-    () => provider.transition('7', 'claimed', { runId: 'run-1' }),
+    () => provider.transition('7', 'claimed', { runId: 'c0ffee01' }),
     (e: unknown) => e instanceof BoardError && e.kind === 'precondition',
   );
   fake.clearFaults();
 
   fake.failWhen((req) => req.method === 'PUT' && req.url.includes('/notes/'), 404);
   await assert.rejects(
-    () => provider.updateComment({ item: '7', comment: '1', runId: 'run-1' }, 'x'),
+    () => provider.updateComment({ item: '7', comment: '1', runId: 'c0ffee01' }, 'x'),
     (e: unknown) => e instanceof BoardError && e.kind === 'not_found',
   );
   fake.clearFaults();
@@ -503,10 +503,10 @@ test('gated operations fail closed BEFORE any request', async () => {
   const provider = new NoNotesGitLabBoard({ project: PROJECT, apiBase: API, request: fake.request, trustedAuthors: [TRUSTED] });
 
   const gated: Array<[() => Promise<unknown>, string]> = [
-    [() => provider.comment('7', 'x', { runId: 'run-1' }), 'comments'],
-    [() => provider.updateComment({ item: '7', comment: '1', runId: 'run-1' }, 'x'), 'editableComment'],
+    [() => provider.comment('7', 'x', { runId: 'c0ffee01' }), 'comments'],
+    [() => provider.updateComment({ item: '7', comment: '1', runId: 'c0ffee01' }, 'x'), 'editableComment'],
     [() => provider.readState('7'), 'machineReadableState'],
-    [() => provider.writeState('7', { schema: 1, runId: 'run-1', item: '7', reviewRound: 0, updatedAt: 'now' }), 'machineReadableState'],
+    [() => provider.writeState('7', { schema: 1, runId: 'c0ffee01', item: '7', reviewRound: 0, updatedAt: 'now' }), 'machineReadableState'],
   ];
   for (const [run, capability] of gated) {
     await assert.rejects(run, (e: unknown) => {
@@ -553,7 +553,7 @@ test('the state-label vocabulary is explicit: intake, precedence and custom pref
   });
   assert.equal(await stateOf(customProvider, '3'), 'ready');
   custom.clear();
-  await customProvider.transition('3', 'claimed', { runId: 'run-1' });
+  await customProvider.transition('3', 'claimed', { runId: 'c0ffee01' });
   assert.deepEqual(custom.bodies()[2], { add_labels: 'ship-claimed', remove_labels: 'ship-ready' });
   assert.deepEqual(custom.calls()[0], `GET ${API}/projects/team%2Fapp/issues/3`);
 
@@ -565,7 +565,7 @@ test('the state-label vocabulary is explicit: intake, precedence and custom pref
 test('writeState: a record naming another item is refused before any request', async () => {
   const { fake, provider } = board({ iid: 7, labels: ['takumi-ready'] });
   await assert.rejects(
-    () => provider.writeState('7', { schema: 1, runId: 'run-1', item: '9', reviewRound: 0, updatedAt: 'now' }),
+    () => provider.writeState('7', { schema: 1, runId: 'c0ffee01', item: '9', reviewRound: 0, updatedAt: 'now' }),
     (e: unknown) => e instanceof BoardError && e.kind === 'precondition' && e.item === '7',
   );
   assert.deepEqual(fake.calls(), []);

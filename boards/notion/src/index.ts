@@ -7,6 +7,7 @@ import {
   createCurlRequestFn,
   parseBoardStateRecord,
   renderBoardStateRecord,
+  renderRunMarker,
   requestBoardJson,
   unconfiguredRequestFn,
 } from '@takumi/core';
@@ -25,6 +26,19 @@ import type {
   CurlRequestFnOptions,
   TaskBoardProvider,
 } from '@takumi/core';
+
+/**
+ * The run marker is CORE's (`renderRunMarker`): one grammar for one thing, so a
+ * Notion comment and a pull request body stay greppable alike. A malformed run id
+ * surfaces as this port's own `precondition` instead of a bare Error.
+ */
+function runMarker(runId: string): string {
+  try {
+    return renderRunMarker(runId);
+  } catch (e) {
+    throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
+  }
+}
 
 /**
  * NotionBoardProvider — a Notion DATABASE used as the task board.
@@ -250,7 +264,9 @@ export class NotionBoardProvider implements TaskBoardProvider {
         url: `${this.apiBase}/comments`,
         body: {
           parent: { page_id: id },
-          rich_text: [{ type: 'text', text: { content: `${body}\n\n<!-- takumi:run=${opts.runId} -->` } }],
+          // The marker comes from core, not a local template: one grammar for one
+          // thing, so a Notion comment and a pull request body stay greppable alike.
+          rich_text: [{ type: 'text', text: { content: `${body}\n\n${runMarker(opts.runId)}` } }],
         },
       },
       'comment',

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hasRunMarker, parseRunMarkers, renderRunMarker } from '../index.js';
+import { hasRunMarker, parseRunMarkers, ProviderError, renderRunMarker } from '../index.js';
 
 // The run marker is the string that ties a board comment, a branch and a pull
 // request to one run, so its exact grammar is pinned here rather than inferred
@@ -14,7 +14,18 @@ test('renderRunMarker: the exact documented shape, hidden in every markdown surf
 
 test('renderRunMarker: refuses an id that is not 8 lowercase hex characters', () => {
   for (const bad of ['', 'C0FFEE01', 'c0ffee0', 'c0ffee011', 'zzzzzzzz', 'abcdefg ']) {
-    assert.throws(() => renderRunMarker(bad), /invalid run id/, `must reject ${JSON.stringify(bad)}`);
+    // Classified on purpose: a marker rendered from a non-canonical id would be
+    // invisible to every reader, so this fails in the shared error taxonomy
+    // instead of producing an unattributable comment.
+    let thrown: unknown;
+    try {
+      renderRunMarker(bad);
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown instanceof ProviderError, `must reject ${JSON.stringify(bad)} with a ProviderError`);
+    assert.equal((thrown as ProviderError).kind, 'precondition');
+    assert.match((thrown as Error).message, /invalid run id/);
   }
 });
 
