@@ -1,0 +1,30 @@
+name: redmine-board
+kind: board
+version: 0.1.0
+description: "Redmine issues as the task board (the delivery state is the issue status, the run record is a text custom field)."
+entry: dist/index.js
+package: "@takumi/board-redmine"
+provider:
+  factory: createRedmineBoardProvider
+  transport: createRedmineTransport
+  auth:
+    header: X-Redmine-API-Key
+    env: REDMINE_API_KEY
+  api:
+    base: "https://redmine.example.com"
+    endpoints:
+      listIssues: "GET /issues.json?project_id=:project&status_id=open&limit=:pageSize&offset=:offset"
+      getIssue: "GET /issues/:id.json?include=journals,allowed_statuses"
+      issueStatuses: "GET /issue_statuses.json"
+      updateIssue: "PUT /issues/:id.json"
+      updateJournal: "PUT /journals/:journal_id.json"
+capabilities:
+  comments: true
+  editableComment: true
+  machineReadableState: only-with-stateFieldId-or-stateFieldName
+  atomicClaim: false
+  trustedAuthorFilter: only-with-trustedAuthors-allowlist
+  delivery:
+    canOpenPullRequest: false
+    canRunChecks: false
+    canMerge: false
