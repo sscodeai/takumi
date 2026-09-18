@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { FakeBoardProvider } from '@takumi/board-fake';
 import { listExtensions, loadConfig } from '../commands.js';
 import { initProject } from '../init.js';
-import { createBoardProvider, parseBoardArgs, renderBoard, runBoardCommand } from '../board-command.js';
+import { createBoardProvider, parseBoardArgs, parseStatusMap, renderBoard, runBoardCommand } from '../board-command.js';
 
 /**
  * The board command is READ-ONLY by construction: it only lists. These tests
@@ -156,9 +156,38 @@ test('runBoardCommand: --help documents the providers and stays read-only', asyn
   assert.equal(code, 0);
   assert.match(out, /usage: takumi board/);
   assert.match(out, /Read-only: takumi never claims, transitions or comments/);
-  for (const provider of ['fake', 'github', 'gitlab', 'jira', 'notion']) {
+  for (const provider of ['fake', 'github', 'gitlab', 'jira', 'notion', 'redmine']) {
     assert.ok(out.includes(provider), `help must mention ${provider}`);
   }
+});
+
+test('runBoardCommand: the redmine provider fails closed without credentials or transport', async () => {
+  // No REDMINE_API_KEY in the test environment and no injected transport: the view
+  // must refuse rather than query anonymously.
+  const previous = process.env['REDMINE_API_KEY'];
+  delete process.env['REDMINE_API_KEY'];
+  try {
+    await assert.rejects(
+      () => runBoardCommand(['--provider', 'redmine', '--base-url', 'https://redmine.invalid']),
+      /no request transport configured|REDMINE_API_KEY/,
+    );
+  } finally {
+    if (previous !== undefined) process.env['REDMINE_API_KEY'] = previous;
+  }
+});
+
+test('parseStatusMap: parses delivery states onto board status names and rejects the rest', () => {
+  assert.deepEqual(parseStatusMap('ready=New, pr_open=In Progress'), { ready: 'New', pr_open: 'In Progress' });
+  assert.deepEqual(parseStatusMap(''), {});
+  assert.throws(() => parseStatusMap('ready'), /expected state=Status Name/);
+  assert.throws(() => parseStatusMap('done=Closed'), /invalid --status-map state: "done"/);
+});
+
+test('runBoardCommand: an unknown board provider lists redmine among the known ones', async () => {
+  await assert.rejects(
+    () => runBoardCommand(['--provider', 'trello']),
+    /unknown board provider: trello \(fake \| github \| gitlab \| jira \| notion \| redmine\)/,
+  );
 });
 
 test('runBoardCommand: an unknown state is rejected against the provider declaration', async () => {

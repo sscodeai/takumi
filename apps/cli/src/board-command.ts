@@ -17,6 +17,11 @@ export interface BoardCommandOptions {
   providerOptions: Record<string, string>;
   /** Only these states (default: every declared state). */
   states?: string[];
+  /**
+   * Delivery state -> the board's own status name (Redmine needs it: its states
+   * are numeric ids behind a per-site workflow). Parsed from `--status-map`.
+   */
+  statusMap?: Record<string, string>;
   /** Emit JSON instead of the text board. */
   json: boolean;
 }
@@ -27,6 +32,7 @@ export function parseBoardArgs(rest: string[]): BoardCommandOptions {
   let providerId = 'fake';
   let json = false;
   let states: string[] | undefined;
+  let statusMap: Record<string, string> | undefined;
 
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i] ?? '';
@@ -48,6 +54,9 @@ export function parseBoardArgs(rest: string[]): BoardCommandOptions {
       case '--project-key':
         providerOptions['projectKey'] = next();
         break;
+      case '--state-field':
+        providerOptions['stateFieldName'] = next();
+        break;
       case '--database':
         providerOptions['databaseId'] = next();
         break;
@@ -60,6 +69,9 @@ export function parseBoardArgs(rest: string[]): BoardCommandOptions {
           .map((s) => s.trim())
           .filter((s) => s.length > 0);
         break;
+      case '--status-map':
+        statusMap = parseStatusMap(next());
+        break;
       case '--json':
         json = true;
         break;
@@ -70,7 +82,13 @@ export function parseBoardArgs(rest: string[]): BoardCommandOptions {
     }
   }
 
-  return { providerId, providerOptions, json, ...(states === undefined ? {} : { states }) };
+  return {
+    providerId,
+    providerOptions,
+    json,
+    ...(states === undefined ? {} : { states }),
+    ...(statusMap === undefined ? {} : { statusMap }),
+  };
 }
 
 /**
@@ -119,8 +137,21 @@ export async function createBoardProvider(options: BoardCommandOptions): Promise
         ...optional(options, 'apiBase'),
       });
     }
+    case 'redmine': {
+      const { createRedmineBoardProvider } = await import('@takumi/board-redmine');
+      return createRedmineBoardProvider({
+        baseUrl: required(options, 'baseUrl', '--base-url https://your-redmine.example.com'),
+        ...optional(options, 'project'),
+        // Without a state field Redmine has nowhere to keep the run record, and the
+        // provider says so instead of pretending: the view reports stateRecord=false.
+        ...optional(options, 'stateFieldName'),
+        ...(options.statusMap === undefined ? {} : { statusMap: options.statusMap }),
+      });
+    }
     default:
-      throw new Error(`unknown board provider: ${options.providerId} (fake | github | gitlab | jira | notion)`);
+      throw new Error(
+        `unknown board provider: ${options.providerId} (fake | github | gitlab | jira | notion | redmine)`,
+      );
   }
 }
 
@@ -176,6 +207,32 @@ function describeCapabilities(caps: BoardCapabilities): string {
   ].join(' ');
 }
 
+/**
+ * Parse `--status-map "ready=New,pr_open=In Progress"` into delivery-state → status
+ * name. A key that is not a delivery state is rejected here: the adapter would
+ * ignore it, and a silently ignored mapping is a board that lies about its columns.
+ */
+export function parseStatusMap(spec: string): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const pair of spec.split(',')) {
+    const trimmed = pair.trim();
+    if (trimmed.length === 0) continue;
+    const at = trimmed.indexOf('=');
+    if (at <= 0 || at === trimmed.length - 1) {
+      throw new Error(`invalid --status-map entry: ${JSON.stringify(trimmed)} (expected state=Status Name)`);
+    }
+    const state = trimmed.slice(0, at).trim();
+    const name = trimmed.slice(at + 1).trim();
+    if (!(BOARD_WORK_ITEM_STATES as readonly string[]).includes(state)) {
+      throw new Error(
+        `invalid --status-map state: ${JSON.stringify(state)} (one of ${BOARD_WORK_ITEM_STATES.join(', ')})`,
+      );
+    }
+    map[state] = name;
+  }
+  return map;
+}
+
 function required(options: BoardCommandOptions, key: string, flag: string): string {
   const value = options.providerOptions[key];
   if (value === undefined || value.length === 0) {
@@ -202,19 +259,23 @@ export async function runBoardCommand(rest: string[]): Promise<number> {
   if (rest.includes('--help') || rest.includes('-h')) {
     console.log(
       [
-        'usage: takumi board [--provider fake|github|gitlab|jira|notion] [--json]',
+        'usage: takumi board [--provider fake|github|gitlab|jira|notion|redmine] [--json]',
         '',
         '  --provider fake                 a demo board (default)',
         '  --provider github  --repo owner/name [--api-base URL]',
         '  --provider gitlab  --project group/project [--api-base URL]',
         '  --provider jira    --base-url https://site.atlassian.net [--project-key ABC]',
         '  --provider notion  --database <id|url>',
+        '  --provider redmine --base-url https://redmine.example.com [--project ID] [--state-field NAME]',
         '  --states ready,claimed          limit the states shown',
+        '  --status-map "ready=New,pr_open=In Progress"  delivery state -> board status name',
         '  --json                          print work items as JSON',
         '',
         'Read-only: takumi never claims, transitions or comments from this command.',
         'Credentials come from the environment (GITHUB_TOKEN, GITLAB_TOKEN,',
-        'JIRA_API_TOKEN or JIRA_TOKEN, NOTION_TOKEN).',
+        'JIRA_API_TOKEN or JIRA_TOKEN, NOTION_TOKEN, REDMINE_API_KEY).',
+        'Note: a Redmine board without --state-field cannot store the versioned run',
+        'record, and reports stateRecord=false instead of pretending otherwise.',
       ].join('\n'),
     );
     return 0;
