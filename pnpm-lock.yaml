@@ -14,6 +14,21 @@ importers:
 
   apps/cli:
     dependencies:
+      '@takumi/board-fake':
+        specifier: workspace:*
+        version: link:../../boards/fake
+      '@takumi/board-github':
+        specifier: workspace:*
+        version: link:../../boards/github
+      '@takumi/board-gitlab':
+        specifier: workspace:*
+        version: link:../../boards/gitlab
+      '@takumi/board-jira':
+        specifier: workspace:*
+        version: link:../../boards/jira
+      '@takumi/board-notion':
+        specifier: workspace:*
+        version: link:../../boards/notion
       '@takumi/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -45,6 +60,71 @@ importers:
       '@takumi/runtime-fake':
         specifier: workspace:*
         version: link:../../runtimes/fake
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  boards/fake:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  boards/github:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  boards/gitlab:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  boards/jira:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  boards/notion:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
