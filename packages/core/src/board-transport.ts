@@ -72,6 +72,23 @@ export async function requestBoardJson<T>(request: BoardRequestFn, req: BoardHtt
   return parseBoardJson<T>(res, what);
 }
 
+/**
+ * Quote a value for curl's config-file grammar (used with `-K -`).
+ *
+ * The escapes curl itself understands are reproduced explicitly, so a header
+ * value or a JSON body can never break out of the quoted string and inject
+ * another option.
+ */
+function curlConfigValue(value: string): string {
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t');
+  return `"${escaped}"`;
+}
+
 export interface CurlRequestFnOptions {
   /** Resolve the headers per request (tokens are read here, never stored). */
   headers?: () => Record<string, string>;
@@ -101,17 +118,28 @@ export function createCurlRequestFn(opts: CurlRequestFnOptions = {}): BoardReque
   return (req) => {
     const timeoutSeconds = req.timeoutSeconds ?? opts.timeoutSeconds ?? 30;
     const headers = { ...(opts.headers?.() ?? {}), ...(req.headers ?? {}) };
-    const args: string[] = ['-sS', '-m', String(timeoutSeconds), '-X', req.method];
-    for (const [name, value] of Object.entries(headers)) args.push('-H', `${name}: ${value}`);
-    if (req.body !== undefined) {
-      args.push('-H', 'Content-Type: application/json', '--data-binary', JSON.stringify(req.body));
-    }
+    // EVERYTHING, including headers and the body, travels on STDIN via `-K -`.
+    // Passing them as argv would put an API token in the process list, where any
+    // local user can read it with `ps`. Only non-secret flags stay in argv.
     // The status code is appended to stdout so one call yields both parts; the
     // body itself may contain newlines, so the LAST line is the status.
-    args.push('-w', '\n%{http_code}', req.url);
+    const configLines: string[] = [
+      `request = ${curlConfigValue(req.method)}`,
+      `max-time = ${curlConfigValue(String(timeoutSeconds))}`,
+    ];
+    for (const [name, value] of Object.entries(headers)) {
+      configLines.push(`header = ${curlConfigValue(`${name}: ${value}`)}`);
+    }
+    if (req.body !== undefined) {
+      configLines.push(`header = ${curlConfigValue('Content-Type: application/json')}`);
+      configLines.push(`data-binary = ${curlConfigValue(JSON.stringify(req.body))}`);
+    }
+    configLines.push(`url = ${curlConfigValue(req.url)}`);
+    const args: string[] = ['-sS', '-K', '-', '-w', '\n%{http_code}'];
 
     return new Promise<BoardHttpResponse>((resolve, reject) => {
-      const child = spawn(curlBinary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(curlBinary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      child.stdin?.end(`${configLines.join('\n')}\n`);
       let stdout = '';
       let stderr = '';
       let settled = false;
