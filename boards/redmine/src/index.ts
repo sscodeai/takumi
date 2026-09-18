@@ -280,15 +280,51 @@ export class RedmineBoardProvider implements TaskBoardProvider {
     }
 
     const items: BoardWorkItem[] = [];
+    // An issue whose Redmine status maps to NO delivery state is a configuration
+    // gap, not a filter outcome. Skipping it would make a board that is missing
+    // its statusMap look exactly like a board with no work — an unattended runner
+    // would then sit idle forever while its queue is full. So the status names are
+    // collected and reported together, once, with the fix in the message.
+    const unmapped = new Map<string, string>();
     for (const issue of collected.slice(0, max)) {
-      // The list is a scope filter, not a guarantee: an issue whose status this
-      // adapter cannot map is skipped rather than mis-reported, and `getWork`
-      // still reports it as an explicit precondition error.
-      const item = this.toWorkItemOrNull(issue);
-      if (item === null || !wanted.has(item.state)) continue;
+      let item: BoardWorkItem;
+      try {
+        item = this.toWorkItem(issue);
+      } catch (e) {
+        if (e instanceof BoardError && e.kind === 'precondition' && /does not map/.test(e.message)) {
+          const status = issue.status?.name ?? '(none)';
+          if (!unmapped.has(status)) unmapped.set(status, String(issue.id ?? '?'));
+          continue;
+        }
+        throw e;
+      }
+      // Mapped but not wanted is the filter working as asked.
+      if (!wanted.has(item.state)) continue;
       items.push(item);
     }
+    if (unmapped.size > 0) {
+      const names = [...unmapped.keys()].map((n) => JSON.stringify(n)).join(', ');
+      const example = [...unmapped.values()][0] ?? '?';
+      throw new BoardError(
+        'precondition',
+        `${String(unmapped.size)} Redmine status(es) ${names} map to no delivery state, so issue ${example} (and any like it) ` +
+          `would silently vanish from this board — configure statusMap (delivery state -> Redmine status name) ` +
+          `instead of letting work disappear${await this.statusesHint()}`,
+      );
+    }
     return items;
+  }
+
+  /** Best-effort list of the statuses this Redmine actually has, for an error message. */
+  private async statusesHint(): Promise<string> {
+    try {
+      const statuses = await this.statuses();
+      const names = statuses.map((s) => s.name).filter((n): n is string => typeof n === 'string' && n.length > 0);
+      return names.length === 0 ? '' : `. Available statuses: ${names.join(', ')}`;
+    } catch {
+      // The hint is a courtesy: never let it replace the real error.
+      return '';
+    }
   }
 
   async getWork(id: string): Promise<BoardWorkItem> {
@@ -692,15 +728,6 @@ export class RedmineBoardProvider implements TaskBoardProvider {
       );
     }
     return entry[0];
-  }
-
-  private toWorkItemOrNull(issue: RedmineIssuePayload): BoardWorkItem | null {
-    try {
-      return this.toWorkItem(issue);
-    } catch (e) {
-      if (e instanceof BoardError && e.kind === 'precondition') return null;
-      throw e;
-    }
   }
 
   private toWorkItem(issue: RedmineIssuePayload): BoardWorkItem {

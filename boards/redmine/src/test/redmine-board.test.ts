@@ -405,18 +405,30 @@ test('listWork: exact request shape, and pagination walks every page Redmine rep
   ]);
   assert.ok(!items.some((item) => item.id === '104'), 'a closed issue is not open work');
 
-  // An issue in a status the adapter does not map is skipped by the list (getWork
-  // still reports it loudly) rather than mis-reported as some other state.
+  // An issue in a status the adapter cannot map is a CONFIGURATION GAP, not a
+  // filter outcome: it must be reported, never dropped. A dropped item makes a
+  // board missing its statusMap look exactly like a board with no work.
   sim.issues.push(makeIssue(105, 'Triage'));
   sim.clearRequests();
-  const again = await board.listWork();
-  assert.deepEqual(again.map((item) => item.id), ['101', '102', '103']);
+  await assert.rejects(
+    () => board.listWork(),
+    boardError('precondition', /"Triage" map to no delivery state/),
+    'an unmapped status must be reported, not silently skipped',
+  );
 
   // `limit` bounds the COLLECTION, so one page is enough.
   sim.clearRequests();
   const limited = await board.listWork({ limit: 1 });
   assert.deepEqual(limited.map((item) => item.id), ['101']);
   assert.equal(sim.requests.length, 1);
+
+  // A status that IS mapped but not asked for is the filter working as asked: no
+  // error, just absence.
+  sim.issues.pop();
+  sim.issues.push(makeIssue(106, 'merged'));
+  sim.clearRequests();
+  const filtered = await board.listWork({ states: ['ready'] });
+  assert.deepEqual(filtered.map((item) => item.id), ['101', '103'], 'the merged issue is filtered out, not flagged');
 
   // A label filter cannot be honoured: refusing beats returning unfiltered work.
   await assert.rejects(() => board.listWork({ labels: ['bug'] }), boardError('unsupported', /no labels/));
