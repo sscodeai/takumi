@@ -102,12 +102,31 @@ pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --m
    More runtimes                       Any harness
 ```
 
+同じ原則は「仕事がどこから来るか」にも当てはまる（ADR-006）:
+
+```text
+                          Work request
+                                |
+                       TaskBoardProvider
+                                |
+        +-------------+---------+---------+-------------+
+        |             |                   |             |
+      GitHub        GitLab              Jira          Notion     ...one MCP/REST
+        |             |                   |             |             adapter
+   Issues + PRs   Issues + MRs     Status workflow  select property
+```
+
+board 側が delivery state（label / status / column）を持ち、Takumi 側は実行証跡を持つ。
+provider は自分が「できること」を宣言し、持っていない能力を要求された場合は
+明示的なエラーになる — 黙って何もしない、という選択はしない。
+
 ```text
 takumi/
 ├── apps/cli/              # takumi CLI: init, run, loop, runtime list, extension list
 ├── apps/console/          # SSE live logs を備えた lightweight web console
 ├── packages/core/         # workflow engine, runtime API, artifacts, traceability, MEA loop, sandbox
 ├── runtimes/              # fake, pi, deepseek, cli adapters
+├── boards/                # task-board providers: fake, github, gitlab, jira, notion
 ├── extensions/            # skills, tools, workflows
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
@@ -119,6 +138,7 @@ takumi/
 
 - **Small Core**: orchestration、task/event/artifact models、runtime abstraction、extension loading、approval、audit のみを core が持つ。
 - **Four extension kinds**: Skill、Tool Plugin、Workflow Plugin、Runtime Adapter。
+- **Board agnostic**: 仕事は `TaskBoardProvider`（GitHub、GitLab、Jira、Notion、その他は MCP/REST adapter 1 本）から来る。board が delivery state を持ち、Takumi が実行証跡を持つ。
 - **Harness agnostic**: `runTask`、`cancel`、`getStatus`、`getUsage`、`getArtifacts` を unified event stream 上で扱う。
 - **Traceability by default**: `REQ-001 -> DESIGN-001 -> UT-001 -> EVIDENCE-001`。
 - **Human in the loop**: workflow は approval gate を宣言できる。
@@ -137,6 +157,8 @@ takumi/
 | Parallel workflow step execution | Done |
 | Sandbox abstraction with unshare support | Done |
 | Web console with live logs | Done |
+| Task-board providers: fake / GitHub / GitLab / Jira / Notion, one shared contract suite | Done |
+| Read-only board view: `takumi board --provider <id>` | Done |
 | Agent Eval with 保留検証テスト and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -191,6 +213,8 @@ Takumi は現在 Developer Preview です。
 - Traceability は現在 structural foreign keys ではなく ID naming conventions に依存しています。
 - Tool plugins は sandbox を明示的に選択しない限り user privileges で動作します。
 - Real-repo-scale evaluation は roadmap 上です。
+- board 層（ADR-006）は M1 です: 対象は「仕事の取得元」であり delivery ではありません。pull request 作成・checks 実行・merge は *capability*（`delivery.*`）として宣言するだけで、別 port（`DeliveryProvider`）は M2 で追加します。
+- board ごとに表現できることは意図的に異なります: Notion database には label も編集可能な comment も pull request も無いため、それらの操作は黙って無視されるのではなく fail closed で失敗します。
 
 ## Roadmap
 
@@ -200,8 +224,12 @@ Takumi は現在 Developer Preview です。
 - [x] Japanese SI skills and V-model workflow
 - [x] Agent Eval and system benchmarks
 - [x] Durable resume, parallel execution, web console, sandbox, and MEA loop
+- [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion) with one shared contract suite
+- [ ] DeliveryProvider port: branch, push, pull request, checks, merge
+- [ ] One MCP/REST board adapter for the long tail (Backlog, Redmine, Plane, in-house systems)
 - [ ] Claude runtime adapter
-- [ ] Excel, Word, Jira, GitHub, and Playwright tool plugins
+- [ ] Excel, Word, and Playwright tool plugins
+- [ ] Jira and GitHub tool plugins (board 層が issue 連携をすでに担当)
 - [ ] npm package publishing
 - [ ] Real-repo-scale evals
 

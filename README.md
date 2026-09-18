@@ -108,12 +108,31 @@ pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --m
    More runtimes                       Any harness
 ```
 
+The same principle applies to where work comes from (ADR-006):
+
+```text
+                          Work request
+                                |
+                       TaskBoardProvider
+                                |
+        +-------------+---------+---------+-------------+
+        |             |                   |             |
+      GitHub        GitLab              Jira          Notion     ...one MCP/REST
+        |             |                   |             |             adapter
+   Issues + PRs   Issues + MRs     Status workflow  select property
+```
+
+A board keeps its own delivery state (a label, a status, a column); Takumi keeps
+the execution evidence. A provider declares what it can do, and a capability it
+does not have is an explicit error, never a silent no-op.
+
 ```text
 takumi/
 ├── apps/cli/              # takumi CLI: init, run, loop, runtime list, extension list
 ├── apps/console/          # lightweight web console with SSE live logs
 ├── packages/core/         # workflow engine, runtime API, artifacts, traceability, MEA loop, sandbox
 ├── runtimes/              # fake, pi, deepseek, cli adapters
+├── boards/                # task-board providers: fake, github, gitlab, jira, notion
 ├── extensions/            # skills, tools, workflows
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
@@ -125,6 +144,7 @@ takumi/
 
 - **Small Core**: orchestration, task/event/artifact models, runtime abstraction, extension loading, approval, and audit.
 - **Four extension kinds**: Skill, Tool Plugin, Workflow Plugin, Runtime Adapter.
+- **Board agnostic**: work comes from a `TaskBoardProvider` (GitHub, GitLab, Jira, Notion, or one MCP/REST adapter for the rest). The board owns the delivery state; Takumi owns the execution evidence.
 - **Harness agnostic**: `runTask`, `cancel`, `getStatus`, `getUsage`, `getArtifacts` over a unified event stream.
 - **Traceability by default**: `REQ-001 -> DESIGN-001 -> UT-001 -> EVIDENCE-001`.
 - **Human in the loop**: workflows can declare approval gates.
@@ -143,6 +163,8 @@ takumi/
 | Parallel workflow step execution | Done |
 | Sandbox abstraction with unshare support | Done |
 | Web console with live logs | Done |
+| Task-board providers: fake / GitHub / GitLab / Jira / Notion, one shared contract suite | Done |
+| Read-only board view: `takumi board --provider <id>` | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -202,6 +224,8 @@ Takumi is currently a Developer Preview.
 - Traceability currently relies on ID naming conventions rather than structural foreign keys.
 - Tool plugins run with user privileges unless a sandbox is explicitly selected.
 - Real-repo-scale evaluation is still on the roadmap.
+- The board layer (ADR-006) is M1: it covers the work source, not delivery. Opening a pull request, running checks and merging are declared as *capabilities* only — a separate `DeliveryProvider` port is M2.
+- Boards differ in what they can express, on purpose: a Notion database has no labels, no editable comments and no pull requests, so those operations fail closed instead of quietly doing nothing.
 
 ## Roadmap
 
@@ -211,8 +235,12 @@ Takumi is currently a Developer Preview.
 - [x] Japanese SI skills and V-model workflow
 - [x] Agent Eval and system benchmarks
 - [x] Durable resume, parallel execution, web console, sandbox, and MEA loop
+- [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion) with one shared contract suite
+- [ ] DeliveryProvider port: branch, push, pull request, checks, merge
+- [ ] One MCP/REST board adapter for the long tail (Backlog, Redmine, Plane, in-house systems)
 - [ ] Claude runtime adapter
-- [ ] Excel, Word, Jira, GitHub, and Playwright tool plugins
+- [ ] Excel, Word, and Playwright tool plugins
+- [ ] Jira and GitHub tool plugins (the board layer already covers issues)
 - [ ] npm package publishing
 - [ ] Real-repo-scale evals
 
