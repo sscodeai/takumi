@@ -1,0 +1,30 @@
+name: github-delivery
+kind: delivery
+version: 0.1.0
+description: "GitHub delivery: local git for the branch, the GitHub REST API for the pull request, checks and merge."
+entry: dist/index.js
+package: "@takumi/delivery-github"
+provider:
+  factory: createGitHubDeliveryProvider
+  transport: createGitHubTransport
+  auth:
+    header: "Authorization: Bearer"
+    env: GITHUB_TOKEN
+  api:
+    base: https://api.github.com
+    endpoints:
+      listPulls: GET /repos/:owner/:repo/pulls?head=:owner::branch&state=open
+      createPull: POST /repos/:owner/:repo/pulls
+      getPull: GET /repos/:owner/:repo/pulls/:number
+      mergePull: PUT /repos/:owner/:repo/pulls/:number/merge
+      checkRuns: GET /repos/:owner/:repo/commits/:sha/check-runs
+      commitStatus: GET /repos/:owner/:repo/commits/:sha/status
+  git:
+    runner: createGitRunner
+    push: "plain only (never --force)"
+    merge: "plain merge of the advanced base, aborted on conflict"
+capabilities:
+  canPushBranch: true
+  canOpenPullRequest: true
+  canRunChecks: true
+  canMerge: true
