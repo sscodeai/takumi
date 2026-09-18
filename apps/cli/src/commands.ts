@@ -66,6 +66,8 @@ export interface ProjectConfig {
     tools: string;
     workflows: string;
     runtimes: string;
+    /** Where task-board providers are discovered from (ADR-006). */
+    boards?: string;
   };
   artifacts: string;
   /** Audit trail dir (default `.takumi/audit`). */
@@ -312,17 +314,25 @@ export async function runTask(opts: RunOptions): Promise<{
 }
 
 /** List extensions from the registry dirs in the project config. */
-export async function listExtensions(config: ProjectConfig, cwd: string, kind?: 'skill' | 'tool' | 'workflow' | 'runtime') {
+export async function listExtensions(
+  config: ProjectConfig,
+  cwd: string,
+  kind?: 'skill' | 'tool' | 'workflow' | 'runtime' | 'board',
+) {
   const out: { kind: string; name: string; version: string; description: string }[] = [];
-  const kinds = kind ? [kind] : (['skill', 'tool', 'workflow', 'runtime'] as const);
+  const kinds = kind ? [kind] : (['skill', 'tool', 'workflow', 'runtime', 'board'] as const);
   const plural: Record<string, keyof ProjectConfig['registry']> = {
     skill: 'skills',
     tool: 'tools',
     workflow: 'workflows',
     runtime: 'runtimes',
+    board: 'boards',
   };
   for (const k of kinds) {
+    // A project that never declared a board registry simply has none: an absent
+    // key is skipped rather than treated as a directory named "undefined".
     const dir = config.registry[plural[k] as keyof ProjectConfig['registry']];
+    if (dir === undefined || dir.length === 0) continue;
     const found = await discoverExtensions(join(cwd, dir), k);
     for (const e of found) {
       out.push({
