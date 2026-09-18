@@ -1,0 +1,31 @@
+name: gitlab-board
+kind: board
+version: 0.1.0
+description: GitLab Issues as the task board (labels for delivery state, notes for the versioned state record).
+entry: dist/index.js
+package: "@takumi/board-gitlab"
+provider:
+  factory: createGitLabBoardProvider
+  transport: createGitLabTransport
+  auth:
+    header: PRIVATE-TOKEN
+    env: GITLAB_TOKEN
+  api:
+    base: https://gitlab.com/api/v4
+    endpoints:
+      listIssues: GET /projects/:id/issues?state=opened&per_page=100
+      getIssue: GET /projects/:id/issues/:iid
+      updateLabels: PUT /projects/:id/issues/:iid (add_labels/remove_labels, comma-separated)
+      listNotes: GET /projects/:id/issues/:iid/notes?per_page=100&sort=asc
+      createNote: POST /projects/:id/issues/:iid/notes
+      updateNote: PUT /projects/:id/issues/:iid/notes/:note_id
+capabilities:
+  comments: true
+  editableComment: true
+  machineReadableState: true
+  atomicClaim: false
+  trustedAuthorFilter: only-with-trustedAuthors-allowlist
+  delivery:
+    canOpenPullRequest: true
+    canRunChecks: true
+    canMerge: true
