@@ -66,7 +66,13 @@ reconfigured, the host refusing a conflicting head), and without that edge the
 item would sit in `pr_open` forever. The table
 lives in `packages/core/src/board-state.ts` with no I/O; illegal transitions
 throw `BoardStateError` and an adapter must never "correct" a state on its own. A
-board that cannot express a state says so through `capabilities().states`.
+A board that cannot express a state says so through `capabilities().states`.
+
+Corollary, learned from the Redmine adapter: an item whose state an adapter cannot
+map is a CONFIGURATION GAP, never a filter outcome. `listWork` reports it (naming
+the status and the fix) instead of skipping it — a silently dropped item makes a
+board missing its `statusMap` look exactly like a board with no work, which is how
+an unattended runner idles forever while its queue is full.
 
 ### 4. Capability negotiation, fail-closed
 

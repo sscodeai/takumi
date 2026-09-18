@@ -225,6 +225,7 @@ Takumi は現在 Developer Preview です。
 - すべての provider はオフラインテストのみです: 実在の board / host に対して動かした adapter はまだありません。初回の実運用では API の細部（2 ページ目以降のページング、サイト固有の status / property 名、self-hosted の base URL）を調整する前提で見てください。
 - これらの board では claim はアトミックではありません（全 provider で `atomicClaim: false`）: 同じアカウントを共有する 2 つの run が同時に claim したと誤認し得るため、「1 item = 1 runner」を保証するローカル slot lock は呼び出し側の責務です。
 - base の merge がコンフリクトした場合は abort し、review セッションに引き渡します。履歴を書き換えて解決することはありません。
+- Redmine では `statusMap`（CLI: `--status-map "ready=New,pr_open=In Progress"`）と、run 記録用のテキスト custom field（`--state-field`）が必要です。status がどの state にも対応しない issue は、修正方法を示して REPORT されます（黙って落とすことはありません）。
 
 ## Roadmap
 

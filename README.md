@@ -238,6 +238,7 @@ Takumi is currently a Developer Preview.
 - Every provider ships with offline tests only: no adapter has yet been exercised against a live board or host. Expect to adjust API details (pagination beyond the first page, site-specific status/property names, self-hosted base URLs) on first real use.
 - Claiming is not atomic on any of these boards (`atomicClaim: false` everywhere): two runs sharing one account can both believe they claimed an item, which is why a local slot lock — one runner per item — remains the caller's job.
 - A conflicting base merge is aborted and handed to the review session; takumi never resolves a conflict by rewriting history.
+- Redmine needs its `statusMap` (CLI: `--status-map "ready=New,pr_open=In Progress"`) and, for the run record, a text custom field (`--state-field`). An issue whose status maps to nothing is REPORTED with the fix, never silently dropped from the board.
 
 ## Roadmap
 
