@@ -21,3 +21,6 @@ packages:
 # to build or to run its tests. A glob on purpose: adding a board is one new
 # directory, not an edit to every workspace file.
   - "boards/*"
+
+# Delivery providers (ADR-007): how a committed change reaches the host.
+  - "deliveries/*"

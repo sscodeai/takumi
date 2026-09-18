@@ -1,0 +1,22 @@
+{
+  "name": "@takumi/delivery-fake",
+  "version": "0.1.0",
+  "description": "FakeDeliveryProvider: in-memory git + host simulator for the delivery contract suite.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node ../../scripts/run-node-tests.mjs",
+    "pretest": "pnpm build"
+  },
+  "dependencies": {
+    "@takumi/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

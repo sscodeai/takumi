@@ -27,6 +27,7 @@ export function initProject(cwd: string): string[] {
         '  workflows: extensions/workflows',
         '  runtimes: runtimes',
         '  boards: boards',
+        '  deliveries: deliveries',
         'artifacts: .takumi/artifacts',
         '',
       ].join('\n'),
@@ -34,7 +35,7 @@ export function initProject(cwd: string): string[] {
     created.push(configPath);
   }
 
-  for (const dir of ['.takumi/artifacts', '.takumi/sessions', 'extensions/skills', 'extensions/tools', 'extensions/workflows', 'runtimes', 'boards']) {
+  for (const dir of ['.takumi/artifacts', '.takumi/sessions', 'extensions/skills', 'extensions/tools', 'extensions/workflows', 'runtimes', 'boards', 'deliveries']) {
     if (!existsSync(join(cwd, dir))) {
       mkdirSync(join(cwd, dir), { recursive: true });
       created.push(dir + '/');

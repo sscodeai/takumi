@@ -4,7 +4,7 @@
  * See CHATTER.md §3.
  */
 
-export type ExtensionKind = 'skill' | 'tool' | 'workflow' | 'runtime' | 'board';
+export type ExtensionKind = 'skill' | 'tool' | 'workflow' | 'runtime' | 'board' | 'delivery';
 
 export interface ExtensionManifest {
   /** Stable id, e.g. "jp-requirements", "excel", "jp-si-standard", "pi". */

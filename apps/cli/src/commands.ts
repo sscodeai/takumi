@@ -68,6 +68,8 @@ export interface ProjectConfig {
     runtimes: string;
     /** Where task-board providers are discovered from (ADR-006). */
     boards?: string;
+    /** Where delivery providers are discovered from (ADR-007). */
+    deliveries?: string;
   };
   artifacts: string;
   /** Audit trail dir (default `.takumi/audit`). */
@@ -317,16 +319,17 @@ export async function runTask(opts: RunOptions): Promise<{
 export async function listExtensions(
   config: ProjectConfig,
   cwd: string,
-  kind?: 'skill' | 'tool' | 'workflow' | 'runtime' | 'board',
+  kind?: 'skill' | 'tool' | 'workflow' | 'runtime' | 'board' | 'delivery',
 ) {
   const out: { kind: string; name: string; version: string; description: string }[] = [];
-  const kinds = kind ? [kind] : (['skill', 'tool', 'workflow', 'runtime', 'board'] as const);
+  const kinds = kind ? [kind] : (['skill', 'tool', 'workflow', 'runtime', 'board', 'delivery'] as const);
   const plural: Record<string, keyof ProjectConfig['registry']> = {
     skill: 'skills',
     tool: 'tools',
     workflow: 'workflows',
     runtime: 'runtimes',
     board: 'boards',
+    delivery: 'deliveries',
   };
   for (const k of kinds) {
     // A project that never declared a board registry simply has none: an absent
