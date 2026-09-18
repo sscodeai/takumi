@@ -100,3 +100,39 @@ export {
   unconfiguredRequestFn,
 } from './board-transport.js';
 export type { BoardHttpRequest, BoardHttpResponse, BoardRequestFn, CurlRequestFnOptions } from './board-transport.js';
+
+// The git seam and the run marker: shared by every delivery adapter.
+export { createGitRunner, unconfiguredGitRunner, gitFailure } from './git-runner.js';
+export type { GitRunner, GitResult, GitRunnerOptions } from './git-runner.js';
+export { renderRunMarker, parseRunMarkers, hasRunMarker } from './run-marker.js';
+
+// The delivery port (ADR-007): how a committed change reaches the host.
+export {
+  ProviderError,
+  isUnsupported,
+  isRetriable,
+} from './provider-error.js';
+export type { ProviderErrorKind, ProviderErrorOptions } from './provider-error.js';
+export {
+  DeliveryError,
+  DeliveryUnsupportedError,
+  runDeliveryProviderContractSuite,
+} from './delivery.js';
+export type {
+  DeliveryProvider,
+  DeliveryProviderMetadata,
+  DeliveryCapabilities,
+  DeliveryRequest,
+  DeliveryBase,
+  DeliveryOutcome,
+  DeliveryPushRecord,
+  DeliveryMergeMethod,
+  DeliveryErrorKind,
+  DeliveryFixture,
+  DeliveryContractSuiteOptions,
+  PullRequestRef,
+  PullRequestStatus,
+  CheckSummary,
+  CheckConclusion,
+  MergeOutcome,
+} from './delivery.js';

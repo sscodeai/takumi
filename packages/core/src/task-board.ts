@@ -32,6 +32,7 @@ import {
   type BoardWorkItemState,
 } from './board-state.js';
 import type { BoardStateRecord } from './board-state-record.js';
+import { ProviderError, type ProviderErrorKind } from './provider-error.js';
 
 export type { BoardWorkItemState };
 export type { BoardStateRecord };
@@ -121,24 +122,20 @@ export interface BoardTransitionEvidence {
   note?: string;
 }
 
-/** Error taxonomy: every adapter failure is classified, none is a bare Error. */
-export type BoardErrorKind = 'auth' | 'transport' | 'precondition' | 'not_found' | 'unsupported';
+/**
+ * Error taxonomy: every adapter failure is classified, none is a bare Error.
+ *
+ * The kinds are shared with the delivery port (`provider-error.ts`) so a caller
+ * can react to `auth` / `precondition` / `unsupported` identically whichever
+ * provider produced the failure.
+ */
+export type BoardErrorKind = ProviderErrorKind;
 
 /** A classified board failure. `transport` is retriable next tick; the rest are not. */
-export class BoardError extends Error {
-  readonly kind: BoardErrorKind;
-  readonly item?: string;
-
+export class BoardError extends ProviderError {
   constructor(kind: BoardErrorKind, message: string, opts?: { item?: string; cause?: unknown }) {
-    super(message, opts?.cause === undefined ? undefined : { cause: opts.cause });
+    super(kind, message, opts);
     this.name = 'BoardError';
-    this.kind = kind;
-    if (opts?.item !== undefined) this.item = opts.item;
-  }
-
-  /** True when retrying on a later tick is a sane reaction. */
-  get retriable(): boolean {
-    return this.kind === 'transport';
   }
 }
 
