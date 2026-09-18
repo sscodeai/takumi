@@ -1,0 +1,31 @@
+name: gitlab-delivery
+kind: delivery
+version: 0.1.0
+description: "GitLab delivery: local git for the branch, the GitLab merge-request API for the merge request, pipelines and merge."
+entry: dist/index.js
+package: "@takumi/delivery-gitlab"
+provider:
+  id: "gitlab"
+  factory: createGitLabDeliveryProvider
+  transport: createGitLabTransport
+  auth:
+    header: "PRIVATE-TOKEN"
+    env: "GITLAB_TOKEN"
+  api:
+    base: "https://gitlab.com/api/v4"
+    endpoints:
+      listMergeRequests: "GET /projects/:id/merge_requests?source_branch=:branch&state=opened&per_page=100"
+      createMergeRequest: "POST /projects/:id/merge_requests"
+      getMergeRequest: "GET /projects/:id/merge_requests/:iid"
+      mergeMergeRequest: "PUT /projects/:id/merge_requests/:iid/merge"
+      listPipelines: "GET /projects/:id/merge_requests/:iid/pipelines"
+      commitStatuses: "GET /projects/:id/commits/:sha/statuses"
+  git:
+    runner: createGitRunner
+    push: "plain only (never --force, never --force-with-lease)"
+    merge: "plain merge of the advanced base, aborted on conflict"
+capabilities:
+  canPushBranch: true
+  canOpenPullRequest: true
+  canRunChecks: true
+  canMerge: true

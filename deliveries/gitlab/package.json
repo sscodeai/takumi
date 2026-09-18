@@ -1,0 +1,22 @@
+{
+  "name": "@takumi/delivery-gitlab",
+  "version": "0.1.0",
+  "description": "GitLabDeliveryProvider: local git for the branch, the GitLab merge-request API for the pull request, pipelines and merge.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node ../../scripts/run-node-tests.mjs",
+    "pretest": "pnpm build"
+  },
+  "dependencies": {
+    "@takumi/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
