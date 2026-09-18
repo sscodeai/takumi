@@ -58,8 +58,12 @@ add the port under an already-honest contract.
 ### 3. The six-state delivery model is pure and shared
 
 `ready → claimed → pr_open → merged`, with `pr_open → fix_needed → pr_open`
-(the review/fix loop stays on the same item and PR), `claimed|fix_needed →
-blocked`, and `merged`/`blocked` terminal for the automated machine. The table
+(the review/fix loop stays on the same item and PR), `claimed|pr_open|fix_needed
+→ blocked`, and `merged`/`blocked` terminal for the automated machine.
+`pr_open → blocked` is not decoration: an open pull request can still reach a
+decision no automation may take (review rounds exhausted, base branch
+reconfigured, the host refusing a conflicting head), and without that edge the
+item would sit in `pr_open` forever. The table
 lives in `packages/core/src/board-state.ts` with no I/O; illegal transitions
 throw `BoardStateError` and an adapter must never "correct" a state on its own. A
 board that cannot express a state says so through `capabilities().states`.

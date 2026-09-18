@@ -30,6 +30,13 @@ test('transitions: the review/fix loop stays on the same item', () => {
   assert.equal(canTransition('fix_needed', 'pr_open'), true);
 });
 
+test('transitions: an open pull request can still be blocked (rounds exhausted, host refuses)', () => {
+  // Without this edge a delivery that cannot be merged has nowhere to go and the
+  // item would sit in pr_open forever — the stall this table exists to prevent.
+  assert.equal(canTransition('pr_open', 'blocked'), true);
+  assert.deepEqual([...BOARD_TRANSITIONS['pr_open']], ['merged', 'fix_needed', 'blocked']);
+});
+
 test('transitions: merged and blocked are terminal for the automated machine', () => {
   assert.deepEqual([...BOARD_TERMINAL_STATES], ['merged', 'blocked']);
   for (const state of BOARD_TERMINAL_STATES) {

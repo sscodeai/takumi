@@ -106,6 +106,19 @@ export { createGitRunner, unconfiguredGitRunner, gitFailure } from './git-runner
 export type { GitRunner, GitResult, GitRunnerOptions } from './git-runner.js';
 export { renderRunMarker, parseRunMarkers, hasRunMarker } from './run-marker.js';
 
+// The delivery loop: claim -> agent -> deliver -> review -> merge, in order.
+export { runDeliveryLoop } from './delivery-loop.js';
+export type {
+  DeliveryLoopDeps,
+  DeliveryLoopHooks,
+  DeliveryLoopOutcome,
+  DeliveryLoopPlan,
+  DeliveryLoopResult,
+  LoopStep,
+  ReviewContext,
+  ReviewOutcome,
+} from './delivery-loop.js';
+
 // The delivery port (ADR-007): how a committed change reaches the host.
 export {
   ProviderError,

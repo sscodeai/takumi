@@ -15,7 +15,7 @@
  */
 import { FakeBoardProvider } from '../boards/fake/dist/index.js';
 import { FakeDeliveryProvider } from '../deliveries/fake/dist/index.js';
-import { renderRunMarker } from '../packages/core/dist/index.js';
+import { renderRunMarker, runDeliveryLoop } from '../packages/core/dist/index.js';
 
 const RUN_ID = 'c0ffee01';
 const BASE_SHA = 'a'.repeat(40);
@@ -149,8 +149,45 @@ async function main() {
   await board.comment('DEMO-7', `Delivered: ${delivered.pr.url}\n\n${renderRunMarker(RUN_ID)}`, { runId: RUN_ID });
   record('board final state', (await board.getWork('DEMO-7')).state);
 
-  const failures = timeline.filter((t) => t.step.startsWith('guard:') && /NOT REFUSED/.test(t.detail));
-  console.log(`\n${timeline.length} steps, ${failures.length} guard(s) that did not fire.\n`);
+  // --- the same thing again, driven by the loop instead of by hand ------------
+  console.log('\nNow the same delivery, driven by runDeliveryLoop (the same two ports):\n');
+  const board2 = new FakeBoardProvider({
+    items: [{ id: 'LOOP-1', state: 'ready', title: 'Driven by the loop', labels: ['takumi-ready'] }],
+  });
+  const delivery2 = new FakeDeliveryProvider({ baseSha: BASE_SHA });
+  let reviewed = 0;
+  const loop = await runDeliveryLoop({
+    board: board2,
+    delivery: delivery2,
+    plan: {
+      worktree: '/tmp/takumi-demo-worktree',
+      branch: 'takumi/loop-1-c0ffee02',
+      baseBranch: 'main',
+      itemId: 'LOOP-1',
+      runId: 'c0ffee02',
+      baseSha: BASE_SHA,
+      title: 'Driven by the loop',
+    },
+    hooks: {
+      // A stand-in for the agent: it commits on round 0 and fixes on round 1.
+      agent: async ({ round }) => {
+        delivery2.setHead(round === 0 ? HEAD_SHA : `${'d'.repeat(12)}committedfix0`);
+      },
+      // A stand-in for the reviewer: one finding, then clean.
+      review: async () => {
+        reviewed += 1;
+        return reviewed === 1 ? { verdict: 'findings', note: 'the error path is untested' } : { verdict: 'clean' };
+      },
+    },
+  });
+  for (const step of loop.steps) console.log(`  ${step.step.padEnd(28)} ${step.detail}`);
+  console.log(`  -> outcome=${loop.outcome} rounds=${loop.rounds} final=${(await board2.getWork('LOOP-1')).state}`);
+  if (loop.outcome !== 'merged' || (await board2.getWork('LOOP-1')).state !== 'merged') {
+    timeline.push({ step: 'guard:loop', detail: `the loop did not merge: ${loop.outcome}` });
+  }
+
+  const failures = timeline.filter((t) => t.step.startsWith('guard:') && /NOT REFUSED|did not merge/.test(t.detail));
+  console.log(`\n${timeline.length} checks, ${failures.length} that did not behave.\n`);
   return failures.length === 0 ? 0 : 1;
 }
 

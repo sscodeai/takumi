@@ -44,11 +44,18 @@ export const BOARD_TERMINAL_STATES: readonly BoardWorkItemState[] = ['merged', '
  * `merged` and `blocked` are terminal. A blocked item is released by a HUMAN
  * (they re-label it ready themselves) — takumi never auto-recovers a blocked
  * item, which is the whole point of a state a person owns.
+ *
+ * `pr_open → blocked` is deliberately present: a pull request can be open and
+ * still reach a state no automation may decide from (the review round budget is
+ * exhausted, the base branch was reconfigured, the host refuses to merge a
+ * conflicting head). Without that edge such a delivery would have nowhere to go
+ * and the caller would have to leave the item lying in `pr_open` forever, which
+ * is how an unattended loop silently stalls.
  */
 export const BOARD_TRANSITIONS: Readonly<Record<BoardWorkItemState, readonly BoardWorkItemState[]>> = {
   ready: ['claimed'],
   claimed: ['pr_open', 'blocked'],
-  pr_open: ['merged', 'fix_needed'],
+  pr_open: ['merged', 'fix_needed', 'blocked'],
   fix_needed: ['pr_open', 'blocked'],
   merged: [],
   blocked: [],
