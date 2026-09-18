@@ -137,7 +137,7 @@ takumi/
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
 ├── examples/              # Japanese SI を含む end-to-end delivery examples
-└── docs/                  # ADRs and evaluation notes
+└── docs/                  # ADRs、bug ledger、evaluation notes
 ```
 
 ## Core Ideas
@@ -187,7 +187,9 @@ TAKUMI_EVAL_HARNESS=pi node eval/scripts/run-eval.mjs
 | deepseek v4-pro, complex | 4/5 | 0% | 1 natural repair |
 | Pi, opencode-zen | 6/6 | 0% | 0 |
 
-Methodology、caveats、limitations は [docs/evaluation.md](./docs/evaluation.md) を参照してください。
+board / delivery 層で見つかった defect（症状・根因・修正 commit・再発を防ぐテスト）は
+[docs/bugs-fixed.md](./docs/bugs-fixed.md) に、Methodology、caveats、limitations は
+[docs/evaluation.md](./docs/evaluation.md) にまとめています。
 
 ## MEA Loop
 
