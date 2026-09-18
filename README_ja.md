@@ -111,9 +111,14 @@ pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --m
                                 |
         +-------------+---------+---------+-------------+
         |             |                   |             |
-      GitHub        GitLab              Jira          Notion     ...one MCP/REST
-        |             |                   |             |             adapter
-   Issues + PRs   Issues + MRs     Status workflow  select property
+      GitHub        GitLab       Jira      Notion    Redmine   ...one MCP/REST
+        |             |            |          |          |          adapter
+   Issues + PRs   Issues + MRs   Status   select prop  Status workflow
+        |
+        └──> DeliveryProvider  (ADR-007)
+                   |
+        GitHub / GitLab  —  plain push、PR は 1 本、checks、レビュー済み commit のみ merge
+                            能力が無ければ明示的なエラー。黙って何もしない。
 ```
 
 board 側が delivery state（label / status / column）を持ち、Takumi 側は実行証跡を持つ。
@@ -126,7 +131,8 @@ takumi/
 ├── apps/console/          # SSE live logs を備えた lightweight web console
 ├── packages/core/         # workflow engine, runtime API, artifacts, traceability, MEA loop, sandbox
 ├── runtimes/              # fake, pi, deepseek, cli adapters
-├── boards/                # task-board providers: fake, github, gitlab, jira, notion
+├── boards/                # task-board providers: fake, github, gitlab, jira, notion, redmine
+├── deliveries/            # delivery providers: fake, github, gitlab
 ├── extensions/            # skills, tools, workflows
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
@@ -157,8 +163,10 @@ takumi/
 | Parallel workflow step execution | Done |
 | Sandbox abstraction with unshare support | Done |
 | Web console with live logs | Done |
-| Task-board providers: fake / GitHub / GitLab / Jira / Notion, one shared contract suite | Done |
+| Task-board providers: fake / GitHub / GitLab / Jira / Notion / Redmine, one shared contract suite | Done |
 | Read-only board view: `takumi board --provider <id>` | Done |
+| Delivery providers: fake / GitHub / GitLab — plain push、PR 1 本、レビュー済み commit のみ merge | Done |
+| Runnable board -> delivery -> merge demo (in-memory、認証情報不要): `node scripts/board-delivery-demo.mjs` | Done |
 | Agent Eval with 保留検証テスト and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -213,8 +221,10 @@ Takumi は現在 Developer Preview です。
 - Traceability は現在 structural foreign keys ではなく ID naming conventions に依存しています。
 - Tool plugins は sandbox を明示的に選択しない限り user privileges で動作します。
 - Real-repo-scale evaluation は roadmap 上です。
-- board 層（ADR-006）は M1 です: 対象は「仕事の取得元」であり delivery ではありません。pull request 作成・checks 実行・merge は *capability*（`delivery.*`）として宣言するだけで、別 port（`DeliveryProvider`）は M2 で追加します。
-- board ごとに表現できることは意図的に異なります: Notion database には label も編集可能な comment も pull request も無いため、それらの操作は黙って無視されるのではなく fail closed で失敗します。
+- board 層（ADR-006）は「仕事の取得元」、delivery 層（ADR-007）は branch / pull request / checks / merge を担当します。board ごとに表現できることは意図的に異なります: Notion database には label も編集可能な comment も pull request も無いため、それらの操作は黙って無視されるのではなく fail closed で失敗します。
+- すべての provider はオフラインテストのみです: 実在の board / host に対して動かした adapter はまだありません。初回の実運用では API の細部（2 ページ目以降のページング、サイト固有の status / property 名、self-hosted の base URL）を調整する前提で見てください。
+- これらの board では claim はアトミックではありません（全 provider で `atomicClaim: false`）: 同じアカウントを共有する 2 つの run が同時に claim したと誤認し得るため、「1 item = 1 runner」を保証するローカル slot lock は呼び出し側の責務です。
+- base の merge がコンフリクトした場合は abort し、review セッションに引き渡します。履歴を書き換えて解決することはありません。
 
 ## Roadmap
 
@@ -224,9 +234,11 @@ Takumi は現在 Developer Preview です。
 - [x] Japanese SI skills and V-model workflow
 - [x] Agent Eval and system benchmarks
 - [x] Durable resume, parallel execution, web console, sandbox, and MEA loop
-- [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion) with one shared contract suite
-- [ ] DeliveryProvider port: branch, push, pull request, checks, merge
-- [ ] One MCP/REST board adapter for the long tail (Backlog, Redmine, Plane, in-house systems)
+- [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion / Redmine) with one shared contract suite
+- [x] DeliveryProvider port: branch、plain push、PR 1 本、checks、レビュー済み head の merge
+- [x] Delivery adapters for GitHub and GitLab
+- [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
+- [ ] A `deliveries/git` adapter for a bare remote with no review surface
 - [ ] Claude runtime adapter
 - [ ] Excel, Word, and Playwright tool plugins
 - [ ] Jira and GitHub tool plugins (board 層が issue 連携をすでに担当)

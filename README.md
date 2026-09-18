@@ -117,14 +117,21 @@ The same principle applies to where work comes from (ADR-006):
                                 |
         +-------------+---------+---------+-------------+
         |             |                   |             |
-      GitHub        GitLab              Jira          Notion     ...one MCP/REST
-        |             |                   |             |             adapter
-   Issues + PRs   Issues + MRs     Status workflow  select property
+      GitHub        GitLab       Jira      Notion    Redmine   ...one MCP/REST
+        |             |            |          |          |          adapter
+   Issues + PRs   Issues + MRs   Status   select prop  Status workflow
+        |
+        └──> DeliveryProvider  (ADR-007)
+                   |
+        GitHub / GitLab  —  plain push, one pull request, checks, merge of the
+                            reviewed commit only; no capability, no silent no-op
 ```
 
 A board keeps its own delivery state (a label, a status, a column); Takumi keeps
 the execution evidence. A provider declares what it can do, and a capability it
-does not have is an explicit error, never a silent no-op.
+does not have is an explicit error, never a silent no-op. Delivery is a separate
+port because the two are genuinely different systems: a Jira board can pair with
+a GitHub delivery, and a Notion database has no pull request at all.
 
 ```text
 takumi/
@@ -132,7 +139,8 @@ takumi/
 ├── apps/console/          # lightweight web console with SSE live logs
 ├── packages/core/         # workflow engine, runtime API, artifacts, traceability, MEA loop, sandbox
 ├── runtimes/              # fake, pi, deepseek, cli adapters
-├── boards/                # task-board providers: fake, github, gitlab, jira, notion
+├── boards/                # task-board providers: fake, github, gitlab, jira, notion, redmine
+├── deliveries/            # delivery providers: fake, github, gitlab
 ├── extensions/            # skills, tools, workflows
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
@@ -163,8 +171,10 @@ takumi/
 | Parallel workflow step execution | Done |
 | Sandbox abstraction with unshare support | Done |
 | Web console with live logs | Done |
-| Task-board providers: fake / GitHub / GitLab / Jira / Notion, one shared contract suite | Done |
+| Task-board providers: fake / GitHub / GitLab / Jira / Notion / Redmine, one shared contract suite | Done |
 | Read-only board view: `takumi board --provider <id>` | Done |
+| Delivery providers: fake / GitHub / GitLab — plain push, one PR, merge of the reviewed commit only | Done |
+| Runnable board -> delivery -> merge demo with in-memory providers: `node scripts/board-delivery-demo.mjs` | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -224,8 +234,10 @@ Takumi is currently a Developer Preview.
 - Traceability currently relies on ID naming conventions rather than structural foreign keys.
 - Tool plugins run with user privileges unless a sandbox is explicitly selected.
 - Real-repo-scale evaluation is still on the roadmap.
-- The board layer (ADR-006) is M1: it covers the work source, not delivery. Opening a pull request, running checks and merging are declared as *capabilities* only — a separate `DeliveryProvider` port is M2.
-- Boards differ in what they can express, on purpose: a Notion database has no labels, no editable comments and no pull requests, so those operations fail closed instead of quietly doing nothing.
+- The board layer (ADR-006) covers the work source; the delivery layer (ADR-007) covers branch, pull request, checks and merge. Boards differ in what they can express, on purpose: a Notion database has no labels, no editable comments and no pull requests, so those operations fail closed instead of quietly doing nothing.
+- Every provider ships with offline tests only: no adapter has yet been exercised against a live board or host. Expect to adjust API details (pagination beyond the first page, site-specific status/property names, self-hosted base URLs) on first real use.
+- Claiming is not atomic on any of these boards (`atomicClaim: false` everywhere): two runs sharing one account can both believe they claimed an item, which is why a local slot lock — one runner per item — remains the caller's job.
+- A conflicting base merge is aborted and handed to the review session; takumi never resolves a conflict by rewriting history.
 
 ## Roadmap
 
@@ -235,9 +247,11 @@ Takumi is currently a Developer Preview.
 - [x] Japanese SI skills and V-model workflow
 - [x] Agent Eval and system benchmarks
 - [x] Durable resume, parallel execution, web console, sandbox, and MEA loop
-- [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion) with one shared contract suite
-- [ ] DeliveryProvider port: branch, push, pull request, checks, merge
-- [ ] One MCP/REST board adapter for the long tail (Backlog, Redmine, Plane, in-house systems)
+- [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion / Redmine) with one shared contract suite
+- [x] DeliveryProvider port: branch, plain push, one pull request, checks, merge of the reviewed head
+- [x] Delivery adapters for GitHub and GitLab
+- [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
+- [ ] A `deliveries/git` adapter for a bare remote with no review surface
 - [ ] Claude runtime adapter
 - [ ] Excel, Word, and Playwright tool plugins
 - [ ] Jira and GitHub tool plugins (the board layer already covers issues)
