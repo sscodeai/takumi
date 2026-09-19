@@ -35,6 +35,15 @@ importers:
       '@takumi/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@takumi/delivery-fake':
+        specifier: workspace:*
+        version: link:../../deliveries/fake
+      '@takumi/delivery-github':
+        specifier: workspace:*
+        version: link:../../deliveries/github
+      '@takumi/delivery-gitlab':
+        specifier: workspace:*
+        version: link:../../deliveries/gitlab
       '@takumi/runtime-cli':
         specifier: workspace:*
         version: link:../../runtimes/cli
