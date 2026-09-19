@@ -58,6 +58,8 @@ import {
   unconfiguredRequestFn,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -238,6 +240,10 @@ export class RedmineBoardProvider implements TaskBoardProvider {
       // Redmine cannot write conditionally, so the claim is read-then-write plus a
       // re-read verification (see the header note 3).
       atomicClaim: false,
+      // Redmine issue statuses are administration data: `/issue_statuses.json` is
+      // read-only, so a status cannot be created through this API. The honest
+      // answer is false, and `bootstrapStates()` only REPORTS.
+      canBootstrapStates: false,
       delivery: { canOpenPullRequest: false, canRunChecks: false, canMerge: false },
     };
   }
@@ -520,6 +526,62 @@ export class RedmineBoardProvider implements TaskBoardProvider {
         ? this.stateFieldEntry(await this.fetchIssue(id), block)
         : { id: this.stateFieldId, value: block };
     await this.putIssue(id, { custom_fields: [entry] }, `writeState ${id}`);
+  }
+
+  /**
+   * Report which of the delivery states this Redmine INSTALLATION can express.
+   *
+   * Redmine issue statuses live in ADMINISTRATION — `/issue_statuses.json` is a
+   * read-only resource — so `canBootstrapStates` is false and this is a READ-ONLY
+   * report, never a write. It answers, before any work is claimed, exactly the pain
+   * this adapter already documents: a `statusMap` naming a status nobody created
+   * makes every claim fail as `unsupported` with a list to compare against. Here the
+   * same fact is reported with the two steps that fix it.
+   *
+   * The status name comes from the adapter's OWN `statusMap` (a second mapping would
+   * drift), and the comparison is case-insensitive on purpose: that is the very rule
+   * `resolveStatusId` uses, so a status this report calls `exists` is a status this
+   * adapter can really resolve to an id.
+   *
+   * A status the installation has but NO state names (say `Triage`) is not an action
+   * here — `actions` is exactly one entry per desired state — it is the
+   * configuration gap `listWork` refuses to hide.
+   *
+   * A dry run is deliberately the SAME call: a report cannot change the
+   * installation, so `applied` is false either way.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    _opts?: { dryRun?: boolean },
+  ): Promise<BoardBootstrapReport> {
+    const available = new Set(
+      (await this.statuses())
+        .map((status) => status.name)
+        .filter((name): name is string => typeof name === 'string' && name.length > 0)
+        .map((name) => name.toLowerCase()),
+    );
+    const actions: BoardBootstrapAction[] = desired.map((state) => {
+      const name = this.statusMap[state];
+      if (available.has(name.toLowerCase())) return { state, name, outcome: 'exists' };
+      return {
+        state,
+        name,
+        outcome: 'not-creatable',
+        instruction:
+          `this Redmine has no issue status named ${JSON.stringify(name)}, so state ${JSON.stringify(state)} ` +
+          `cannot be represented: create that status in Redmine administration (Administration → Issue statuses) ` +
+          `and pass statusMap/--status-map "<delivery state>=<Status Name>" (here "${state}=${name}") so this ` +
+          `adapter can resolve it to an id — the REST API cannot create issue statuses`,
+      };
+    });
+    return {
+      provider: PROVIDER_ID,
+      // A report never changes the installation, so a real call and a dry run are
+      // the same read — and neither is `applied`.
+      applied: false,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((state) => !this.capabilities().states.includes(state)),
+    };
   }
 
   // --- URLs ---------------------------------------------------------------

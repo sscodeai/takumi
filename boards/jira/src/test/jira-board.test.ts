@@ -6,7 +6,13 @@ import {
   renderBoardStateRecord,
   runTaskBoardProviderContractSuite,
 } from '@takumi/core';
-import type { BoardHttpRequest, BoardHttpResponse, BoardRequestFn, BoardStateRecord } from '@takumi/core';
+import type {
+  BoardHttpRequest,
+  BoardHttpResponse,
+  BoardRequestFn,
+  BoardStateRecord,
+  BoardWorkItemState,
+} from '@takumi/core';
 import { adfToText, createJiraBoardProvider, JIRA_STATE_PROPERTY, JiraBoardProvider, runMarker, textToAdf } from '../index.js';
 
 /**
@@ -32,6 +38,22 @@ interface SimComment {
 }
 
 const BASE = 'https://acme.atlassian.net';
+
+/**
+ * The statuses the seeded project's workflow offers.
+ *
+ * `GET /rest/api/3/project/<key>/statuses` is the ONE place an adapter can read
+ * them from: a status that is not in this list is one nobody added to the project's
+ * workflow, which is exactly what `bootstrapStates()` has to report.
+ */
+const DEFAULT_PROJECT_STATUSES: readonly string[] = [
+  'ready',
+  'claimed',
+  'pr_open',
+  'fix_needed',
+  'merged',
+  'blocked',
+];
 
 function makeIssue(key: string, status: string, extra: Partial<SimIssue> = {}): SimIssue {
   return {
@@ -61,8 +83,9 @@ function toJiraShape(issue: SimIssue) {
   };
 }
 
-function jiraSimulator(seedIssues: SimIssue[]) {
+function jiraSimulator(seedIssues: SimIssue[], options: { projectStatuses?: readonly string[] } = {}) {
   const issues = seedIssues;
+  const projectStatuses = options.projectStatuses ?? DEFAULT_PROJECT_STATUSES;
   const comments: SimComment[] = [];
   const properties = new Map<string, string>();
   const requests: BoardHttpRequest[] = [];
@@ -78,6 +101,20 @@ function jiraSimulator(seedIssues: SimIssue[]) {
     const body = (req.body ?? {}) as Record<string, unknown>;
 
     if (req.method === 'GET' && path === '/rest/api/3/myself') return json({ accountId: 'acc-bot', displayName: 'Takumi Bot' });
+
+    // What a Jira project's workflow offers, per ISSUE TYPE — the documented shape
+    // of `GET /rest/api/3/project/<key>/statuses`, and the only way an adapter can
+    // learn which statuses exist without guessing.
+    const projectStatusesMatch = /^\/rest\/api\/3\/project\/([^/]+)\/statuses$/.exec(path);
+    if (req.method === 'GET' && projectStatusesMatch) {
+      return json([
+        {
+          id: '10001',
+          name: 'Task',
+          statuses: projectStatuses.map((name, index) => ({ id: String(2000 + index), name })),
+        },
+      ]);
+    }
 
     if (req.method === 'POST' && path === '/rest/api/3/search') {
       const jql = String(body['jql'] ?? '');
@@ -158,7 +195,17 @@ function jiraSimulator(seedIssues: SimIssue[]) {
     return notFound();
   };
 
-  return { request, requests, issues, comments, properties };
+  return {
+    request,
+    requests,
+    issues,
+    comments,
+    properties,
+    /** Forget the recorded requests, so a test can assert one phase at a time. */
+    clearRequests(): void {
+      requests.length = 0;
+    },
+  };
 }
 
 function provider(sim: ReturnType<typeof jiraSimulator>, extra: Record<string, unknown> = {}) {
@@ -167,10 +214,13 @@ function provider(sim: ReturnType<typeof jiraSimulator>, extra: Record<string, u
 
 const RUN = 'c0ffee01';
 
-test('JiraBoardProvider: shared task-board contract suite', async () => {
+test('JiraBoardProvider: shared task-board contract suite', async (t) => {
   const sim = jiraSimulator([makeIssue('ACME-1', 'ready')]);
   const out = await runTaskBoardProviderContractSuite(provider(sim), { id: 'jira', itemId: 'ACME-1' });
   assert.equal(out.gate, 'task-board-contract');
+  // The suite's own verdict on the state-bootstrap port, printed as a diagnostic so
+  // the evidence is in the run's output and not only in an assertion message.
+  for (const note of out.notes.filter((n) => n.startsWith('bootstrapStates:'))) t.diagnostic(note);
   // Jira passes everything except the trust-boundary check: without a configured
   // author allowlist there is no trust signal to prove, so the suite reports the
   // round-trip as PARTIAL instead of pretending.
@@ -178,6 +228,13 @@ test('JiraBoardProvider: shared task-board contract suite', async () => {
   assert.ok(out.notes.some((n) => n.includes('trustedAuthorFilter=false')), out.notes.join('\n'));
   assert.ok(out.notes.some((n) => n.startsWith('claim: PASS')));
   assert.ok(out.notes.some((n) => n.startsWith('terminal: PASS')));
+  // The suite calls bootstrapStates itself now: Jira can express all six states
+  // (the seeded project has the six workflow statuses), but it reports them rather
+  // than creating them — canCreate=false, nothing created, nothing not-creatable.
+  assert.ok(
+    out.notes.some((n) => n.startsWith('bootstrapStates: PASS (canCreate=false created=0 exists=6 notCreatable=0')),
+    out.notes.join('\n'),
+  );
 });
 
 test('capabilities: no delivery side at all, and trust only when the caller declares it', () => {
@@ -187,6 +244,11 @@ test('capabilities: no delivery side at all, and trust only when the caller decl
   assert.equal(caps.trustedAuthorFilter, false, 'Jira exposes no per-comment role, so the default is honest');
   assert.equal(caps.machineReadableState, true);
   assert.equal(caps.atomicClaim, false);
+  assert.equal(
+    caps.canBootstrapStates,
+    false,
+    'a Jira status lives in a workflow and is created in administration, so this adapter only reports',
+  );
 
   const withTrust = createJiraBoardProvider({
     baseUrl: BASE,
@@ -194,6 +256,72 @@ test('capabilities: no delivery side at all, and trust only when the caller decl
     trustedAuthors: ['acc-maintainer'],
   }).capabilities();
   assert.equal(withTrust.trustedAuthorFilter, true);
+});
+
+test('bootstrapStates: a READ-ONLY report of the project workflow, with the exact fix named', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')], {
+    projectStatuses: ['ready', 'claimed', 'pr_open', 'fix_needed', 'blocked'],
+  });
+  // `merged` is mapped to a status nobody added to this project's workflow: the
+  // report has to say so, and name the status to add.
+  const board = provider(sim, { statusMap: { merged: 'Shipped' } });
+  const desired: BoardWorkItemState[] = ['ready', 'merged', 'claimed'];
+
+  const report = await board.bootstrapStates(desired);
+  // ONE request, and it is a read of the project's own status list.
+  assert.deepEqual(
+    sim.requests.map((req) => `${req.method} ${req.url}`),
+    [`GET ${BASE}/rest/api/3/project/ACME/statuses`],
+  );
+  assert.equal(report.provider, 'jira');
+  assert.equal(report.applied, false, 'the adapter cannot create a Jira status, so it never changed anything');
+  assert.deepEqual(report.unsupported, [], 'the adapter declares all six states, so none is out of reach');
+  assert.deepEqual(
+    report.actions.map((action) => [action.state, action.name, action.outcome]),
+    [
+      ['ready', 'ready', 'exists'],
+      ['merged', 'Shipped', 'not-creatable'],
+      ['claimed', 'claimed', 'exists'],
+    ],
+    "the name comes from the adapter's OWN statusMap, and the comparison is case-insensitive",
+  );
+  const missing = report.actions[1];
+  assert.match(missing?.instruction ?? '', /no status named "Shipped" in project ACME/);
+  assert.match(missing?.instruction ?? '', /statusMap/);
+  assert.match(missing?.instruction ?? '', /administration/);
+
+  // A dry run is the same read (a report cannot change a workflow), so it reports
+  // exactly the same facts and still writes nothing.
+  sim.clearRequests();
+  const dry = await board.bootstrapStates(desired, { dryRun: true });
+  assert.deepEqual(dry, report, 'a read-only report cannot differ between a dry run and a real one');
+  assert.deepEqual(sim.requests.map((req) => req.method), ['GET'], 'a dry run is one read and no write');
+
+  // Idempotent by construction: the second call re-reads and reports the same.
+  sim.clearRequests();
+  const again = await board.bootstrapStates(desired);
+  assert.deepEqual(again, report);
+  assert.equal(again.applied, false, 'a second call changes nothing');
+  assert.ok(
+    !again.actions.some((action) => action.outcome === 'created' || action.outcome === 'would-create'),
+    'canBootstrapStates=false: nothing may ever be created or promised, not even on a dry run',
+  );
+});
+
+test('bootstrapStates: with no project configured every state is a reported configuration gap', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')]);
+  const board = new JiraBoardProvider({ baseUrl: BASE, request: sim.request });
+
+  const report = await board.bootstrapStates(['merged']);
+  assert.equal(report.provider, 'jira');
+  assert.equal(report.applied, false);
+  assert.equal(report.actions.length, 1, 'exactly one action per desired state');
+  assert.equal(report.actions[0]?.state, 'merged');
+  assert.equal(report.actions[0]?.name, 'merged');
+  assert.equal(report.actions[0]?.outcome, 'not-creatable');
+  assert.match(report.actions[0]?.instruction ?? '', /no Jira project is configured/);
+  assert.match(report.actions[0]?.instruction ?? '', /projectKey/);
+  assert.equal(sim.requests.length, 0, 'with no project there is nothing to read, so no request is made');
 });
 
 test('request shapes: search is JQL-scoped to the mapped status, transitions are resolved by name', async () => {

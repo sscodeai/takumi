@@ -10,7 +10,13 @@ import {
   renderBoardStateRecord,
   runTaskBoardProviderContractSuite,
 } from '@takumi/core';
-import type { BoardHttpRequest, BoardHttpResponse, BoardRequestFn, BoardStateRecord } from '@takumi/core';
+import type {
+  BoardHttpRequest,
+  BoardHttpResponse,
+  BoardRequestFn,
+  BoardStateRecord,
+  BoardWorkItemState,
+} from '@takumi/core';
 import {
   createRedmineBoardProvider,
   createRedmineTransport,
@@ -329,7 +335,7 @@ function boardError(kind: string, re?: RegExp) {
 
 // --- the shared contract suite ---------------------------------------------
 
-test('RedmineBoardProvider: shared task-board contract suite over an injected transport', async () => {
+test('RedmineBoardProvider: shared task-board contract suite over an injected transport', async (t) => {
   const sim = redmineSimulator([makeIssue(101, 'ready')]);
   const out = await runTaskBoardProviderContractSuite(provider(sim, { trustedAuthors: [BOT] }), {
     id: 'redmine',
@@ -338,6 +344,9 @@ test('RedmineBoardProvider: shared task-board contract suite over an injected tr
   });
 
   assert.equal(out.gate, 'task-board-contract');
+  // The suite's own verdict on the state-bootstrap port, printed as a diagnostic so
+  // the evidence is in the run's output and not only in an assertion message.
+  for (const note of out.notes.filter((n) => n.startsWith('bootstrapStates:'))) t.diagnostic(note);
   // Every check runs because a state field and an author allowlist are configured.
   // The ONE thing the suite cannot inject is a foreign-authored record (a real
   // adapter writes as itself), so it reports that single check as PARTIAL instead
@@ -356,6 +365,13 @@ test('RedmineBoardProvider: shared task-board contract suite over an injected tr
     out.notes.join('\n'),
   );
   assert.ok(out.notes.some((note) => note.includes('credentials: NOT_REQUIRED')), out.notes.join('\n'));
+  // The suite runs bootstrapStates itself now. Redmine's statuses live in
+  // administration, so the adapter reports them: the instance has all six status
+  // names, so canCreate=false with six exist and none to warn about.
+  assert.ok(
+    out.notes.some((note) => note.startsWith('bootstrapStates: PASS (canCreate=false created=0 exists=6 notCreatable=0')),
+    out.notes.join('\n'),
+  );
 });
 
 test('capabilities: no delivery side, trust only when declared, state only with a field', () => {
@@ -369,12 +385,75 @@ test('capabilities: no delivery side, trust only when declared, state only with 
   assert.equal(caps.editableComment, true);
   assert.equal(caps.machineReadableState, true, 'a state field is configured');
   assert.equal(caps.trustedAuthorFilter, false, 'Redmine journals expose no role, so the default is honest');
+  assert.equal(
+    caps.canBootstrapStates,
+    false,
+    'Redmine issue statuses are administration data, so this adapter only reports them',
+  );
 
   const withTrust = provider(sim, { trustedAuthors: [BOT] }).capabilities();
   assert.equal(withTrust.trustedAuthorFilter, true);
 
   const noField = createRedmineBoardProvider({ baseUrl: BASE, project: 'acme', request: sim.request });
   assert.equal(noField.capabilities().machineReadableState, false, 'no custom field means nowhere to keep the record');
+});
+
+test('bootstrapStates: reads the installation statuses and names the status an operator must add', async () => {
+  const sim = redmineSimulator([makeIssue(101, 'ready')]);
+  // `merged` is mapped to a status this installation does not have: the report has
+  // to name it, and name BOTH steps of the fix.
+  const board = provider(sim, { statusMap: { ready: 'ready', merged: 'Shipped' } });
+  const desired: BoardWorkItemState[] = ['ready', 'merged', 'blocked'];
+
+  const report = await board.bootstrapStates(desired);
+  assert.deepEqual(
+    sim.requests.map((req) => `${req.method} ${req.url}`),
+    [`GET ${BASE}/issue_statuses.json`],
+    'one read of the installation status list, and nothing else',
+  );
+  assert.equal(report.provider, 'redmine');
+  assert.equal(report.applied, false, 'the REST API cannot create a status, so nothing was changed');
+  assert.deepEqual(report.unsupported, [], 'the adapter declares all six states, so none is out of reach');
+  assert.deepEqual(
+    report.actions.map((action) => [action.state, action.name, action.outcome]),
+    [
+      ['ready', 'ready', 'exists'],
+      ['merged', 'Shipped', 'not-creatable'],
+      ['blocked', 'blocked', 'exists'],
+    ],
+    "the name comes from the adapter's OWN statusMap",
+  );
+  const missing = report.actions[1];
+  assert.match(missing?.instruction ?? '', /no issue status named "Shipped"/, 'the report names the status to add');
+  assert.match(missing?.instruction ?? '', /Administration/);
+  assert.match(
+    missing?.instruction ?? '',
+    /--status-map "<delivery state>=<Status Name>"/,
+    'and the mapping the adapter must be given afterwards',
+  );
+
+  // The status name is matched exactly the way the mapping resolves it: case-insensitively.
+  const caseInsensitive = await provider(sim, { statusMap: { ready: 'READY' } }).bootstrapStates(['ready']);
+  assert.equal(caseInsensitive.actions[0]?.outcome, 'exists', 'the same case-insensitive rule resolveStatusId uses');
+
+  // A dry run and a real run are the SAME read: neither writes, so both report the
+  // same facts and neither is `applied`. (No request appears below because
+  // `statuses()` resolves `/issue_statuses.json` once per provider — which is why
+  // the assertion is "no write was attempted", not "one read happened".)
+  sim.clearRequests();
+  const dry = await board.bootstrapStates(desired, { dryRun: true });
+  assert.deepEqual(dry, report, 'a read-only report cannot differ between a dry run and a real one');
+  assert.ok(sim.requests.every((req) => req.method === 'GET'), 'a dry run writes nothing');
+
+  // Idempotent by construction, and it never claims creation.
+  sim.clearRequests();
+  const again = await board.bootstrapStates(desired);
+  assert.deepEqual(again, report, 'the second call reports the same, unchanged facts');
+  assert.equal(again.applied, false, 'a second call changes nothing');
+  assert.ok(
+    !again.actions.some((action) => action.outcome === 'created' || action.outcome === 'would-create'),
+    'canBootstrapStates=false: nothing may ever be created or promised, not even on a dry run',
+  );
 });
 
 // --- listWork ---------------------------------------------------------------

@@ -3,6 +3,7 @@ import {
   boardErrorFromResponse,
   BoardError,
   assertTransition,
+  BOARD_WORK_ITEM_STATES,
   BoardStateError,
   createCurlRequestFn,
   parseBoardStateRecord,
@@ -11,6 +12,8 @@ import {
   unconfiguredRequestFn,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -109,6 +112,20 @@ interface JiraTransition {
   to?: { name?: string };
 }
 
+/**
+ * The subset of `GET /rest/api/3/project/<key>/statuses` this adapter reads.
+ *
+ * Jira answers with ONE BUCKET PER ISSUE TYPE, each holding that type's statuses —
+ * which is why a status name is never at the top level of this payload. An entry
+ * without a bucket is tolerated as a flat status list, because that is what some
+ * Jira status endpoints answer.
+ */
+interface JiraProjectStatus {
+  id?: string;
+  name?: string;
+  statuses?: Array<{ id?: string; name?: string }>;
+}
+
 interface JiraComment {
   id?: string;
   body?: unknown;
@@ -171,6 +188,10 @@ export class JiraBoardProvider implements TaskBoardProvider {
       // Jira transitions are not conditional on a value we control, so the claim
       // is read-then-write plus a re-read verification.
       atomicClaim: false,
+      // A Jira status belongs to a WORKFLOW, and creating one is administration
+      // (or a workflow-scheme edit), not an API call this adapter may make. So the
+      // honest answer is false, and `bootstrapStates()` only REPORTS.
+      canBootstrapStates: false,
       delivery: { canOpenPullRequest: false, canRunChecks: false, canMerge: false },
     };
   }
@@ -338,6 +359,96 @@ export class JiraBoardProvider implements TaskBoardProvider {
       body: { block: renderBoardStateRecord(record) },
     });
     if (res.status < 200 || res.status >= 300) throw boardErrorFromResponse(res, `writeState ${id}`, id);
+  }
+
+  /**
+   * Report which of the delivery states this Jira PROJECT can express.
+   *
+   * Jira keeps statuses in a WORKFLOW, and creating one is administration (or a
+   * workflow-scheme edit), not an API call this adapter may make — so
+   * `canBootstrapStates` is false and this is a READ-ONLY report, never a write.
+   * It answers the question the first minute of a deployment actually has: "which
+   * of the statuses this adapter's `statusMap` names does this project not have
+   * yet?". The status names are taken from the adapter's OWN `statusMap` (a second
+   * mapping would drift), and they are compared the way the rest of this adapter
+   * compares them — case-insensitively.
+   *
+   * Nothing here throws for a state the project is missing: `not-creatable` plus an
+   * instruction naming the exact status to add IS the answer, because the error
+   * this port exists to abolish was a runner dying with "no such status" while the
+   * operator had nothing to act on.
+   *
+   * A dry run is deliberately the SAME call: a report cannot change the project, so
+   * `applied` is false either way.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    _opts?: { dryRun?: boolean },
+  ): Promise<BoardBootstrapReport> {
+    const provider = this.metadata().id;
+    const unsupported = BOARD_WORK_ITEM_STATES.filter((state) => !this.capabilities().states.includes(state));
+    const projectKey = this.projectKey;
+
+    // With no project configured there is no status list to read and no workflow to
+    // name, so every state is a configuration gap the operator is told about
+    // instead of a thrown error (and no request is made at all).
+    if (projectKey === undefined) {
+      const actions: BoardBootstrapAction[] = desired.map((state) => ({
+        state,
+        name: this.statusMap[state],
+        outcome: 'not-creatable',
+        instruction:
+          `no Jira project is configured, so this adapter cannot tell which statuses are available: ` +
+          `pass projectKey (and, once status ${JSON.stringify(this.statusMap[state])} exists in the project's ` +
+          `workflow, the statusMap entry for state ${JSON.stringify(state)})`,
+      }));
+      return { provider, applied: false, actions, unsupported };
+    }
+
+    const available = await this.projectStatusNames(projectKey);
+    const actions: BoardBootstrapAction[] = desired.map((state) => {
+      const name = this.statusMap[state];
+      if (available.has(name.toLowerCase())) return { state, name, outcome: 'exists' };
+      return {
+        state,
+        name,
+        outcome: 'not-creatable',
+        instruction:
+          `Jira reports no status named ${JSON.stringify(name)} in project ${projectKey}, so state ` +
+          `${JSON.stringify(state)} cannot be represented: add that status to the project's workflow in Jira ` +
+          `administration (Project settings → Issues → Workflows, or the workflow scheme the project uses), then ` +
+          `this adapter's statusMap must name it — Jira statuses cannot be created through the REST API`,
+      };
+    });
+    return { provider, applied: false, actions, unsupported };
+  }
+
+  /**
+   * The STATUS NAMES a project offers, lowercased for the case-insensitive
+   * comparison this adapter already uses in `stateOf`/`applyStatus`.
+   *
+   * Jira answers `GET /rest/api/3/project/<key>/statuses` as one bucket per ISSUE
+   * TYPE, each holding that type's statuses; an entry carrying no bucket is taken as
+   * a status itself (see {@link JiraProjectStatus}).
+   */
+  private async projectStatusNames(projectKey: string): Promise<Set<string>> {
+    const payload = await requestBoardJson<JiraProjectStatus[]>(
+      this.request,
+      { method: 'GET', url: `${this.baseUrl}/rest/api/3/project/${encodeURIComponent(projectKey)}/statuses` },
+      `project statuses of ${projectKey}`,
+    );
+    const names = new Set<string>();
+    for (const entry of Array.isArray(payload) ? payload : []) {
+      const bucket = entry.statuses;
+      if (Array.isArray(bucket)) {
+        for (const status of bucket) {
+          if (typeof status?.name === 'string' && status.name.length > 0) names.add(status.name.toLowerCase());
+        }
+        continue;
+      }
+      if (typeof entry.name === 'string' && entry.name.length > 0) names.add(entry.name.toLowerCase());
+    }
+    return names;
   }
 
   /** Move the issue to the status that represents `to`, via a real transition. */
