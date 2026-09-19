@@ -345,11 +345,21 @@ test('listWork: a text scope reaches the request as GitLab `search`, and a term 
   ]);
   assert.deepEqual(scoped.map((item) => item.id), ['1']);
 
-  // (6) a BLANK term is absent, not a widened search: no `search=` is sent, so the
-  // request means exactly what an unscoped call means instead of looking filtered.
+  // (6) a BLANK term is REFUSED, not turned into an unscoped request. This test used to
+  // assert the opposite — "a blank term is absent, so no `search=` is sent" — which is the
+  // silent widening the core rule forbids: the caller asked to narrow and got the whole
+  // board back, with nothing to show the scope had been dropped. The request is what proves
+  // it: a refused scope never reaches the host at all.
   fake.clear();
-  await provider.listWork({ query: '   ' });
-  assert.deepEqual(fake.calls(), [`GET ${ISSUES}?state=opened&per_page=100`]);
+  await assert.rejects(
+    () => provider.listWork({ query: '   ' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'precondition');
+      return true;
+    },
+  );
+  assert.deepEqual(fake.calls(), [], 'a refused scope must not be sent');
 
   assert.equal(provider.capabilities().canTextSearch, true);
 });

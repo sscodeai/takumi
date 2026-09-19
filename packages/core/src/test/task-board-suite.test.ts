@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertBoardCapability,
+  assertScopeQuery,
   assertTransition,
   BOARD_WORK_ITEM_STATES,
   BoardError,
@@ -120,6 +121,7 @@ class ProbeProvider implements TaskBoardProvider {
   }
 
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
+    if (query.query !== undefined) assertScopeQuery(query.query);
     if (query.query !== undefined && !this.opts.breakTextSearch) {
       const needle = query.query.toLowerCase();
       return [...this.items.values()]

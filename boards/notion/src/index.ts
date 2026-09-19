@@ -1,5 +1,6 @@
 import {
   assertBoardCapability,
+  assertScopeQuery,
   boardErrorFromResponse,
   BoardError,
   assertTransition,
@@ -801,9 +802,11 @@ function buildColumnFilter(property: string, options: string[]): Record<string, 
  * substring-based, so the board, not this adapter, decides how it matches.
  */
 function textSearchTerm(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? undefined : trimmed;
+  // Core owns the rule (carry the scope faithfully or refuse it). This used to return
+  // `undefined` for a blank term — which sent no filter at all and returned the whole
+  // board, the exact silent widening the rule forbids, hidden behind a comment that
+  // claimed to be avoiding it.
+  return assertScopeQuery(value);
 }
 
 /**

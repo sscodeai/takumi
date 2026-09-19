@@ -484,14 +484,20 @@ test('listWork: a text scope is a TITLE filter — a term the page carries elsew
   });
   assert.deepEqual(both.map((i) => i.id), ['page-epic']);
 
-  // (4) a BLANK term sends NO text filter at all: `title.contains ''` would match every
-  // page — a scope that looks applied and is not, which is the silent widening this contract
-  // forbids. The request is byte-identical to an unscoped one.
-  await board.listWork({ query: '   ' });
-  assert.deepEqual(sim.requests[3]?.body, {
-    page_size: 100,
-    filter: { property: 'Status', select: { equals: 'ready' } },
-  });
+  // (4) a BLANK term is REFUSED. This test used to assert the opposite — "no text filter is
+  // sent, so the request is byte-identical to an unscoped one" — which is precisely the
+  // silent widening the core rule forbids: the caller asked to narrow and received the whole
+  // board, with the dropped scope invisible. Nothing may reach the host.
+  const before = sim.requests.length;
+  await assert.rejects(
+    () => board.listWork({ query: '   ' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'precondition');
+      return true;
+    },
+  );
+  assert.equal(sim.requests.length, before, 'a refused scope must not be sent');
   assert.equal(board.capabilities().canTextSearch, true);
 });
 

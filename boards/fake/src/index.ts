@@ -1,5 +1,6 @@
 import {
   assertBoardCapability,
+  assertScopeQuery,
   BOARD_WORK_ITEM_STATES,
   BoardError,
   renderCreateMarker,
@@ -170,14 +171,16 @@ export class FakeBoardProvider implements TaskBoardProvider {
   }
 
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
+    // The reference implementation follows the core rule the suite enforces: a scope that
+    // names nothing is refused, never treated as "no filter".
+    const term = assertScopeQuery(query.query);
     const limit = query.limit ?? Number.POSITIVE_INFINITY;
     return [...this.items.values()]
       .filter((e) => {
-        if (query.query === undefined) return true;
+        if (term === undefined) return true;
         // A substring search over the text a person would look at, case-insensitively:
         // the reference behaviour the real boards' own searches are measured against.
-        const needle = query.query.toLowerCase();
-        return `${e.item.title}\n${e.item.body}`.toLowerCase().includes(needle);
+        return `${e.item.title}\n${e.item.body}`.toLowerCase().includes(term.toLowerCase());
       })
       .filter((e) => (query.states === undefined ? true : query.states.includes(e.item.state)))
       .filter((e) =>

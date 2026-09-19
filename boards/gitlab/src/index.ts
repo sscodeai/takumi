@@ -56,6 +56,7 @@
 import {
   assertBoardHttpOk,
   assertBoardCapability,
+  assertScopeQuery,
   assertTransition,
   BoardError,
   BOARD_WORK_ITEM_STATES,
@@ -190,9 +191,11 @@ function markerFor(key: string): string {
  * is the silent widening this contract exists to forbid.
  */
 function textSearchTerm(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? undefined : trimmed;
+  // Core owns the rule (carry the scope faithfully or refuse it). This used to return
+  // `undefined` for a blank term — which sent no filter at all and returned the whole
+  // board, the exact silent widening the rule forbids, hidden behind a comment that
+  // claimed to be avoiding it.
+  return assertScopeQuery(value);
 }
 
 /** The subset of GitLab's issue JSON this adapter reads/writes. */

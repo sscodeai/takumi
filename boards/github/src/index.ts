@@ -1,5 +1,6 @@
 import {
   assertBoardCapability,
+  assertScopeQuery,
   BOARD_WORK_ITEM_STATES,
   boardErrorFromResponse,
   renderCreateMarker,
@@ -210,12 +211,16 @@ export class GitHubBoardProvider implements TaskBoardProvider {
    * search knows nothing about takumi's labels.
    */
   private async searchWork(query: BoardWorkQuery, term: string): Promise<BoardWorkItem[]> {
-    // A quote inside the term would close the phrase and change the query's meaning, so
-    // it is stripped rather than escaped: a search term is a human's words, and silently
-    // searching for something else is worse than searching for slightly less.
-    const safe = term.replaceAll('"', ' ').trim();
-    if (safe.length === 0) {
-      throw new BoardError('precondition', 'a text scope must contain at least one non-quote character');
+    // The term travels inside a quoted phrase, so a quote in it would close the phrase and
+    // change the query's meaning. Stripping it searched for something the operator did not
+    // write (a difference nobody sees until the wrong items run), so it is REFUSED with the
+    // fix in the message — the same choice every other adapter makes (ADR-012).
+    const safe = assertScopeQuery(term) ?? '';
+    if (safe.includes('"')) {
+      throw new BoardError(
+        'precondition',
+        'a GitHub text scope cannot contain a double quote (the term is sent as a quoted phrase): remove the quote or search for the words around it',
+      );
     }
     const states: BoardWorkItemState[] = query.states === undefined ? ['ready'] : [...query.states];
     const terms = `repo:${this.repo} is:issue "${safe}"`;

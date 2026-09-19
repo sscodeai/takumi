@@ -92,6 +92,32 @@ export interface BoardCapabilities {
 }
 
 /**
+ * Validate a text scope, and state the rule every adapter must follow.
+ *
+ * A scope is carried FAITHFULLY or REFUSED — never quietly turned into a different query:
+ *
+ * - **Empty or whitespace-only** names nothing. Sending no filter (or an empty one) returns
+ *   the whole board while LOOKING like a filter, which is the silent widening a scope exists
+ *   to prevent, so it is a `precondition` failure.
+ * - **A term the board's search syntax cannot carry** (a quote inside a phrase, say) must be
+ *   refused with the fix in the message. Silently stripping it searches for something the
+ *   operator did not write, and the difference is invisible until the wrong items run.
+ *
+ * Returns the term, so an adapter can use the validated value rather than re-trimming it.
+ */
+export function assertScopeQuery(query: string | undefined): string | undefined {
+  if (query === undefined) return undefined;
+  const trimmed = query.trim();
+  if (trimmed.length === 0) {
+    throw new BoardError(
+      'precondition',
+      'a text scope must name something: an empty scope would return the whole board while looking like a filter',
+    );
+  }
+  return trimmed;
+}
+
+/**
  * What is needed to file a new work item.
  *
  * `idempotencyKey` is not optional in spirit: no board here offers a native idempotency
@@ -580,6 +606,41 @@ export async function runTaskBoardProviderContractSuite(
     notRun += 1;
     notes.push('query: NOT_RUN (the board can search but cannot file a probe item for the suite to find)');
   }
+
+  // --- a scope that names nothing is a configuration error, not a licence to widen ---
+  // Adapters drifted on this: two treated a blank term as "no filter" (returning the whole
+  // board while looking scoped), one refused it, and one silently stripped a quote. The
+  // rule now lives in core and is asserted here, per adapter, in both shapes.
+  const blank = await provider
+    .listWork({ states: ['ready'], query: '   ' })
+    .then(() => null)
+    .catch((e: unknown) => e);
+  if (blank === null) {
+    throw new Error('a whitespace-only query must be refused: it names no scope, and dropping it widens the search');
+  }
+  if (!(blank instanceof BoardError) || blank.kind !== 'precondition') {
+    throw new Error(`a blank query must fail as precondition, got ${String(blank)}`);
+  }
+  if (caps.canTextSearch && caps.canCreateWork) {
+    // A term whose syntax the board may not be able to carry (a quote) must be REFUSED or
+    // carried faithfully — what it must never do is come back WIDENED, which is how a
+    // runner ends up on items the operator excluded.
+    const quoted = await provider
+      .listWork({ states: ['ready'], query: `"${scopeWord}"` })
+      .then((items) => items)
+      .catch((e: unknown) => e);
+    if (Array.isArray(quoted)) {
+      const strays = quoted.filter((item) => !`${item.title}\n${item.body}`.toLowerCase().includes(scopeWord.toLowerCase()));
+      if (strays.length > 0) {
+        throw new Error(
+          `a quoted term returned ${strays.length} item(s) that do not carry the word at all — the term was not carried faithfully and not refused either`,
+        );
+      }
+    } else if (!(quoted instanceof BoardError) || quoted.kind !== 'precondition') {
+      throw new Error(`a term the board cannot carry must be refused as precondition, got ${String(quoted)}`);
+    }
+  }
+  notes.push('scopeValidation: PASS (blank refused; a quoted term is carried or refused, never widened)');
 
   // --- state bootstrap: can this board even express the six states? ---
   // This is the first minute of a real deployment: a board that cannot express a
