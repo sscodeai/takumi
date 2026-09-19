@@ -123,6 +123,16 @@ export { createGitRunner, unconfiguredGitRunner, gitFailure } from './git-runner
 export type { GitRunner, GitResult, GitRunnerOptions } from './git-runner.js';
 export { renderRunMarker, parseRunMarkers, hasRunMarker } from './run-marker.js';
 
+// Pilot metrics: counters a scheduler's monitoring can scrape.
+export {
+  bumpMetrics,
+  emptyMetrics,
+  readMetricsFile,
+  renderPrometheus,
+  writeMetricsFile,
+} from './metrics.js';
+export type { PilotMetrics, PilotOutcomeCounters } from './metrics.js';
+
 // The pilot: one tick of an unattended runner, and the worktrees it uses.
 export { runPilotTick, pilotRunId } from './pilot.js';
 export type { PilotPolicy, PilotTickDeps, PilotTickOutcome, PilotTickResult } from './pilot.js';

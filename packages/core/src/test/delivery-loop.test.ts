@@ -678,3 +678,30 @@ test('runDeliveryLoop: a transport failure BEFORE the claim leaves the item unto
   assert.equal((await h.board.getWork('ITEM-7')).state, 'ready', 'nothing was owned, so nothing may be marked');
 });
 
+test('runDeliveryLoop: the progress record is throttled while the loop waits', async () => {
+  const h = harness();
+  let polls = 0;
+  h.delivery.checks = async () => {
+    polls += 1;
+    return polls <= 4 ? [{ name: 'build', conclusion: 'pending' as const }] : [{ name: 'build', conclusion: 'success' as const }];
+  };
+
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan: { ...plan, checksWaitSeconds: 300, checksPollSeconds: 15, progressIntervalSeconds: 600 },
+    now: () => Date.parse('2026-09-15T02:00:00.000Z'), // frozen: every write is "recent"
+    sleep: async () => {},
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'merged');
+  const writes = h.board.seen.filter((s) => s.startsWith('record:'));
+  assert.equal(polls, 5, 'one read that found pending, then four polls until it settled');
+  assert.equal(
+    writes.length,
+    2,
+    `six checks() calls must not mean six board writes (saw ${writes.length}: ${writes.join(', ')})`,
+  );
+  assert.match(result.steps.map((s) => s.detail).join('\n'), /throttled \(unchanged/);
+});

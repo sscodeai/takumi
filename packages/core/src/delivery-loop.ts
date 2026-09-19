@@ -57,6 +57,12 @@ export interface DeliveryLoopPlan {
   /** Poll interval while waiting for checks. Default 15. */
   checksPollSeconds?: number;
   /**
+   * Rewrite the board's progress record at most this often when nothing material
+   * changed, in seconds. Default 30. Every write is an API call against a host that
+   * rate-limits, and a record that says the same thing twice is pure cost.
+   */
+  progressIntervalSeconds?: number;
+  /**
    * Serialise this delivery against other runners (ADR-008).
    *
    * Every board here declares `atomicClaim: false`, so two runners sharing one
@@ -204,7 +210,21 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     record('transition', `${plan.itemId} → ${to} (${note})`);
   };
 
+  let lastProgressAt = 0;
+  let lastProgressSignature = '';
   const writeRecord = async (reviewRound: number): Promise<void> => {
+    const signature = `${plan.runId}|${reviewRound}|${pr === undefined ? '-' : pr.number}`;
+    const nowMs = clock();
+    const interval = (plan.progressIntervalSeconds ?? 30) * 1000;
+    if (signature === lastProgressSignature && nowMs - lastProgressAt < interval) {
+      // Nothing material changed and we wrote recently: the host does not need to hear
+      // it twice. The FIRST write of a signature is never skipped, so the record on
+      // the board always reflects the latest round.
+      record('progress', `throttled (unchanged, ${Math.round((nowMs - lastProgressAt) / 1000)}s since the last write)`);
+      return;
+    }
+    lastProgressAt = nowMs;
+    lastProgressSignature = signature;
     const record_: BoardStateRecord = {
       schema: 1,
       runId: plan.runId,
@@ -227,11 +247,16 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
    */
   const waitForChecks = async (
     prRef: PullRequestRef,
+    roundRef: number,
   ): Promise<{ waitedSeconds: number; checks: CheckSummary[] } | null> => {
     for (let waited = 0; waited + pollSeconds <= waitSeconds; waited += pollSeconds) {
       await sleep(pollSeconds);
       const now = await delivery.checks(prRef);
       const stillPending = now.filter((c) => c.conclusion === 'pending');
+      // A human watching the board should see that we are still here. The throttle in
+      // `writeRecord` is what keeps that from being one API call per poll — this is the
+      // churn the throttle exists for, so the two are tested together.
+      await writeRecord(roundRef);
       // The settled list is RETURNED, not re-read: the caller already has the answer,
       // and a second read would be one more API call for information we hold.
       if (stillPending.length === 0) {
@@ -374,7 +399,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         // returning here used to leave the item owned by a run that never came back,
         // because the runner only ever selects `ready` items (the comment that used to
         // sit here claimed "another tick will read it again"; no tick ever did).
-        const waited = await waitForChecks(pr);
+        const waited = await waitForChecks(pr, round);
         if (waited === null) {
           const detail = `check(s) still pending after ${waitSeconds}s: ${pending.map((c) => c.name).join(', ')}`;
           await transition('blocked', detail);
