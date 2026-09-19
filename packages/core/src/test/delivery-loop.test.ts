@@ -282,20 +282,23 @@ test('runDeliveryLoop: a dirty worktree from the agent blocks the delivery (the 
   assert.equal((await board.getWork('ITEM-7')).state, 'blocked');
 });
 
-test('runDeliveryLoop: a pending check is retriable, not a failure and not a merge', async () => {
+test('runDeliveryLoop: a pending check is waited for, and its budget is what ends the run', async () => {
   const { board, delivery } = harness();
   delivery.checkRuns = [{ name: 'e2e', conclusion: 'pending' }];
   const result = await runDeliveryLoop({
     board,
     delivery,
-    plan,
+    plan: { ...plan, checksWaitSeconds: 30, checksPollSeconds: 15 },
+    sleep: async () => {}, // the wait is poll-counted, so a test never waits in real time
     hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
   });
 
-  assert.equal(result.outcome, 'retriable');
-  assert.match(result.error ?? '', /still pending/);
+  assert.equal(result.outcome, 'blocked');
+  assert.match(result.error ?? '', /still pending after 30s/);
   assert.equal(delivery.merged, false);
-  assert.equal((await board.getWork('ITEM-7')).state, 'pr_open', 'the item stays in review for the next tick');
+  // NOT 'pr_open' any more: nothing ever selects an item in review again, so leaving it
+  // there was a silent stall. Blocking is visible and the comment says how to resume.
+  assert.equal((await board.getWork('ITEM-7')).state, 'blocked');
 });
 
 test('runDeliveryLoop: a failed check is fixable work, and only an exhausted budget blocks', async () => {
@@ -368,7 +371,12 @@ test('runDeliveryLoop: review rounds are bounded and exhaustion blocks', async (
   assert.equal((await board.getWork('ITEM-7')).state, 'blocked');
 });
 
-test('runDeliveryLoop: a transport failure is retriable, and the item is NOT blocked', async () => {
+test('runDeliveryLoop: a retriable failure still refuses to strand the item (this used to be the opposite)', async () => {
+  // The previous version of this test asserted that a retriable failure leaves the item
+  // CLAIMED and nothing else — "the next tick will pick it up". That was the defect: the
+  // runner only ever selects `ready` items, so a held claim is not waiting, it is
+  // invisible. The outcome stays `retriable` (the tick itself should be retried) while the
+  // ITEM is handed to a human, which is the only state automation can come back from.
   const { board, delivery } = harness();
   delivery.failNextDeliver = new ProviderError('transport', 'the connection was reset');
   const result = await runDeliveryLoop({
@@ -380,7 +388,12 @@ test('runDeliveryLoop: a transport failure is retriable, and the item is NOT blo
 
   assert.equal(result.outcome, 'retriable');
   assert.match(result.error ?? '', /connection was reset/);
-  assert.deepEqual(board.seen.filter((s) => !s.startsWith('record')), ['claimed'], 'a retriable failure does not block');
+  assert.deepEqual(
+    board.seen.filter((s) => !s.startsWith('record')),
+    ['claimed', 'blocked'],
+    'the item is claimed and then blocked with the instruction that resumes it',
+  );
+  assert.equal((await board.getWork('ITEM-7')).state, 'blocked');
 });
 
 test('runDeliveryLoop: an item another run owns is not claimed and not touched', async () => {
@@ -575,3 +588,93 @@ test('runDeliveryLoop: an unregistered event kind fails loudly (the registry is 
     /unregistered event kind/,
   );
 });
+
+// --- the two defects this slice fixes (see docs/bugs-fixed.md #8 and #9) -----
+
+test('runDeliveryLoop: pending checks are waited for INSIDE the tick, not abandoned', async () => {
+  const h = harness();
+  const log = createEventLog();
+  let polls = 0;
+  const original = h.delivery.checks.bind(h.delivery);
+  h.delivery.checks = async () => {
+    polls += 1;
+    // Pending twice, then green: the ordinary case of a CI that is simply slow.
+    return polls <= 2 ? [{ name: 'build', conclusion: 'pending' as const }] : [{ name: 'build', conclusion: 'success' as const }];
+  };
+
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan: { ...plan, checksWaitSeconds: 60, checksPollSeconds: 15 },
+    events: log,
+    sleep: async () => {},
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'merged', result.error);
+  assert.equal(polls, 3, 'one read that found pending, then two polls until it settled — the settled list is reused');
+  const waited = log.of('checks.waited');
+  assert.deepEqual(waited.map((e) => e.message), [
+    'still pending after 15s: build',
+    'checks settled after 30s: build=success',
+  ]);
+  // The item ENDED somewhere a human can see it, which is the whole point.
+  assert.equal((await h.board.getWork('ITEM-7')).state, 'merged');
+  void original;
+});
+
+test('runDeliveryLoop: checks that never settle block the item instead of parking it', async () => {
+  const h = harness();
+  h.delivery.checks = async () => [{ name: 'build', conclusion: 'pending' as const }];
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan: { ...plan, checksWaitSeconds: 45, checksPollSeconds: 15 },
+    sleep: async () => {},
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'blocked', 'a run that cannot finish must not leave the item owned');
+  assert.match(result.error ?? '', /still pending after 45s/);
+  assert.match(result.error ?? '', /checksWaitSeconds/);
+  assert.equal((await h.board.getWork('ITEM-7')).state, 'blocked');
+});
+
+test('runDeliveryLoop: a retriable failure after the claim blocks the item (it would be invisible otherwise)', async () => {
+  const h = harness();
+  h.delivery.checks = async () => {
+    throw new ProviderError('transport', 'the host closed the connection');
+  };
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'retriable', 'the tick should be retried: the failure itself was transient');
+  assert.equal(
+    (await h.board.getWork('ITEM-7')).state,
+    'blocked',
+    'but the item must NOT stay claimed, because no runner ever selects a claimed item again',
+  );
+  assert.match(h.board.comments.join(' ') + h.board.seen.join(' '), /blocked/);
+});
+
+test('runDeliveryLoop: a transport failure BEFORE the claim leaves the item untouched', async () => {
+  const h = harness();
+  const result = await runDeliveryLoop({
+    board: {
+      ...h.board,
+      claim: async () => {
+        throw new ProviderError('transport', 'the board is unreachable');
+      },
+    } as unknown as TaskBoardProvider,
+    delivery: h.delivery,
+    plan,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+  assert.equal(result.outcome, 'retriable');
+  assert.equal((await h.board.getWork('ITEM-7')).state, 'ready', 'nothing was owned, so nothing may be marked');
+});
+

@@ -22,7 +22,7 @@
  */
 
 import type { BoardWorkItemState } from './board-state.js';
-import { DeliveryError, type DeliveryProvider, type PullRequestRef } from './delivery.js';
+import { DeliveryError, type CheckSummary, type DeliveryProvider, type PullRequestRef } from './delivery.js';
 import { createEventLog, nullEventLog, type EventLog } from './events.js';
 import { ProviderError } from './provider-error.js';
 import { acquireSlot, type SlotHandle } from './slot-lock.js';
@@ -44,6 +44,18 @@ export interface DeliveryLoopPlan {
   body?: string;
   /** Bounded review/fix rounds. Default 3. */
   maxReviewRounds?: number;
+  /**
+   * How long to WAIT for the host's checks before giving up on them, in seconds.
+   * Default 300.
+   *
+   * Checks are the slowest part of a delivery and the most common reason a run ends
+   * "fine but not finished". Returning immediately left the item owned by a run that
+   * would never come back; waiting inside the tick is what makes the common case
+   * finish in one pass.
+   */
+  checksWaitSeconds?: number;
+  /** Poll interval while waiting for checks. Default 15. */
+  checksPollSeconds?: number;
   /**
    * Serialise this delivery against other runners (ADR-008).
    *
@@ -98,6 +110,8 @@ export type DeliveryLoopOutcome = 'merged' | 'blocked' | 'retriable' | 'not_clai
 
 export interface DeliveryLoopResult {
   outcome: DeliveryLoopOutcome;
+  /** Seconds spent waiting for the host's checks, when the run had to wait at all. */
+  checksWaitedSeconds?: number;
   itemId: string;
   pr?: PullRequestRef;
   /** Rounds actually used. */
@@ -113,6 +127,8 @@ export interface DeliveryLoopDeps {
   hooks: DeliveryLoopHooks;
   /** Injectable clock so the recorded timeline is deterministic in tests. */
   now?: () => number;
+  /** Injectable sleep, so a test that waits for checks does not wait in real time. */
+  sleep?: (seconds: number) => Promise<void>;
   /**
    * Where the run's events go (ADR-008). Omitting it keeps nothing, so wiring the
    * loop up never forces an audit trail on a caller that does not want one.
@@ -137,6 +153,10 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     steps.push({ step, detail, at: new Date(clock()).toISOString() });
   };
   const maxRounds = plan.maxReviewRounds ?? 3;
+  const waitSeconds = plan.checksWaitSeconds ?? 300;
+  let checksWaited = 0;
+  const pollSeconds = plan.checksPollSeconds ?? 15;
+  const sleep = deps.sleep ?? ((seconds: number) => new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000)));
   let rounds = 0;
   let pr: PullRequestRef | undefined;
 
@@ -197,6 +217,45 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     await board.writeState(plan.itemId, record_);
   };
 
+  /**
+   * Wait for the host's checks to settle, INSIDE the tick.
+   *
+   * Returns the seconds waited when no check is pending any more, or `null` when the
+   * budget ran out. The loop is deliberately deterministic about time — elapsed is
+   * counted in polls, not read from a clock — so a test drives it with an instant
+   * sleep and gets the same answer the real thing would after `polls * pollSeconds`.
+   */
+  const waitForChecks = async (
+    prRef: PullRequestRef,
+  ): Promise<{ waitedSeconds: number; checks: CheckSummary[] } | null> => {
+    for (let waited = 0; waited + pollSeconds <= waitSeconds; waited += pollSeconds) {
+      await sleep(pollSeconds);
+      const now = await delivery.checks(prRef);
+      const stillPending = now.filter((c) => c.conclusion === 'pending');
+      // The settled list is RETURNED, not re-read: the caller already has the answer,
+      // and a second read would be one more API call for information we hold.
+      if (stillPending.length === 0) {
+        checksWaited += waited + pollSeconds;
+        return { waitedSeconds: waited + pollSeconds, checks: now };
+      }
+      // Only the WAITING is reported here; the settlement is reported by the caller,
+      // which is the one that knows which checks settled. Two emits for one fact is the
+      // duplication the ledger already names.
+      events.emit({
+        kind: 'checks.waited',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        pr: prRef.number,
+        message: `still pending after ${waited + pollSeconds}s: ${stillPending.map((c) => c.name).join(', ')}`,
+        fields: { seconds: waited + pollSeconds, pending: stillPending.length },
+      });
+    }
+    return null;
+  };
+
+  // Ownership matters in the failure path: an item WE claimed must never be left in a
+  // state automation cannot pick up again (the pilot only ever selects `ready`).
+  let owned = false;
   const run = async (): Promise<DeliveryLoopResult> => {
   try {
     // --- 1. claim -------------------------------------------------------------
@@ -207,6 +266,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       record('claim', `refused: ${reason}`);
       return { outcome: 'not_claimed', itemId: plan.itemId, rounds: 0, steps };
     }
+    owned = true;
     events.emit({ kind: 'claim.acquired', runId: plan.runId, itemId: plan.itemId, message: `${plan.itemId} claimed` });
     record('claim', `${plan.itemId} claimed by run ${plan.runId}`);
     await writeRecord(0);
@@ -310,15 +370,45 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         continue;
       }
       if (pending.length > 0) {
-        // Not a failure: the host has not finished. Another tick will read it again.
-        return {
-          outcome: 'retriable',
+        // Not a failure: the host has not finished. Wait for it INSIDE this tick —
+        // returning here used to leave the item owned by a run that never came back,
+        // because the runner only ever selects `ready` items (the comment that used to
+        // sit here claimed "another tick will read it again"; no tick ever did).
+        const waited = await waitForChecks(pr);
+        if (waited === null) {
+          const detail = `check(s) still pending after ${waitSeconds}s: ${pending.map((c) => c.name).join(', ')}`;
+          await transition('blocked', detail);
+          return {
+            outcome: 'blocked',
+            itemId: plan.itemId,
+            pr,
+            rounds,
+            steps,
+            error: `${detail} — raise checksWaitSeconds or look at the pipeline`,
+          };
+        }
+        // The waiting check finished: either it passed (the review path continues with
+        // a re-read below) or it failed, and the failure branch is the same test.
+        events.emit({
+          kind: 'checks.waited',
+          runId: plan.runId,
           itemId: plan.itemId,
-          pr,
-          rounds,
-          steps,
-          error: `check(s) still pending: ${pending.map((c) => c.name).join(', ')}`,
-        };
+          pr: pr.number,
+          message: `checks settled after ${waited.waitedSeconds}s: ${waited.checks.map((c) => `${c.name}=${c.conclusion}`).join(' ')}`,
+          fields: { seconds: waited.waitedSeconds },
+        });
+        record('checks', `waited ${waited.waitedSeconds}s for the host to settle the checks`);
+        const nowFailed = waited.checks.filter((c) => c.conclusion === 'failure');
+        if (nowFailed.length > 0) {
+          const detail = `check(s) failed: ${nowFailed.map((c) => c.name).join(', ')}`;
+          await writeRecord(round);
+          if (round + 1 >= maxRounds) {
+            await transition('blocked', `${detail} and no fix round left`);
+            return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: `${detail} and no fix round left` };
+          }
+          await transition('fix_needed', detail);
+          continue;
+        }
       }
 
       // --- review: the only verdict that unlocks the merge ----------------------
@@ -427,10 +517,18 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       fields: { kind, retriable },
     });
     record('failed', `${kind}: ${message}`);
-    if (!retriable) {
+    // AN ITEM WE OWN IS NEVER LEFT WHERE AUTOMATION CANNOT FIND IT AGAIN. The runner
+    // only ever selects `ready` items, so a claim held by a run that has stopped is
+    // invisible — not "waiting", not "retrying": invisible. A retriable failure we
+    // cannot finish therefore blocks the item with the one instruction that resumes it.
+    const resumeNote = `${kind}: ${message}`;
+    if (!retriable || owned) {
       // Best effort: record the block even when the board itself was the failure.
       try {
-        await transition('blocked', `${kind}: ${message}`);
+        await transition(
+          'blocked',
+          retriable ? `${resumeNote} (retriable, but no runner can resume a held claim — move back to ready)` : resumeNote,
+        );
       } catch {
         // The board is unreachable; the caller still sees the classification.
       }
@@ -447,7 +545,10 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
   };
 
   try {
-    return await run();
+    const outcome = await run();
+    // Reported as a FIELD, not parsed out of a step's text: a counter that depends on a
+    // human-readable string breaking is a counter that silently goes to zero.
+    return checksWaited === 0 ? outcome : { ...outcome, checksWaitedSeconds: checksWaited };
   } finally {
     // Released whatever happened: a crashed or failed delivery must not wedge the
     // slot until the stale window expires.

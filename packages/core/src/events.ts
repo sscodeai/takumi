@@ -49,6 +49,7 @@ export const EVENT_KINDS = [
   'deliver.refused',
   // Checks and review
   'checks.read',
+  'checks.waited',
   'check.failed',
   'review.clean',
   'review.findings',
@@ -67,6 +68,8 @@ export const EVENT_KINDS = [
   'pilot.idle',
   'pilot.item_selected',
   'pilot.item_skipped',
+  'pilot.in_flight',
+  'pilot.stale_claim_blocked',
   'pilot.tick_done',
   // Worktrees
   'worktree.created',

@@ -47,6 +47,20 @@ export interface PilotPolicy {
   /** Extra agent attempts after a TRANSPORT failure (default 2). */
   agentRetries?: number;
   agentRetryDelaySeconds?: number;
+  /**
+   * Hand items left behind by a run that stopped back to a human, instead of leaving
+   * them claimed and invisible forever (ADR-009's known limit).
+   *
+   * OFF by default: acting on an item another run wrote is exactly the kind of thing
+   * that must be opted into. When it is on, the evidence is the SLOT — the sweep only
+   * touches an item whose slot it could take, which proves no live runner holds it —
+   * and the action is `blocked`, never a silent takeover of the claim.
+   */
+  blockStaleClaims?: boolean;
+  /** How stale a claim must be before the sweep touches it, in seconds. Default 900. */
+  staleClaimSeconds?: number;
+  /** The slot directory the sweep uses for its proof. Defaults to the tick's slotDir. */
+  sweepSlotDir?: string;
 }
 
 export interface PilotTickDeps {
@@ -104,6 +118,10 @@ export interface PilotTickResult {
   pr?: PullRequestRef;
   /** The full step timeline of the delivery, when one ran. */
   steps?: LoopStep[];
+  /** How many agent attempts were retried (a health signal, reported not guessed). */
+  agentRetries?: number;
+  /** Seconds the delivery spent waiting for checks, when it waited at all. */
+  checksWaitedSeconds?: number;
 }
 
 /**
@@ -119,6 +137,68 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
   const policy = deps.policy;
   if (policy.reviewMode === 'label' && (policy.approvalLabel ?? '').length === 0) {
     throw new ProviderError('precondition', "reviewMode 'label' needs an approvalLabel to look for");
+  }
+
+  // --- 0. the sweep: what a stopped run left behind ---------------------------
+  //
+  // A claim held by a run that no longer exists is not "waiting" — the tick only ever
+  // selects `ready` items, so it is INVISIBLE. This reports every in-flight item and,
+  // when the operator has opted in, hands a stale claim back to a human. The proof that
+  // nobody is working on it is the slot: if we can take it, no live runner holds it.
+  const inFlight = await deps.board.listWork({ states: ['claimed', 'pr_open'] });
+  for (const parked of inFlight) {
+    const record = await deps.board.readState(parked.id);
+    const ageSeconds = record === null ? null : Math.max(0, Math.round((now() - Date.parse(record.updatedAt)) / 1000));
+    const ageText = ageSeconds === null ? 'age unknown' : `${ageSeconds}s`;
+    events.emit({
+      kind: 'pilot.in_flight',
+      runId: 'pilot000',
+      itemId: parked.id,
+      message: `${parked.state} for ${ageText}${record === null ? '' : ` (run ${record.runId})`}`,
+      fields: { state: parked.state, ...(ageSeconds === null ? {} : { ageSeconds }) },
+    });
+    if (parked.state !== 'claimed') continue; // an open PR is a human's call, not ours
+    if (policy.blockStaleClaims !== true) continue;
+    const threshold = policy.staleClaimSeconds ?? 900;
+    if (ageSeconds === null || ageSeconds < threshold) continue;
+
+    const sweep = acquireSlot({
+      dir: policy.sweepSlotDir ?? deps.slotDir,
+      key: parked.id,
+      owner: { runId: 'sweep001', itemId: parked.id },
+      ...(deps.staleAfterSeconds === undefined ? {} : { staleAfterSeconds: deps.staleAfterSeconds }),
+    });
+    if (!sweep.acquired || sweep.handle === undefined) {
+      events.emit({
+        kind: 'pilot.item_skipped',
+        runId: 'sweep001',
+        itemId: parked.id,
+        message: `stale claim, but the slot is held: ${sweep.reason ?? 'unknown'}`,
+      });
+      continue;
+    }
+    try {
+      await deps.board.transition(parked.id, 'blocked', {
+        runId: record?.runId ?? 'unknown',
+        note: `stale claim from run ${record?.runId ?? 'unknown'} (${ageText}) — automation cannot resume a held claim, so this is for a human`,
+      });
+      events.emit({
+        kind: 'pilot.stale_claim_blocked',
+        runId: 'sweep001',
+        itemId: parked.id,
+        message: `blocked a stale claim held by run ${record?.runId ?? 'unknown'} for ${ageText}`,
+      });
+    } catch (e) {
+      // A board that will not move the item is not a reason to abandon the tick.
+      events.emit({
+        kind: 'pilot.item_skipped',
+        runId: 'sweep001',
+        itemId: parked.id,
+        message: `could not block the stale claim: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    } finally {
+      sweep.handle.release();
+    }
   }
 
   // --- 1. what is ready? ------------------------------------------------------
@@ -179,6 +259,7 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
     });
 
     // --- 4. the agent, with retries on transport failures only -----------------
+    let agentRetries = 0;
     const retries = policy.agentRetries ?? 2;
     const delay = policy.agentRetryDelaySeconds ?? 30;
     // The retry wrapper emits ONLY what it owns — the retry. The loop already
@@ -193,6 +274,7 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
           return;
         } catch (e) {
           attempt += 1;
+          agentRetries += 1;
           const retriable = e instanceof ProviderError && e.retriable;
           if (!retriable || attempt > retries) throw e;
           events.emit({
@@ -262,6 +344,8 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
       runId,
       ...(pr === undefined ? {} : { pr }),
       steps: loop.steps,
+      ...(agentRetries === 0 ? {} : { agentRetries }),
+      ...(loop.checksWaitedSeconds === undefined ? {} : { checksWaitedSeconds: loop.checksWaitedSeconds }),
     };
   } catch (e) {
     // Anything that escaped before the loop owned the item: a fetch failure, an

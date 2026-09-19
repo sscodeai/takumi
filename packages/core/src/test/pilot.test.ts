@@ -46,6 +46,7 @@ class PilotBoard implements TaskBoardProvider {
   readonly items = new Map<string, { state: BoardWorkItemState; labels: string[]; claim?: string }>();
   readonly transitions: string[] = [];
   readonly comments: string[] = [];
+  readonly records = new Map<string, BoardStateRecord>();
 
   constructor(seed: Array<{ id: string; state?: BoardWorkItemState; labels?: string[] }>) {
     for (const entry of seed) {
@@ -82,6 +83,11 @@ class PilotBoard implements TaskBoardProvider {
       updatedAt: '2026-09-15T00:00:00.000Z',
     };
   }
+  /** Seed the state record a previous run left on an item. */
+  seedRecord(id: string, runId: string, updatedAt: string, reviewRound = 0): void {
+    this.records.set(id, { schema: 1, runId, item: id, reviewRound, updatedAt, baseBranch: 'main' });
+  }
+
   async listWork(query: { states?: readonly BoardWorkItemState[] } = {}): Promise<BoardWorkItem[]> {
     const wanted = query.states ?? (['ready'] as readonly BoardWorkItemState[]);
     return [...this.items.keys()]
@@ -112,12 +118,10 @@ class PilotBoard implements TaskBoardProvider {
   }
   async updateComment(): Promise<void> {}
   async readState(id: string): Promise<BoardStateRecord | null> {
-    void id;
-    return null;
+    return this.records.get(id) ?? null;
   }
   async writeState(id: string, record: BoardStateRecord): Promise<void> {
-    void id;
-    void record;
+    this.records.set(id, record);
   }
   async bootstrapStates(desired: readonly BoardWorkItemState[]): Promise<BoardBootstrapReport> {
     return {
@@ -415,5 +419,83 @@ test('pilotRunId: eight lowercase hex, which is the grammar every reader expects
   const { pilotRunId } = await import('../index.js');
   for (const seed of [0, 1, Date.now(), 1757900000000, 999999999999]) {
     assert.match(pilotRunId(seed), /^[0-9a-f]{8}$/, `seed ${seed}`);
+  }
+});
+
+// --- the sweep: what a stopped run left behind (ADR-009's known limit) -------
+
+test('runPilotTick: a stale claim is handed to a human, and the tick still works', async () => {
+  const h = harness([{ id: 'ITEM-1' }, { id: 'ITEM-9', state: 'claimed' }]);
+  try {
+    h.board.seedRecord('ITEM-9', 'deadbeef', '2026-09-15T00:00:00.000Z');
+    const log = createEventLog();
+    const at = Date.parse('2026-09-15T00:30:00.000Z'); // half an hour later
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      now: () => at,
+      policy: { reviewMode: 'checks-only', blockStaleClaims: true, staleClaimSeconds: 900 },
+    });
+
+    // The sweep reports it, blocks it, and does NOT cost the tick its real work.
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(result.itemId, 'ITEM-1');
+    assert.equal((await h.board.getWork('ITEM-9')).state, 'blocked');
+    assert.equal(log.of('pilot.in_flight').length, 1);
+    assert.match(log.of('pilot.in_flight')[0]?.message ?? '', /claimed for 1800s \(run deadbeef\)/);
+    assert.equal(log.of('pilot.stale_claim_blocked').length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: a fresh claim is reported but never touched', async () => {
+  const h = harness([{ id: 'ITEM-9', state: 'claimed' }]);
+  try {
+    h.board.seedRecord('ITEM-9', 'runnning', '2026-09-15T00:29:00.000Z');
+    const log = createEventLog();
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      now: () => Date.parse('2026-09-15T00:30:00.000Z'),
+      policy: { reviewMode: 'checks-only', blockStaleClaims: true, staleClaimSeconds: 900 },
+    });
+    assert.equal(result.outcome, 'idle', 'nothing is ready, and the in-flight item stays in flight');
+    assert.equal((await h.board.getWork('ITEM-9')).state, 'claimed');
+    assert.equal(log.of('pilot.in_flight').length, 1);
+    assert.equal(log.of('pilot.stale_claim_blocked').length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: a stale claim is left alone unless the operator opts in', async () => {
+  const h = harness([{ id: 'ITEM-9', state: 'claimed' }]);
+  try {
+    h.board.seedRecord('ITEM-9', 'deadbeef', '2026-09-01T00:00:00.000Z');
+    const log = createEventLog();
+    await runPilotTick({ ...h.deps, events: log, policy: { reviewMode: 'checks-only' } });
+    assert.equal((await h.board.getWork('ITEM-9')).state, 'claimed');
+    assert.equal(log.of('pilot.in_flight').length, 1, 'still visible in the trail');
+    assert.equal(log.of('pilot.stale_claim_blocked').length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: an open pull request is never swept — that is a human decision', async () => {
+  const h = harness([{ id: 'ITEM-8', state: 'pr_open' }]);
+  try {
+    h.board.seedRecord('ITEM-8', 'deadbeef', '2026-08-01T00:00:00.000Z');
+    const log = createEventLog();
+    await runPilotTick({
+      ...h.deps,
+      events: log,
+      policy: { reviewMode: 'checks-only', blockStaleClaims: true, staleClaimSeconds: 60 },
+    });
+    assert.equal((await h.board.getWork('ITEM-8')).state, 'pr_open');
+    assert.equal(log.of('pilot.stale_claim_blocked').length, 0);
+  } finally {
+    h.cleanup();
   }
 });
