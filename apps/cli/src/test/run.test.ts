@@ -82,11 +82,12 @@ test('runOnce: a real worktree, a real agent process, and a merged item', async 
       policy: { reviewMode: 'checks-only', retainWorktreesHours: 0 },
     };
 
+    const metricsFile = join(repo.root, 'metrics.json');
     const lines: string[] = [];
     const { tick, exitCode } = await runOnce({
       board,
       delivery,
-      pilot,
+      pilot: { ...pilot, metricsFile },
       out: (line) => lines.push(line),
     });
 
@@ -107,6 +108,12 @@ test('runOnce: a real worktree, a real agent process, and a merged item', async 
     assert.equal(branch, `takumi/ITEM-1-${tick.runId}`);
     const log = git(['log', '--oneline'], worktreePath);
     assert.match(log, /feat: agent work/);
+
+    // The counters a scheduler's monitoring scrapes, written by the tick itself.
+    const metrics = JSON.parse(readFileSync(metricsFile, 'utf8')) as { ticks: number; lastOutcome: string };
+    assert.equal(metrics.ticks, 1);
+    assert.equal(metrics.lastOutcome, 'delivered');
+    assert.match(readFileSync(`${metricsFile}.prom`, 'utf8'), /takumi_pilot_outcome_delivered_total 1/);
 
     // The report is human-readable and names what happened.
     const report = lines.join('\n');

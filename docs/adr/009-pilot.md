@@ -141,12 +141,13 @@ Two levels, because they catch different things:
 
 - takumi can now run unattended: every precondition ADR-008 named is enforced, and a
   tick that overlaps another is safe rather than corrupting.
-- Known limit, stated rather than hidden: a retriable failure that happens AFTER the
-  claim (the agent produced nothing) leaves the item claimed by a run that will not
-  continue. There is no automatic takeover yet — a stale-claim takeover policy needs a
-  deliberate port extension, and inventing one under time pressure is how a
-  "sometimes steals someone else's item" bug ships. The tick reports `retriable` and
-  names the item, so it is visible.
+- The limit this ADR originally recorded — a retriable failure after the claim left the
+  item owned by a run that would not continue — is FIXED (see `docs/bugs-fixed.md` #8/#9):
+  checks are waited for inside the tick, anything we own is blocked rather than parked,
+  and every tick sweeps the in-flight items. With `blockStaleClaims` opted in, a claim
+  older than `staleClaimSeconds` is handed back to a human, on the evidence of the slot
+  it had to take and with `blocked` as the action — never a silent takeover. An open PR
+  is never swept: that is a human's decision.
 - Still open (P2): health/metrics export, progress-comment throttling, turning a
   pre-existing CI failure into a filed issue, and epic/milestone scoping (which needs
   a text-search capability on the board port before it can be uniform).

@@ -22,6 +22,9 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 | 6 | Every event was stored TWICE in the trail (the first test that read the trail back saw two copies of each) | The default sink appended to the same array `retain` appended to, so two mechanisms that each looked correct alone both ran | The default sink now writes nowhere; retention is the explicit push | inside `3a74c9d` (`feat(core): the pilot safety rails…`) — **should have been its own `fix`** | `packages/core/src/test/events.test.ts` — "records a known event with its timestamp, run id and message" |
 | 7 | A message containing a newline came back from the log with an escaped backslash (`line one\\nline two` instead of a real newline) | Pre-escaping newlines before `JSON.stringify`, which escapes them anyway: the value was escaped twice and no longer round-tripped | The pre-escaping was removed; JSON guarantees the single line, and the value survives exactly | inside `3a74c9d` — **should have been its own `fix`** | `packages/core/src/test/events.test.ts` — "one line, stable key order, and a message that round-trips" |
 
+| 8 | An item could be left CLAIMED by a run that had stopped — not waiting, not retrying: invisible, because the runner only ever selects `ready` items | On a pending check the loop returned `retriable` and left the item owned; on a transport failure after the claim it did the same. The comment claimed "another tick will read it again", and no tick ever did | Checks are now WAITED for inside the tick (bounded, poll-counted), and any failure after the claim blocks the item with the instruction that resumes it — a state a human can see and act on | `e15c62b` (`fix(core): an item we own is never parked where automation cannot find it`) | `packages/core/src/test/delivery-loop.test.ts` — "pending checks are waited for INSIDE the tick", "checks that never settle block the item", "a retriable failure still refuses to strand the item" |
+| 9 | A claim held by a process that was killed stayed claimed for ever, and the item was invisible to the next ticks | Automation had no way back: nothing selects a `claimed` item, and the claim cannot be re-taken by a different run id | Each tick now SWEEPS the in-flight items: it reports them (`pilot.in_flight`), and with `blockStaleClaims` opted in it hands a stale claim back to a human — the proof being the SLOT it had to take, and the action being `blocked`, never a silent takeover | `e15c62b` (sweep), `packages/core/src/test/pilot.test.ts` — "a stale claim is handed to a human", "a fresh claim is reported but never touched", "an open pull request is never swept" |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -40,3 +43,9 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 - **Escaping twice** (#7): hand-rolling an escape that the serialiser already
   applies silently corrupts the value. Round-trip the value in a test, or do not
   escape at all.
+- **A comment describing behaviour nobody implements** (#8): "another tick will read
+  it again" was true of no code path. A comment is not a mechanism; if a state is
+  meant to be picked up later, the test must show the pick-up happening.
+- **A state automation cannot return from** (#9): before adding a state, ask which
+  code path selects it. `claimed` was selected by nothing, so a claim left by a dead
+  process was indistinguishable from a claim being worked on.

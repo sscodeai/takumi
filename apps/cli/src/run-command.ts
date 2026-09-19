@@ -20,9 +20,12 @@ import { spawn } from 'node:child_process';
 
 import {
   acquireSlot,
+  bumpMetrics,
   createEventLog,
   createTaskWorktree,
   lineSink,
+  readMetricsFile,
+  writeMetricsFile,
   pruneTaskWorktrees,
   ProviderError,
   runPilotTick,
@@ -59,6 +62,10 @@ export interface PilotConfig {
   policy: PilotPolicy;
   /** Where the event trail is appended (JSON lines). Omit for stderr only. */
   eventsFile?: string;
+  /** Counters: JSON here, and a Prometheus textfile next to it if asked. */
+  metricsFile?: string;
+  /** The Prometheus textfile (default: `<metricsFile>.prom`). */
+  metricsTextfile?: string;
 }
 
 export interface RunOnceDeps {
@@ -150,6 +157,20 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   });
 
   report(out, tick);
+
+  if (deps.pilot.metricsFile !== undefined) {
+    // Counters are read-modify-write on purpose: a tick is a separate process, and the
+    // file is the only memory between ticks. Monotonic counters, so a lost tick is a
+    // missed increment rather than a wrong total.
+    const before = readMetricsFile(deps.pilot.metricsFile);
+    const after = bumpMetrics(before, tick, {
+      atSeconds: Math.floor(Date.now() / 1000),
+      agentRetries: tick.agentRetries ?? 0,
+      checksWaitedSeconds: tick.checksWaitedSeconds ?? 0,
+    });
+    writeMetricsFile(deps.pilot.metricsFile, after, deps.pilot.metricsTextfile ?? `${deps.pilot.metricsFile}.prom`);
+    out(`metrics: ${deps.pilot.metricsFile} (ticks=${after.ticks}, last=${after.lastOutcome}, prom=${deps.pilot.metricsTextfile ?? `${deps.pilot.metricsFile}.prom`})`);
+  }
   return { tick, exitCode: tick.outcome === 'blocked' ? 1 : 0 };
 }
 
