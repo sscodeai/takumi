@@ -235,6 +235,7 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
       ...(p.policy.checksWaitSeconds === undefined ? {} : { checksWaitSeconds: p.policy.checksWaitSeconds }),
       ...(p.policy.checksPollSeconds === undefined ? {} : { checksPollSeconds: p.policy.checksPollSeconds }),
       ...(p.policy.progressIntervalSeconds === undefined ? {} : { progressIntervalSeconds: p.policy.progressIntervalSeconds }),
+      ...(p.policy.fileIssueOnExhaustedChecks === undefined ? {} : { fileIssueOnExhaustedChecks: p.policy.fileIssueOnExhaustedChecks }),
     },
     ...(p.eventsFile === undefined ? {} : { eventsFile: p.eventsFile }),
     ...(p.metricsFile === undefined ? {} : { metricsFile: p.metricsFile }),

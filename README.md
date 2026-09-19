@@ -145,7 +145,7 @@ takumi/
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
 ├── examples/              # end-to-end delivery examples, including Japanese SI
-└── docs/                  # ADRs (006-010: boards, delivery, rails, pilot, metrics), bug ledger, notes
+└── docs/                  # ADRs (006-011: boards, delivery, rails, pilot, metrics, filing), ledger, notes
 ```
 
 ## Core Ideas
@@ -178,6 +178,7 @@ takumi/
 | Pilot safety rails (ADR-008): exclusive slot lock, closed event registry, state bootstrap (`takumi board --check/--bootstrap`) | Done |
 | Pilot tick (ADR-009): `takumi pilot --once` — select, lock, worktree, agent, deliver, review; systemd/cron shape | Done |
 | Pilot metrics (ADR-010): JSON counters + a Prometheus textfile, and progress writes throttled | Done |
+| Filing work (ADR-011): `createWork` on every board, idempotent by marker; a red pipeline files its own item | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -256,7 +257,6 @@ Takumi is currently a Developer Preview.
 - [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion / Redmine) with one shared contract suite
 - [x] DeliveryProvider port: branch, plain push, one pull request, checks, merge of the reviewed head
 - [x] Delivery adapters for GitHub and GitLab
-- [ ] CI failure triage: file an issue for a check that was already red before the run (needs `createWork` on the board port)
 - [ ] Epic / milestone scoping, which needs a text-search capability on the board port first
 - [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
 - [ ] A `deliveries/git` adapter for a bare remote with no review surface
