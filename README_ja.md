@@ -171,6 +171,7 @@ takumi/
 | Pilot tick (ADR-009): `takumi pilot --once` — select / lock / worktree / agent / deliver / review。systemd・cron で駆動 | Done |
 | Pilot metrics (ADR-010): JSON カウンタ + Prometheus textfile、progress 書き込みの throttle | Done |
 | Filing work (ADR-011): 全 board の `createWork`（marker で冪等）、赤い CI が自分で item を立てる | Done |
+| Scoping a tick (ADR-012): 各 board 自身の検索による `query` スコープ、検索できない board では fail-closed | Done |
 | Agent Eval with 保留検証テスト and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -244,7 +245,6 @@ Takumi は現在 Developer Preview です。
 - [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion / Redmine) with one shared contract suite
 - [x] DeliveryProvider port: branch、plain push、PR 1 本、checks、レビュー済み head の merge
 - [x] Delivery adapters for GitHub and GitLab
-- [ ] Epic / milestone のスコープ指定（先に board port へ text-search capability が必要）
 - [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
 - [ ] A `deliveries/git` adapter for a bare remote with no review surface
 - [ ] Claude runtime adapter
