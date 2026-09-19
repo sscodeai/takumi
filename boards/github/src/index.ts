@@ -1,5 +1,6 @@
 import {
   assertBoardCapability,
+  BOARD_WORK_ITEM_STATES,
   boardErrorFromResponse,
   BoardError,
   assertTransition,
@@ -11,6 +12,8 @@ import {
   unconfiguredRequestFn,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -70,6 +73,15 @@ export const GITHUB_STATE_LABELS: Record<BoardWorkItemState, string> = {
 
 /** GitHub's comment association values that grant trust by default. */
 export const DEFAULT_TRUSTED_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+/** The colour every state label gets (GitHub's format: hex, no leading '#'). */
+export const STATE_LABEL_COLOR = '1f6feb';
+
+/** The subset of GitHub's label JSON this adapter reads. */
+interface GitHubLabel {
+  name?: string;
+  color?: string;
+}
 
 interface GitHubIssue {
   number?: number;
@@ -133,6 +145,9 @@ export class GitHubBoardProvider implements TaskBoardProvider {
       // GitHub cannot add/remove a label conditionally: the claim is verified by
       // a re-read instead, and the adapter says so rather than implying more.
       atomicClaim: false,
+      // GitHub labels are creatable through the API, so a fresh repository can be
+      // made ready by takumi itself instead of by hand.
+      canBootstrapStates: true,
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
   }
@@ -295,6 +310,67 @@ export class GitHubBoardProvider implements TaskBoardProvider {
   /** The label a state maps to. */
   labelFor(state: BoardWorkItemState): string {
     return `${this.labelPrefix}${GITHUB_STATE_LABELS[state]}`;
+  }
+
+  /**
+   * Create the six state labels if the repository does not have them yet.
+   *
+   * This is the first minute of a real deployment: without these labels the adapter
+   * cannot claim anything, and "no such label" teaches an operator nothing. Labels
+   * are creatable through the API, so takumi does it rather than printing advice.
+   *
+   * Idempotent by construction (an existing label is reported, never re-created),
+   * and the same reasoning as orbi's `align_labels`: the board's own state set is
+   * infrastructure, not a manual prerequisite.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts: { dryRun?: boolean } = {},
+  ): Promise<BoardBootstrapReport> {
+    const present = new Map<string, string>();
+    const existing = await requestBoardJson<GitHubLabel[]>(
+      this.request,
+      { method: 'GET', url: `${this.apiBase}/repos/${this.repo}/labels?per_page=100` },
+      'bootstrapStates: list labels',
+    );
+    for (const label of existing) {
+      if (typeof label.name === 'string') present.set(label.name.toLowerCase(), label.color ?? '');
+    }
+
+    const actions: BoardBootstrapAction[] = [];
+    let applied = false;
+    for (const state of desired) {
+      const name = this.labelFor(state);
+      if (present.has(name.toLowerCase())) {
+        actions.push({ state, name, outcome: 'exists' });
+        continue;
+      }
+      if (opts.dryRun === true) {
+        actions.push({ state, name, outcome: 'would-create' });
+        continue;
+      }
+      await requestBoardJson<GitHubLabel>(
+        this.request,
+        {
+          method: 'POST',
+          url: `${this.apiBase}/repos/${this.repo}/labels`,
+          // GitHub wants a hex colour without '#', so the six states share one:
+          // the state is in the NAME, and six colours would imply a priority or a
+          // category that takumi does not mean.
+          body: { name, color: STATE_LABEL_COLOR, description: 'takumi delivery state' },
+        },
+        `bootstrapStates: create ${name}`,
+      );
+      present.set(name.toLowerCase(), STATE_LABEL_COLOR);
+      applied = true;
+      actions.push({ state, name, outcome: 'created' });
+    }
+    return {
+      provider: this.metadata().id,
+      applied,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((state) => !this.capabilities().states.includes(state)),
+    };
   }
 
   private async fetchIssue(id: string): Promise<GitHubIssue> {

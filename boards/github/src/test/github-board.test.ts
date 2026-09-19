@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BOARD_WORK_ITEM_STATES,
   BoardError,
   BoardStateError,
   renderBoardStateRecord,
@@ -53,9 +54,11 @@ function issue(number: number, labels: string[], extra: Partial<SimIssue> = {}):
   };
 }
 
-function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = []) {
+function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = [], seedLabels: string[] = []) {
   const issues = seedIssues;
   const comments = seedComments;
+  /** Repository labels: what `bootstrapStates` lists and creates. */
+  const labels = seedLabels;
   const requests: BoardHttpRequest[] = [];
   let commentSeq = 1000;
 
@@ -73,6 +76,17 @@ function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = []
     const commentPatch = /^\/repos\/([^/]+)\/([^/]+)\/issues\/comments\/(\d+)$/.exec(path);
 
     if (req.method === 'GET' && path === '/user') return json({ login: 'bot-user' });
+
+    // Repository labels: what bootstrapStates lists and creates.
+    const repoLabels = /^\/repos\/([^/]+)\/([^/]+)\/labels$/.exec(path);
+    if (req.method === 'GET' && repoLabels) {
+      return json(labels.map((name) => ({ name, color: 'ededed' })));
+    }
+    if (req.method === 'POST' && repoLabels) {
+      const name = String(body['name'] ?? '');
+      labels.push(name);
+      return json({ name, color: body['color'] }, 201);
+    }
 
     if (req.method === 'GET' && path.endsWith('/issues')) {
       const wanted = url.searchParams.get('labels');
@@ -124,7 +138,7 @@ function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = []
     return notFound();
   };
 
-  return { request, requests, issues, comments };
+  return { request, requests, issues, comments, labels };
 }
 
 function provider(sim: ReturnType<typeof githubSimulator>, extra: Record<string, unknown> = {}) {
@@ -133,7 +147,53 @@ function provider(sim: ReturnType<typeof githubSimulator>, extra: Record<string,
 
 const RUN = 'c0ffee01';
 
-test('GitHubBoardProvider: shared task-board contract suite', async () => {
+test('bootstrapStates: creates the six state labels, and a dry run creates nothing', async () => {
+  const sim = githubSimulator([issue(7, [])], [], []);
+  const board = provider(sim);
+
+  const dry = await board.bootstrapStates(BOARD_WORK_ITEM_STATES, { dryRun: true });
+  assert.equal(dry.applied, false);
+  assert.deepEqual(dry.actions.map((a) => a.outcome), ['would-create', 'would-create', 'would-create', 'would-create', 'would-create', 'would-create']);
+  assert.deepEqual(dry.actions.map((a) => a.name), ['takumi-ready', 'takumi-claimed', 'takumi-pr-open', 'takumi-fix-needed', 'takumi-merged', 'takumi-blocked']);
+  assert.equal(
+    sim.requests.some((r) => r.method === 'POST'),
+    false,
+    'a dry run must not create anything',
+  );
+  assert.deepEqual(sim.labels, []);
+
+  const applied = await board.bootstrapStates(BOARD_WORK_ITEM_STATES);
+  assert.equal(applied.applied, true);
+  assert.equal(applied.actions.every((a) => a.outcome === 'created'), true);
+  assert.deepEqual(sim.labels, ['takumi-ready', 'takumi-claimed', 'takumi-pr-open', 'takumi-fix-needed', 'takumi-merged', 'takumi-blocked']);
+  const create = sim.requests.find((r) => r.method === 'POST');
+  assert.equal((create?.body as Record<string, unknown>)['color'], '1f6feb');
+
+  // Idempotent: a second call changes nothing and reports what exists.
+  const again = await board.bootstrapStates(BOARD_WORK_ITEM_STATES);
+  assert.equal(again.applied, false);
+  assert.equal(again.actions.every((a) => a.outcome === 'exists'), true);
+  assert.equal(sim.labels.length, 6, 'the second call must not duplicate labels');
+});
+
+test('bootstrapStates: reports the labels the repository already has, and honours a custom prefix', async () => {
+  const sim = githubSimulator([issue(7, [])], [], ['takumi-ready', 'unrelated']);
+  const board = provider(sim);
+  const report = await board.bootstrapStates(['ready', 'merged']);
+  assert.deepEqual(report.actions, [
+    { state: 'ready', name: 'takumi-ready', outcome: 'exists' },
+    { state: 'merged', name: 'takumi-merged', outcome: 'created' },
+  ]);
+  assert.deepEqual(sim.labels, ['takumi-ready', 'unrelated', 'takumi-merged']);
+
+  const prefixed = githubSimulator([issue(7, [])], [], []);
+  const custom = provider(prefixed, { labelPrefix: 'tk-' });
+  const customReport = await custom.bootstrapStates(['ready']);
+  assert.equal(customReport.actions[0]?.name, 'tk-ready');
+  assert.deepEqual(prefixed.labels, ['tk-ready']);
+});
+
+test('GitHubBoardProvider: the shared task-board contract suite over an injected transport', async () => {
   const sim = githubSimulator([issue(7, ['takumi-ready'])]);
   const out = await runTaskBoardProviderContractSuite(provider(sim), { id: 'github', itemId: '7' });
   assert.equal(out.gate, 'task-board-contract');

@@ -1,11 +1,14 @@
 import {
   assertBoardCapability,
+  BOARD_WORK_ITEM_STATES,
   BoardError,
   assertTransition,
   parseBoardStateRecord,
   renderBoardStateRecord,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -58,6 +61,7 @@ const DEFAULT_CAPABILITIES: BoardCapabilities = {
   trustedAuthorFilter: true,
   machineReadableState: true,
   atomicClaim: true,
+  canBootstrapStates: true,
   delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
 };
 
@@ -77,6 +81,8 @@ export class FakeBoardProvider implements TaskBoardProvider {
   private readonly items = new Map<string, FakeItem>();
   private readonly comments = new Map<string, FakeComment>();
   private readonly records = new Map<string, Array<{ record: BoardStateRecord; trusted: boolean }>>();
+  /** States this board has already created (so bootstrap is idempotent). */
+  private readonly bootstrapStates_ = new Set<BoardWorkItemState>();
   private readonly capabilities_: BoardCapabilities;
   private readonly clock: () => number;
   private commentSeq = 0;
@@ -201,6 +207,37 @@ export class FakeBoardProvider implements TaskBoardProvider {
     return trusted.reduce((newest, e) =>
       Date.parse(e.record.updatedAt) >= Date.parse(newest.record.updatedAt) ? e : newest,
     ).record;
+  }
+
+  /**
+   * The fake board owns its states, so it can create them — the reference
+   * behaviour the real adapters are measured against: a dry run reports what it
+   * would do, the real call creates, a second call reports `exists`.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts: { dryRun?: boolean } = {},
+  ): Promise<BoardBootstrapReport> {
+    const actions: BoardBootstrapAction[] = [];
+    let applied = false;
+    for (const state of desired) {
+      const name = `takumi-${state}`;
+      if (this.bootstrapStates_.has(state)) {
+        actions.push({ state, name, outcome: 'exists' });
+      } else if (opts.dryRun === true) {
+        actions.push({ state, name, outcome: 'would-create' });
+      } else {
+        this.bootstrapStates_.add(state);
+        applied = true;
+        actions.push({ state, name, outcome: 'created' });
+      }
+    }
+    return {
+      provider: this.metadata().id,
+      applied,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((state) => !this.capabilities().states.includes(state)),
+    };
   }
 
   async writeState(id: string, record: BoardStateRecord, opts?: { author?: BoardCommentAuthor }): Promise<void> {
