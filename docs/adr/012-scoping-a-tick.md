@@ -48,6 +48,27 @@ means the runner works on precisely the items the operator excluded. The shared 
 enforces it in both directions — a `true` board must find an item whose text carries a
 distinctive term and must NOT return it for a term nothing carries.
 
+### 2b. One rule, in core, enforced per adapter (added after the first release)
+
+The first version had each adapter decide what a blank or unrepresentable scope means, and
+they disagreed: GitLab and Notion dropped a whitespace-only term (sending no filter at all —
+the caller asked to narrow and received the whole board), Jira refused it, and GitHub
+silently stripped a double quote out of the term (searching for words the operator had not
+written). Each looked defensible in isolation; together they meant the same configuration
+line behaved differently depending on which board it pointed at, and two of the three
+behaviours were exactly the silent widening this ADR exists to forbid.
+
+`assertScopeQuery` in core now owns the rule — **a scope is carried faithfully or refused,
+never quietly turned into a different query** — and the contract suite asserts it for every
+adapter: a whitespace-only scope must fail `precondition`, and a quoted term must either be
+refused or return only items that carry the word (never a widened list). Two of the
+adapters' tests asserted the old behaviour and were rewritten with the reason, so the diff
+says what changed and why.
+
+The lesson is the same one the bug ledger keeps recording in other shapes: an abstraction
+with N implementations needs the semantics in ONE place, or "the same knob" becomes N
+slightly different knobs.
+
 ### 3. The tick asserts the capability before it starts
 
 `pilot.policy.scopeQuery` narrows a tick. If the board cannot search, the tick throws

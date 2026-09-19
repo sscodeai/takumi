@@ -27,6 +27,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 
 | 10 | `pilot.metricsFile` was read from takumi.yaml and never written; the pacing knobs (`checksWaitSeconds`, `blockStaleClaims`, …) were accepted and dropped on the floor | The command built a `PilotConfig` from the file field by field, and the later fields were simply not in the list — while the pilot never handed those policy fields to the loop either | Every field is now passed, and the wiring is covered by a test that drives the real command: the metrics file must EXIST, and a policy budget must appear as the number in the block message | `ada3262` (`fix(cli): the pilot command read options it never passed on`) | `apps/cli/src/test/run.test.ts` — "the pilot section of takumi.yaml is wired through, metrics included"; `packages/core/src/test/pilot.test.ts` — "the policy's pacing knobs reach the delivery loop" |
 
+| 11 | The same `pilot.policy.scopeQuery` behaved differently on each board: a whitespace-only scope was DROPPED on GitLab/Notion (returning the whole board while looking scoped), REFUSED on Jira, and a double quote in the term was silently STRIPPED on GitHub | Each adapter had decided for itself what an unrepresentable scope means, and each decision looked defensible alone; the rule was never stated once | `assertScopeQuery` in core states the rule (carry the scope faithfully or refuse it) and every adapter calls it; the contract suite now asserts, per adapter, that a blank scope fails `precondition` and that a quoted term is either refused or narrowed faithfully — never widened | `a18b7f5` (`fix(boards): one scope rule in core, enforced on every adapter`) | the shared suite's `scopeValidation: PASS` note, plus `boards/{gitlab,notion}/src/test/*` where the tests that encoded the old behaviour now assert the refusal |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -55,3 +57,7 @@ note, and to whoever wonders later whether this class of bug was ever hit.
   used is silence, not a default. Test the EFFECT of a setting (a file that must exist,
   a number that must appear), because a test that asserts the object was passed along
   passes whether or not anything downstream looks at it.
+- **N implementations, N semantics** (#11): when an abstraction has several adapters, any
+  rule left to each adapter drifts — and the drift is invisible until the same
+  configuration meets two different boards. Put the rule in the shared layer and assert it
+  per adapter in the contract suite.
