@@ -175,6 +175,7 @@ takumi/
 | Read-only board view: `takumi board --provider <id>` | Done |
 | Delivery providers: fake / GitHub / GitLab — plain push, one PR, merge of the reviewed commit only | Done |
 | Runnable board -> delivery -> merge demo with in-memory providers: `node scripts/board-delivery-demo.mjs` | Done |
+| Pilot safety rails (ADR-008): exclusive slot lock, closed event registry, state bootstrap (`takumi board --check/--bootstrap`) | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -253,6 +254,7 @@ Takumi is currently a Developer Preview.
 - [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion / Redmine) with one shared contract suite
 - [x] DeliveryProvider port: branch, plain push, one pull request, checks, merge of the reviewed head
 - [x] Delivery adapters for GitHub and GitLab
+- [ ] The pilot itself: scheduler/daemon, graceful shutdown, worktree retention, model-wait/retry, health metrics (ADR-008 built the rails; the vehicle is P1)
 - [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
 - [ ] A `deliveries/git` adapter for a bare remote with no review surface
 - [ ] Claude runtime adapter

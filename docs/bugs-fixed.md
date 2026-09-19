@@ -19,6 +19,9 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 | 4 | A delivery that could not be merged had nowhere to go: the item stayed in `pr_open` forever (review rounds exhausted, host refusing a conflicting head, base branch reconfigured) | The six-state transition table had no `pr_open → blocked` edge, so the only legal moves out of an open pull request were `merged` and `fix_needed` | The edge was added, documented in ADR-006, and the loop now blocks there when its round budget runs out | inside `c6b590f` (`feat(core): run the two ports as a delivery loop`) — **should have been its own `fix`** | `packages/core/src/test/board-state.test.ts` — "an open pull request can still be blocked" |
 | 5 | A progress comment could carry a run marker that no reader could ever find; and a malformed run id escaped as a bare `Error` | Five adapters each had their own copy of the marker string, none of which validated the id, while the reader matches exactly eight lowercase hex characters; core's shared implementation validated but threw an unclassified `Error` | All boards call core's `renderRunMarker`; a malformed id fails as a classified `precondition`, surfaced through each port's own error family (`BoardError`) | inside `1056445` (`refactor(boards): one run-marker implementation…`) — **should have been its own `fix`** | `packages/core/src/test/run-marker.test.ts` asserts `ProviderError` + `kind === 'precondition'`; `boards/*/src/test/*` assert the marker string through the port |
 
+| 6 | Every event was stored TWICE in the trail (the first test that read the trail back saw two copies of each) | The default sink appended to the same array `retain` appended to, so two mechanisms that each looked correct alone both ran | The default sink now writes nowhere; retention is the explicit push | inside `3a74c9d` (`feat(core): the pilot safety rails…`) — **should have been its own `fix`** | `packages/core/src/test/events.test.ts` — "records a known event with its timestamp, run id and message" |
+| 7 | A message containing a newline came back from the log with an escaped backslash (`line one\\nline two` instead of a real newline) | Pre-escaping newlines before `JSON.stringify`, which escapes them anyway: the value was escaped twice and no longer round-tripped | The pre-escaping was removed; JSON guarantees the single line, and the value survives exactly | inside `3a74c9d` — **should have been its own `fix`** | `packages/core/src/test/events.test.ts` — "one line, stable key order, and a message that round-trips" |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -31,3 +34,9 @@ note, and to whoever wonders later whether this class of bug was ever hit.
   marker, because it looks like evidence.
 - **Swallowed failure** (#2): a helper that returns a normal-looking result after
   failing is how four manifests went missing while five reports said "written".
+- **Two mechanisms, one effect** (#6): a default and an explicit path that both do
+  the same thing look correct in isolation and duplicate in practice. Make one of
+  them a no-op instead of assuming they are mutually exclusive.
+- **Escaping twice** (#7): hand-rolling an escape that the serialiser already
+  applies silently corrupts the value. Round-trip the value in a test, or do not
+  escape at all.
