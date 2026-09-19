@@ -168,6 +168,7 @@ takumi/
 | Delivery providers: fake / GitHub / GitLab — plain push、PR 1 本、レビュー済み commit のみ merge | Done |
 | Runnable board -> delivery -> merge demo (in-memory、認証情報不要): `node scripts/board-delivery-demo.mjs` | Done |
 | Pilot safety rails (ADR-008): 排他 slot lock、閉じた event registry、state bootstrap (`takumi board --check/--bootstrap`) | Done |
+| Pilot tick (ADR-009): `takumi pilot --once` — select / lock / worktree / agent / deliver / review。systemd・cron で駆動 | Done |
 | Agent Eval with 保留検証テスト and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -241,7 +242,9 @@ Takumi は現在 Developer Preview です。
 - [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion / Redmine) with one shared contract suite
 - [x] DeliveryProvider port: branch、plain push、PR 1 本、checks、レビュー済み head の merge
 - [x] Delivery adapters for GitHub and GitLab
-- [ ] The pilot itself: scheduler / daemon、graceful shutdown、worktree retention、model-wait / retry、health metrics（ADR-008 はレール。車両は P1）
+- [ ] Pilot health metrics（textfile exporter）と progress comment の throttle
+- [ ] stale claim の takeover 方針: claim 後の retriable 失敗では item が claimed のまま残る（ADR-009 に明記）
+- [ ] Epic / milestone のスコープ指定（先に board port へ text-search capability が必要）
 - [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
 - [ ] A `deliveries/git` adapter for a bare remote with no review surface
 - [ ] Claude runtime adapter
