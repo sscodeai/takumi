@@ -53,6 +53,8 @@ export interface PilotPolicy {
   checksPollSeconds?: number;
   /** Suppress an unchanged progress write within this window, in seconds. Default 30. */
   progressIntervalSeconds?: number;
+  /** File a work item when the checks stay red after every fix round. Default false. */
+  fileIssueOnExhaustedChecks?: boolean;
   /**
    * Hand items left behind by a run that stopped back to a human, instead of leaving
    * them claimed and invisible forever (ADR-009's known limit).
@@ -315,6 +317,7 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
         ...(policy.checksWaitSeconds === undefined ? {} : { checksWaitSeconds: policy.checksWaitSeconds }),
         ...(policy.checksPollSeconds === undefined ? {} : { checksPollSeconds: policy.checksPollSeconds }),
         ...(policy.progressIntervalSeconds === undefined ? {} : { progressIntervalSeconds: policy.progressIntervalSeconds }),
+        ...(policy.fileIssueOnExhaustedChecks === undefined ? {} : { fileIssueOnExhaustedChecks: policy.fileIssueOnExhaustedChecks }),
       },
       hooks: {
         agent: async ({ round }) => runAgent(round),

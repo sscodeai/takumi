@@ -45,6 +45,14 @@ export interface DeliveryLoopPlan {
   /** Bounded review/fix rounds. Default 3. */
   maxReviewRounds?: number;
   /**
+   * File a work item when the checks stay red after every fix round. Default false.
+   *
+   * A red pipeline that nobody owns is how a repository rots: the item blocks, a comment
+   * says why, and the failure never becomes anyone's task. Filing it (idempotently, so a
+   * retried tick cannot duplicate it) turns the failure into work.
+   */
+  fileIssueOnExhaustedChecks?: boolean;
+  /**
    * How long to WAIT for the host's checks before giving up on them, in seconds.
    * Default 300.
    *
@@ -281,6 +289,68 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
   // Ownership matters in the failure path: an item WE claimed must never be left in a
   // state automation cannot pick up again (the pilot only ever selects `ready`).
   let owned = false;
+  /**
+   * Block the item AND file the failure as work — best effort, like the event trail.
+   *
+   * The rule from ADR-008 applies to this too: a side channel must never change the
+   * delivery's conclusion. A board that cannot file, or a filing that fails, leaves the
+   * item blocked with the reason in the step timeline; it does not fail the run, and it
+   * does not quietly succeed either.
+   */
+  const blockOnRedChecks = async (detail: string, failing: readonly CheckSummary[]): Promise<DeliveryLoopResult> => {
+    await transition('blocked', detail);
+    if (plan.fileIssueOnExhaustedChecks !== true) return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+
+    if (!board.capabilities().canCreateWork) {
+      events.emit({
+        kind: 'issue.skipped',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: 'fileIssueOnExhaustedChecks is on, but this board cannot file work items',
+      });
+      record('issue', 'not filed: this board declares canCreateWork=false');
+      return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+    }
+
+    const names = failing.map((c) => c.name).join(', ');
+    // The key is derived from the ITEM and the DELIVERY, not from the clock or the run:
+    // that is what makes the second attempt return the first issue instead of a copy.
+    const key = `ci-red:${plan.itemId}:${pr?.number ?? 'none'}`;
+    try {
+      const filed = await board.createWork({
+        title: `CI is red: ${plan.itemId}${names.length === 0 ? '' : ` (${names})`}`,
+        body:
+          `${detail}\n\n` +
+          `${pr === undefined ? 'No pull request was opened.' : `Pull request: ${pr.url}`}\n` +
+          `Failing checks: ${names.length === 0 ? '(none named)' : names}\n` +
+          `Detected by run ${plan.runId}. Filed so the failure becomes work instead of a comment.`,
+        state: 'ready',
+        idempotencyKey: key,
+      });
+      events.emit({
+        kind: 'issue.filed',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: filed.created ? `filed ${filed.item.id}: CI is red` : `${filed.item.id} already filed for this delivery`,
+        fields: { key, created: filed.created },
+      });
+      record('issue', filed.created ? `filed ${filed.item.id} for the red checks` : `already filed as ${filed.item.id}`);
+    } catch (e) {
+      events.emit({
+        kind: 'issue.skipped',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: `could not file the failure: ${e instanceof Error ? e.message : String(e)}`,
+        fields: { key },
+      });
+      record('issue', `not filed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+  };
+
   const run = async (): Promise<DeliveryLoopResult> => {
   try {
     // --- 1. claim -------------------------------------------------------------
@@ -388,8 +458,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         // rounds to fix it, and only an exhausted budget is a human decision.
         const detail = `check(s) failed: ${failed.map((c) => c.name).join(', ')}`;
         if (round + 1 >= maxRounds) {
-          await transition('blocked', `${detail} and no fix round left`);
-          return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: `${detail} and no fix round left` };
+          return await blockOnRedChecks(`${detail} and no fix round left`, failed);
         }
         await transition('fix_needed', detail);
         continue;
@@ -428,8 +497,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
           const detail = `check(s) failed: ${nowFailed.map((c) => c.name).join(', ')}`;
           await writeRecord(round);
           if (round + 1 >= maxRounds) {
-            await transition('blocked', `${detail} and no fix round left`);
-            return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: `${detail} and no fix round left` };
+            return await blockOnRedChecks(`${detail} and no fix round left`, nowFailed);
           }
           await transition('fix_needed', detail);
           continue;

@@ -51,6 +51,9 @@ export const EVENT_KINDS = [
   'checks.read',
   'checks.waited',
   'check.failed',
+  // Turning a failure into work, and the honest refusal when a board cannot file
+  'issue.filed',
+  'issue.skipped',
   'review.clean',
   'review.findings',
   'review.awaiting_human',
