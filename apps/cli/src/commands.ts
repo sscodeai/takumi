@@ -90,8 +90,11 @@ export interface ProjectConfig {
     delivery: string;
     deliveryOptions?: Record<string, string>;
     agent: { command: string; args?: string[]; timeoutSeconds?: number; env?: Record<string, string> };
-    policy: { reviewMode: 'checks-only' | 'label'; approvalLabel?: string; maxReviewRounds?: number; retainWorktreesHours?: number; agentRetries?: number; agentRetryDelaySeconds?: number };
+    policy: { reviewMode: 'checks-only' | 'label'; approvalLabel?: string; maxReviewRounds?: number; retainWorktreesHours?: number; agentRetries?: number; agentRetryDelaySeconds?: number; blockStaleClaims?: boolean; staleClaimSeconds?: number; checksWaitSeconds?: number; checksPollSeconds?: number; progressIntervalSeconds?: number };
     eventsFile?: string;
+    /** Counters (JSON), and a Prometheus textfile beside it for whatever scrapes it. */
+    metricsFile?: string;
+    metricsTextfile?: string;
   };
 }
 

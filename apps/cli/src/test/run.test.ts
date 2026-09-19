@@ -9,6 +9,7 @@ import { FakeBoardProvider } from '@takumi/board-fake';
 import { FakeDeliveryProvider } from '@takumi/delivery-fake';
 import { runAgentCommand, runOnce } from '../run-command.js';
 import type { PilotConfig } from '../run-command.js';
+import { runPilotCommand } from '../index.js';
 
 /**
  * The pilot tick, end to end with a REAL git repository and a REAL agent process:
@@ -198,5 +199,76 @@ test('runAgentCommand: the item identity reaches the child, and its failure is c
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runPilotCommand: the pilot section of takumi.yaml is wired through, metrics included', async () => {
+  const repo = makeRepo();
+  try {
+    const project = join(repo.root, 'project');
+    mkdirSync(project);
+    const metricsFile = join(project, 'metrics.json');
+    const agentScript = join(repo.root, 'agent.mjs');
+    writeFileSync(
+      agentScript,
+      [
+        'import { execFileSync } from "node:child_process";',
+        'import { writeFileSync } from "node:fs";',
+        'writeFileSync("work.txt", "done\\n");',
+        'const g = (a) => execFileSync("git", a, { encoding: "utf8" });',
+        'g(["add", "."]);',
+        'g(["-c", "user.name=Agent", "-c", "user.email=a@example.invalid", "commit", "-m", "feat: work"]);',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'takumi.yaml'),
+      [
+        'runtime: fake',
+        'registry:',
+        '  skills: .takumi/skills',
+        '  tools: .takumi/tools',
+        '  workflows: .takumi/workflows',
+        '  runtimes: .takumi/runtimes',
+        'artifacts: .takumi/artifacts',
+        'pilot:',
+        `  repo: ${repo.work}`,
+        `  worktreeRoot: ${join(repo.root, 'worktrees')}`,
+        `  slotDir: ${join(repo.root, 'slots')}`,
+        '  baseBranch: main',
+        '  board: fake',
+        '  delivery: fake',
+        '  deliveryOptions:',
+        `    baseSha: ${'a'.repeat(40)}`,
+        `    headSha: ${'b'.repeat(12)}commit000001`,
+        '  agent:',
+        `    command: ${process.execPath}`,
+        '    args:',
+        `      - ${agentScript}`,
+        '  policy:',
+        '    reviewMode: checks-only',
+        `  metricsFile: ${metricsFile}`,
+        '',
+      ].join('\n'),
+    );
+
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (line?: unknown) => lines.push(String(line ?? ''));
+    let code = 1;
+    try {
+      code = await runPilotCommand(project, ['--once']);
+    } finally {
+      console.log = original;
+    }
+    assert.equal(code, 0, lines.join('\n'));
+    assert.match(lines.join('\n'), /delivered DEMO-1/);
+    // The whole point of this test: a configured option that nothing reads is a silent
+    // drop, and the CLI is where the config is read.
+    assert.equal(existsSync(metricsFile), true, 'the metrics file named in takumi.yaml must be written');
+    const metrics = JSON.parse(readFileSync(metricsFile, 'utf8')) as { ticks: number };
+    assert.equal(metrics.ticks, 1);
+  } finally {
+    repo.cleanup();
   }
 });

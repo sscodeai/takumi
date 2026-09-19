@@ -192,7 +192,7 @@ Examples:
  * deployment decision, and guessing one is how an agent ends up committing to the
  * wrong checkout.
  */
-async function runPilotCommand(cwd: string, rest: string[]): Promise<number> {
+export async function runPilotCommand(cwd: string, rest: string[]): Promise<number> {
   if (rest.includes('--help') || rest.includes('-h')) {
     console.log(
       [
@@ -230,8 +230,15 @@ async function runPilotCommand(cwd: string, rest: string[]): Promise<number> {
       ...(p.policy.retainWorktreesHours === undefined ? {} : { retainWorktreesHours: p.policy.retainWorktreesHours }),
       ...(p.policy.agentRetries === undefined ? {} : { agentRetries: p.policy.agentRetries }),
       ...(p.policy.agentRetryDelaySeconds === undefined ? {} : { agentRetryDelaySeconds: p.policy.agentRetryDelaySeconds }),
+      ...(p.policy.blockStaleClaims === undefined ? {} : { blockStaleClaims: p.policy.blockStaleClaims }),
+      ...(p.policy.staleClaimSeconds === undefined ? {} : { staleClaimSeconds: p.policy.staleClaimSeconds }),
+      ...(p.policy.checksWaitSeconds === undefined ? {} : { checksWaitSeconds: p.policy.checksWaitSeconds }),
+      ...(p.policy.checksPollSeconds === undefined ? {} : { checksPollSeconds: p.policy.checksPollSeconds }),
+      ...(p.policy.progressIntervalSeconds === undefined ? {} : { progressIntervalSeconds: p.policy.progressIntervalSeconds }),
     },
     ...(p.eventsFile === undefined ? {} : { eventsFile: p.eventsFile }),
+    ...(p.metricsFile === undefined ? {} : { metricsFile: p.metricsFile }),
+    ...(p.metricsTextfile === undefined ? {} : { metricsTextfile: p.metricsTextfile }),
   };
 
   const { board, delivery } = await createProviders(p.board, p.boardOptions ?? {}, p.delivery, p.deliveryOptions ?? {});

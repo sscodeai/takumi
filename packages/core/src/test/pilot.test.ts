@@ -499,3 +499,43 @@ test('runPilotTick: an open pull request is never swept — that is a human deci
     h.cleanup();
   }
 });
+
+test('runPilotTick: the policy’s pacing knobs reach the delivery loop', async () => {
+  // A policy knob the tick accepts and then drops is the same silent drop as a config
+  // option nothing reads, so this asserts the EFFECT (the block message names the budget)
+  // rather than that the object was passed along.
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    h.delivery.checkRuns = [{ name: 'e2e', conclusion: 'pending' }];
+    const result = await runPilotTick({
+      ...h.deps,
+      policy: { reviewMode: 'checks-only', checksWaitSeconds: 45, checksPollSeconds: 15 },
+      sleep: async () => {},
+    });
+    assert.equal(result.outcome, 'blocked');
+    assert.match(result.detail, /still pending after 45s/, 'the pilot must hand checksWaitSeconds to the loop');
+    assert.equal(result.checksWaitedSeconds, undefined, 'a run that never settled waited no measurable time');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: a settled wait is reported as a number, not parsed from text', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    let polls = 0;
+    h.delivery.checks = async () => {
+      polls += 1;
+      return polls <= 2 ? [{ name: 'e2e', conclusion: 'pending' as const }] : [{ name: 'e2e', conclusion: 'success' as const }];
+    };
+    const result = await runPilotTick({
+      ...h.deps,
+      policy: { reviewMode: 'checks-only', checksWaitSeconds: 60, checksPollSeconds: 15 },
+      sleep: async () => {},
+    });
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(result.checksWaitedSeconds, 30);
+  } finally {
+    h.cleanup();
+  }
+});

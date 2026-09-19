@@ -47,6 +47,12 @@ export interface PilotPolicy {
   /** Extra agent attempts after a TRANSPORT failure (default 2). */
   agentRetries?: number;
   agentRetryDelaySeconds?: number;
+  /** How long a delivery waits for the host's checks before blocking. Default 300. */
+  checksWaitSeconds?: number;
+  /** Poll interval while waiting for checks. Default 15. */
+  checksPollSeconds?: number;
+  /** Suppress an unchanged progress write within this window, in seconds. Default 30. */
+  progressIntervalSeconds?: number;
   /**
    * Hand items left behind by a run that stopped back to a human, instead of leaving
    * them claimed and invisible forever (ADR-009's known limit).
@@ -303,7 +309,12 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
         runId,
         baseSha,
         title: item.title,
+        // Passed through explicitly: a policy knob the CLI accepts but the pilot drops is
+        // the same silent drop as a config option nothing reads.
         ...(policy.maxReviewRounds === undefined ? {} : { maxReviewRounds: policy.maxReviewRounds }),
+        ...(policy.checksWaitSeconds === undefined ? {} : { checksWaitSeconds: policy.checksWaitSeconds }),
+        ...(policy.checksPollSeconds === undefined ? {} : { checksPollSeconds: policy.checksPollSeconds }),
+        ...(policy.progressIntervalSeconds === undefined ? {} : { progressIntervalSeconds: policy.progressIntervalSeconds }),
       },
       hooks: {
         agent: async ({ round }) => runAgent(round),
