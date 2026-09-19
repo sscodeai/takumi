@@ -180,6 +180,7 @@ takumi/
 | Pilot metrics (ADR-010): JSON counters + a Prometheus textfile, and progress writes throttled | Done |
 | Filing work (ADR-011): `createWork` on every board, idempotent by marker; a red pipeline files its own item | Done |
 | Scoping a tick (ADR-012): `query` scope through each board's own search, fail-closed where it cannot search | Done |
+| OpenHands as an agent (spike report): proven through the existing pilot seam, zero new abstraction | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -230,6 +231,7 @@ Inspired by LongHorizon-Harness:
 
 - [examples/pi10](./examples/pi10): Golden Path enterprise delivery project based on a Japanese SI / V-model workflow, including requirements, design documents, Spring Boot backend, Vue frontend, unit/integration tests, and evidence summaries.
 - [examples/minimal-vmodel](./examples/minimal-vmodel): smaller V-model example for workflow and traceability experiments.
+- [examples/openhands-agent.sh](./examples/openhands-agent.sh): run the OpenHands CLI as a pilot agent command (see `docs/openhands-spike-report.md`).
 
 ## Known Limitations
 
@@ -260,6 +262,7 @@ Takumi is currently a Developer Preview.
 - [x] Delivery adapters for GitHub and GitLab
 - [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
 - [ ] A `deliveries/git` adapter for a bare remote with no review surface
+- [ ] A `runtimes/openhands` adapter, if per-task usage and artifacts prove worth it (the CLI seam already works — see `docs/openhands-spike-report.md`)
 - [ ] Claude runtime adapter
 - [ ] Excel, Word, and Playwright tool plugins
 - [ ] Jira and GitHub tool plugins (the board layer already covers issues)

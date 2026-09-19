@@ -192,14 +192,21 @@ Takumi failure model.
 
 - The **dirty worktree** case is already refused (`blocked` precondition) — an agent that
   leaves uncommitted changes cannot pass.
-- The **"no commit at all"** case is *not* covered by any existing test suite: the runtime
-  contract suite (`contract.ts`) asserts event ordering, terminal status, usage and artifacts,
-  and knows nothing about git. The suite's happy path requires `status = completed`, which an
-  OpenHands session can reach without ever committing.
-- Therefore the "false completion" test in §9 is **new work**, and it is the single most
-  valuable test this task should add: it is the observable form of the invariant above.
-  Put it where the invariant lives (the pilot / delivery-loop seam), not only in the runtime
-  suite.
+- The **"no commit at all"** case is already covered at the PILOT seam: the delivery adapters
+  refuse a branch whose HEAD is still the frozen base, and
+  `packages/core/src/test/pilot.test.ts` asserts "an agent that commits nothing is a blocked
+  precondition, not a silent idle".
+- It is **not** covered by the runtime contract suite (`contract.ts`), and structurally cannot
+  be: that suite asserts event ordering, terminal status, usage and artifacts, and knows
+  nothing about git — its happy path requires `status = completed`, which a session can reach
+  without ever committing. So a dedicated runtime adapter must be paired with a pilot-level
+  test; the runtime suite must never be read as proof of the commit invariant.
+  (Corrected after reading `pilot.test.ts` during the spike — see
+  `docs/openhands-spike-report.md`.)
+- Therefore the §9 "false completion" case must be asserted **where the invariant lives**
+  (the pilot / delivery-loop seam). It is already asserted there for the existing runtimes —
+  what this task owes is the same assertion for whatever path OpenHands takes, and no claim
+  that the runtime suite covers it.
 
 ---
 
