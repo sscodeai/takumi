@@ -6,7 +6,14 @@ import { join } from 'node:path';
 import { FakeBoardProvider } from '@takumi/board-fake';
 import { listExtensions, loadConfig } from '../commands.js';
 import { initProject } from '../init.js';
-import { createBoardProvider, parseBoardArgs, parseStatusMap, renderBoard, runBoardCommand } from '../board-command.js';
+import {
+  createBoardProvider,
+  parseBoardArgs,
+  parseStatusMap,
+  renderBoard,
+  renderBootstrapReport,
+  runBoardCommand,
+} from '../board-command.js';
 
 /**
  * The board command is READ-ONLY by construction: it only lists. These tests
@@ -174,6 +181,50 @@ test('runBoardCommand: the redmine provider fails closed without credentials or 
   } finally {
     if (previous !== undefined) process.env['REDMINE_API_KEY'] = previous;
   }
+});
+
+test('runBoardCommand --check: reports what the board is missing and changes nothing', async () => {
+  const { code, out } = await captureStdout(() => runBoardCommand(['--provider', 'fake', '--check']));
+  assert.equal(code, 0, 'nothing needs a human on the fake board, so the exit code is 0');
+  assert.match(out, /Takumi board bootstrap — fake \(no changes made\)/);
+  for (const state of ['ready', 'claimed', 'pr_open', 'fix_needed', 'merged', 'blocked']) {
+    assert.match(out, new RegExp(`would-create\\s+takumi-${state}`));
+  }
+  assert.match(out, /Re-run with --bootstrap/);
+});
+
+test('runBoardCommand --bootstrap: applies it, and the JSON form is the report itself', async () => {
+  const applied = await captureStdout(() => runBoardCommand(['--provider', 'fake', '--bootstrap']));
+  assert.equal(applied.code, 0);
+  assert.match(applied.out, /applied changes/);
+  assert.match(applied.out, /created\s+takumi-ready/);
+
+  const asJson = await captureStdout(() => runBoardCommand(['--provider', 'fake', '--bootstrap', '--json']));
+  const report = JSON.parse(asJson.out) as { provider: string; applied: boolean; actions: Array<{ outcome: string }> };
+  assert.equal(report.provider, 'fake');
+  assert.equal(report.applied, true);
+  assert.equal(report.actions.every((a) => a.outcome === 'created'), true);
+});
+
+test('renderBootstrapReport: a state nobody can create says what to do about it', () => {
+  const text = renderBootstrapReport({
+    provider: 'probe',
+    applied: false,
+    actions: [
+      { state: 'ready', name: 'takumi-ready', outcome: 'exists' },
+      {
+        state: 'merged',
+        name: 'Closed',
+        outcome: 'not-creatable',
+        instruction: 'create the status "Closed" in the project workflow, then configure statusMap',
+      },
+    ],
+    unsupported: [],
+  });
+  assert.match(text, /ready\s+exists\s+takumi-ready/);
+  assert.match(text, /not-creatable\s+Closed/);
+  assert.match(text, /-> create the status "Closed"/);
+  assert.match(text, /1 state\(s\) need a human/);
 });
 
 test('parseStatusMap: parses delivery states onto board status names and rejects the rest', () => {
