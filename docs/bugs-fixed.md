@@ -25,6 +25,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 | 8 | An item could be left CLAIMED by a run that had stopped — not waiting, not retrying: invisible, because the runner only ever selects `ready` items | On a pending check the loop returned `retriable` and left the item owned; on a transport failure after the claim it did the same. The comment claimed "another tick will read it again", and no tick ever did | Checks are now WAITED for inside the tick (bounded, poll-counted), and any failure after the claim blocks the item with the instruction that resumes it — a state a human can see and act on | `e15c62b` (`fix(core): an item we own is never parked where automation cannot find it`) | `packages/core/src/test/delivery-loop.test.ts` — "pending checks are waited for INSIDE the tick", "checks that never settle block the item", "a retriable failure still refuses to strand the item" |
 | 9 | A claim held by a process that was killed stayed claimed for ever, and the item was invisible to the next ticks | Automation had no way back: nothing selects a `claimed` item, and the claim cannot be re-taken by a different run id | Each tick now SWEEPS the in-flight items: it reports them (`pilot.in_flight`), and with `blockStaleClaims` opted in it hands a stale claim back to a human — the proof being the SLOT it had to take, and the action being `blocked`, never a silent takeover | `e15c62b` (sweep), `packages/core/src/test/pilot.test.ts` — "a stale claim is handed to a human", "a fresh claim is reported but never touched", "an open pull request is never swept" |
 
+| 10 | `pilot.metricsFile` was read from takumi.yaml and never written; the pacing knobs (`checksWaitSeconds`, `blockStaleClaims`, …) were accepted and dropped on the floor | The command built a `PilotConfig` from the file field by field, and the later fields were simply not in the list — while the pilot never handed those policy fields to the loop either | Every field is now passed, and the wiring is covered by a test that drives the real command: the metrics file must EXIST, and a policy budget must appear as the number in the block message | `ada3262` (`fix(cli): the pilot command read options it never passed on`) | `apps/cli/src/test/run.test.ts` — "the pilot section of takumi.yaml is wired through, metrics included"; `packages/core/src/test/pilot.test.ts` — "the policy's pacing knobs reach the delivery loop" |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -49,3 +51,7 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 - **A state automation cannot return from** (#9): before adding a state, ask which
   code path selects it. `claimed` was selected by nothing, so a claim left by a dead
   process was indistinguishable from a claim being worked on.
+- **Configuration with no reader** (#10): a field parsed from a config file and never
+  used is silence, not a default. Test the EFFECT of a setting (a file that must exist,
+  a number that must appear), because a test that asserts the object was passed along
+  passes whether or not anything downstream looks at it.
