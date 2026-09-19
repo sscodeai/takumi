@@ -41,6 +41,7 @@ export const EVENT_KINDS = [
   'agent.started',
   'agent.finished',
   'agent.failed',
+  'agent.retry',
   // Delivery
   'deliver.pushed',
   'deliver.pr_opened',
@@ -51,6 +52,7 @@ export const EVENT_KINDS = [
   'check.failed',
   'review.clean',
   'review.findings',
+  'review.awaiting_human',
   // Merge
   'merge.done',
   'merge.refused',
@@ -61,6 +63,14 @@ export const EVENT_KINDS = [
   // The run itself
   'run.failed',
   'run.retriable',
+  // The pilot tick (one pass over the ready items)
+  'pilot.idle',
+  'pilot.item_selected',
+  'pilot.item_skipped',
+  'pilot.tick_done',
+  // Worktrees
+  'worktree.created',
+  'worktree.pruned',
   // State bootstrap (which labels/statuses the board was missing)
   'bootstrap.reported',
   'bootstrap.applied',

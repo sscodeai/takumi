@@ -123,6 +123,28 @@ export { createGitRunner, unconfiguredGitRunner, gitFailure } from './git-runner
 export type { GitRunner, GitResult, GitRunnerOptions } from './git-runner.js';
 export { renderRunMarker, parseRunMarkers, hasRunMarker } from './run-marker.js';
 
+// The pilot: one tick of an unattended runner, and the worktrees it uses.
+export { runPilotTick, pilotRunId } from './pilot.js';
+export type { PilotPolicy, PilotTickDeps, PilotTickOutcome, PilotTickResult } from './pilot.js';
+export {
+  createTaskWorktree,
+  currentBranch,
+  currentHead,
+  pruneTaskWorktrees,
+  readFrozenBase,
+  removeTaskWorktree,
+  resolveRef,
+  worktreeBranchName,
+  worktreeDirName,
+} from './worktree.js';
+export type {
+  PruneOptions,
+  PruneResult,
+  WorktreeHandle,
+  WorktreeManagerOptions,
+  WorktreeRequest,
+} from './worktree.js';
+
 // The delivery loop: claim -> agent -> deliver -> review -> merge, in order.
 export { runDeliveryLoop } from './delivery-loop.js';
 export type {

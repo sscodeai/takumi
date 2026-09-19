@@ -64,7 +64,16 @@ export interface ReviewContext {
   changedFiles: string[];
 }
 
-export type ReviewOutcome = { verdict: 'clean' } | { verdict: 'findings'; note?: string };
+export type ReviewOutcome =
+  | { verdict: 'clean' }
+  | { verdict: 'findings'; note?: string }
+  /**
+   * The change is ready but a HUMAN has not approved it yet (orbi's human review).
+   * Deliberately distinct from `findings`: waiting is not a defect, so it must not
+   * consume a review round, must not move the item to `fix_needed`, and must not
+   * merge. The item stays in review for a later tick.
+   */
+  | { verdict: 'awaiting-human'; note?: string };
 
 export interface DeliveryLoopHooks {
   /**
@@ -85,7 +94,7 @@ export interface LoopStep {
   at: string;
 }
 
-export type DeliveryLoopOutcome = 'merged' | 'blocked' | 'retriable' | 'not_claimed' | 'busy';
+export type DeliveryLoopOutcome = 'merged' | 'blocked' | 'retriable' | 'not_claimed' | 'busy' | 'awaiting_review';
 
 export interface DeliveryLoopResult {
   outcome: DeliveryLoopOutcome;
@@ -318,6 +327,25 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
           ? []
           : await hooks.changedFiles({ worktree: plan.worktree, baseSha: plan.baseSha });
       const review = await hooks.review({ round, pr, headSha: pr.headSha, changedFiles });
+      if (review.verdict === 'awaiting-human') {
+        events.emit({
+          kind: 'review.awaiting_human',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          pr: pr.number,
+          message: `round ${round + 1}: waiting for a human${review.note === undefined ? '' : ` — ${review.note}`}`,
+          fields: { round, head: pr.headSha },
+        });
+        record('review', `round ${round + 1}: awaiting a human${review.note === undefined ? '' : ` — ${review.note}`}`);
+        return {
+          outcome: 'awaiting_review',
+          itemId: plan.itemId,
+          pr,
+          rounds,
+          steps,
+          error: review.note ?? 'waiting for a human approval',
+        };
+      }
       events.emit({
         kind: review.verdict === 'clean' ? 'review.clean' : 'review.findings',
         runId: plan.runId,
