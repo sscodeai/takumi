@@ -68,6 +68,7 @@ class LoopBoard implements TaskBoardProvider {
       atomicClaim: true,
       canBootstrapStates: true,
       canCreateWork: true,
+      canTextSearch: true,
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
   }

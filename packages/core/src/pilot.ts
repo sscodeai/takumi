@@ -18,6 +18,7 @@
  * NOT a defect, so it does not consume a review round.
  */
 
+import { assertBoardCapability } from './task-board.js';
 import type { BoardWorkItem, TaskBoardProvider } from './task-board.js';
 import type { DeliveryProvider, PullRequestRef } from './delivery.js';
 import {
@@ -55,6 +56,16 @@ export interface PilotPolicy {
   progressIntervalSeconds?: number;
   /** File a work item when the checks stay red after every fix round. Default false. */
   fileIssueOnExhaustedChecks?: boolean;
+  /**
+   * Restrict a tick to items matching this text (an epic, a milestone, a component).
+   *
+   * The tick refuses to START when the board cannot search rather than ignoring the term:
+   * a scope that is silently dropped means the runner works on the items the operator
+   * excluded, which is the one failure mode a scope filter exists to prevent. The sweep
+   * over in-flight items is deliberately NOT scoped — tidying a stranded item is not work,
+   * and leaving it stranded because it fell outside today's scope would be worse.
+   */
+  scopeQuery?: string;
   /**
    * Hand items left behind by a run that stopped back to a human, instead of leaving
    * them claimed and invisible forever (ADR-009's known limit).
@@ -210,7 +221,15 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
   }
 
   // --- 1. what is ready? ------------------------------------------------------
-  const ready = await deps.board.listWork({ states: ['ready'] });
+  if (policy.scopeQuery !== undefined) {
+    // Fail before doing anything: an unhonourable scope is a configuration error, not a
+    // reason to quietly process the whole board.
+    assertBoardCapability(deps.board, 'canTextSearch');
+  }
+  const ready = await deps.board.listWork({
+    states: ['ready'],
+    ...(policy.scopeQuery === undefined ? {} : { query: policy.scopeQuery }),
+  });
   if (ready.length === 0) {
     events.emit({ kind: 'pilot.idle', runId: 'pilot000', message: 'no ready work' });
     return { outcome: 'idle', detail: 'no ready work' };

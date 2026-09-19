@@ -44,6 +44,7 @@ class ProbeProvider implements TaskBoardProvider {
     private readonly opts: {
       id?: string;
       breakSilentReclaim?: boolean;
+      breakTextSearch?: boolean;
       breakSilentCommentUpdate?: boolean;
       caps?: Omit<Partial<BoardCapabilities>, 'delivery'> & { delivery?: Partial<BoardCapabilities['delivery']> };
     } = {},
@@ -70,6 +71,7 @@ class ProbeProvider implements TaskBoardProvider {
     atomicClaim: true,
     canBootstrapStates: true,
     canCreateWork: true,
+    canTextSearch: true,
     delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
   };
 
@@ -117,7 +119,18 @@ class ProbeProvider implements TaskBoardProvider {
     return entry;
   }
 
-  async listWork(query?: BoardWorkQuery): Promise<BoardWorkItem[]> {
+  async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
+    if (query.query !== undefined && !this.opts.breakTextSearch) {
+      const needle = query.query.toLowerCase();
+      return [...this.items.values()]
+        .map((entry) => entry.item)
+        .filter((item) => `${item.title}\n${item.body}`.toLowerCase().includes(needle))
+        .filter((item) => query.states === undefined || query.states.includes(item.state));
+    }
+    if (query.query !== undefined) {
+      // A probe that cannot search must FAIL, which is what the suite asserts.
+      throw new BoardUnsupportedError('canTextSearch', this.metadata().id);
+    }
     const limit = query?.limit ?? Number.POSITIVE_INFINITY;
     return [...this.items.values()].slice(0, limit).map((e) => e.item);
   }

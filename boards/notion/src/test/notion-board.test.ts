@@ -102,13 +102,24 @@ function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean; c
       return json(databasePayload(columnOptions, opts.statusColumnType === true ? 'status' : 'select'));
     }
     if (req.method === 'POST' && path === `/databases/${DB_ID}/query`) {
-      // TWO filter shapes reach this route: the column filter `listWork` builds, and the
-      // machine-property `contains` filter `createWork` searches with.
+      // THREE filter shapes reach this route: the column filter `listWork` builds, the
+      // machine-property `rich_text contains` filter `createWork` searches with, and the
+      // `title contains` scope `listWork` adds when the caller passes a `query` (wrapped
+      // together with the column filter in one `and`, exactly as Notion documents it).
       const filter = body['filter'];
       const contains = richTextContains(filter);
+      const titleTerm = titleContains(filter);
       const wanted = optionsFromFilter(filter);
       const results = pages.filter((p) => {
         if (contains !== undefined) return propertyText(p, contains.property).includes(contains.value);
+        // `title contains` searches the TITLE property only — which is exactly the
+        // restriction the adapter declares in `capabilities().canTextSearch`.
+        if (
+          titleTerm !== undefined &&
+          !propertyTitle(p, titleTerm.property).toLowerCase().includes(titleTerm.value.toLowerCase())
+        ) {
+          return false;
+        }
         if (wanted.length === 0) return true;
         const column = p.properties['Status'] as { select?: { name?: string }; status?: { name?: string } } | undefined;
         const name = column?.select?.name ?? column?.status?.name;
@@ -186,10 +197,47 @@ function richTextContains(filter: unknown): { property: string; value: string } 
   return { property, value: condition.contains };
 }
 
+/**
+ * Walk a Notion filter, `and`/`or` compounds included, visiting every leaf condition.
+ *
+ * The walk is needed because the adapter nests its column filter WHOLE inside an `and`
+ * when a text scope is present, so a stand-in that only read the top level would model a
+ * board the adapter does not talk to.
+ */
+function walkFilter(filter: unknown, visit: (condition: Record<string, unknown>) => void): void {
+  if (filter === undefined || filter === null || typeof filter !== 'object') return;
+  const f = filter as Record<string, unknown>;
+  for (const key of ['and', 'or']) {
+    const parts = f[key];
+    if (Array.isArray(parts)) for (const part of parts) walkFilter(part, visit);
+  }
+  visit(f);
+}
+
+/** The `title contains` condition of a query filter, wherever it sits, when that is the shape. */
+function titleContains(filter: unknown): { property: string; value: string } | undefined {
+  let found: { property: string; value: string } | undefined;
+  walkFilter(filter, (condition) => {
+    if (found !== undefined) return;
+    const property = condition['property'];
+    const title = condition['title'] as { contains?: unknown } | undefined;
+    if (typeof property === 'string' && typeof title?.contains === 'string') {
+      found = { property, value: title.contains };
+    }
+  });
+  return found;
+}
+
 /** The text a page carries in one rich_text property, in Notion's READ shape. */
 function propertyText(page: SimPage, property: string): string {
   const value = page.properties[property] as { rich_text?: Array<{ plain_text?: string }> } | undefined;
   return plainText(value?.rich_text);
+}
+
+/** The text a page carries in its TITLE property, in Notion's READ shape. */
+function propertyTitle(page: SimPage, property: string): string {
+  const value = page.properties[property] as { title?: Array<{ plain_text?: string }> } | undefined;
+  return plainText(value?.title);
 }
 
 /** Notion answers a select-typed column with a `status` value when asked to. */
@@ -236,13 +284,14 @@ function json(payload: unknown): BoardHttpResponse {
 }
 
 function optionsFromFilter(filter: unknown): string[] {
-  if (filter === undefined || filter === null || typeof filter !== 'object') return [];
-  const f = filter as Record<string, unknown>;
-  if (Array.isArray(f['or'])) return (f['or'] as unknown[]).flatMap(optionsFromFilter);
-  const selectName = (f['select'] as { equals?: string } | undefined)?.equals;
-  if (selectName !== undefined) return [selectName];
-  const statusName = (f['status'] as { equals?: string } | undefined)?.equals;
-  return statusName === undefined ? [] : [statusName];
+  const names: string[] = [];
+  walkFilter(filter, (condition) => {
+    const selectName = (condition['select'] as { equals?: string } | undefined)?.equals;
+    if (selectName !== undefined) names.push(selectName);
+    const statusName = (condition['status'] as { equals?: string } | undefined)?.equals;
+    if (statusName !== undefined) names.push(statusName);
+  });
+  return names;
 }
 
 function provider(sim: ReturnType<typeof notionSimulator>, extra: Record<string, unknown> = {}) {
@@ -314,6 +363,11 @@ test('NotionBoardProvider: shared task-board contract suite', async () => {
   // The suite files a page of its own: `canCreateWork: true` is a promise, and the hard
   // half of it (one page per idempotency key, claimable afterwards) is checked there.
   assert.ok(out.notes.some((n) => n.startsWith('createWork: PASS')), out.notes.join('\n'));
+  // The suite searches FOR REAL: it files a probe whose TITLE carries a distinctive term,
+  // requires the adapter to find it, then requires a term nothing carries to find nothing.
+  // That pair is what proves the scope is applied rather than quietly dropped — and on this
+  // board it is answered by the title filter the adapter adds (`canTextSearch: true`).
+  assert.ok(out.notes.some((n) => n.startsWith('query: PASS')), out.notes.join('\n'));
 });
 
 test('capabilities: the delivery claims are all false and the gates are honest', () => {
@@ -326,6 +380,11 @@ test('capabilities: the delivery claims are all false and the gates are honest',
   assert.equal(caps.machineReadableState, true);
   assert.equal(caps.atomicClaim, false);
   assert.equal(caps.canCreateWork, true, 'a database row is creatable, so a failure can be filed');
+  assert.equal(
+    caps.canTextSearch,
+    true,
+    'the adapter can filter the title property — narrower than everything, and the class doc says so',
+  );
 });
 
 test('request shapes: listWork queries the database, getWork reads the page', async () => {
@@ -361,6 +420,79 @@ test('request shapes: listWork sends an `or` filter for several states', async (
       ],
     },
   });
+});
+
+// --- listWork: the free-text scope is a TITLE filter, and nothing wider -----
+
+test('listWork: a text scope is a TITLE filter — a term the page carries elsewhere is not a hit', async () => {
+  const epic = makePage('page-epic', 'ready');
+  epic.properties['Name'] = title('Epic alpha takuepicalpha: ship the intake');
+  const other = makePage('page-other', 'ready');
+  // The SAME term, carried by the page's machine property instead of its title. Notion
+  // lets this adapter filter a TITLE and offers no search over page bodies (or over other
+  // properties), so this page must NOT come back: the declared capability is narrower than
+  // "everything", and a caller must be able to rely on WHICH text was searched.
+  other.properties['Takumi State'] = rich('notes about takuepicalpha live over here');
+  const sim = notionSimulator([epic, other]);
+  const board = provider(sim);
+
+  // (1) the scope REACHES the query body, ANDed with the column filter in one `and`.
+  const hit = await board.listWork({ states: ['ready'], query: 'takuepicalpha' });
+  assert.equal(sim.requests[0]?.method, 'POST');
+  assert.equal(sim.requests[0]?.url, `https://api.notion.com/v1/databases/${DB_ID}/query`);
+  assert.deepEqual(sim.requests[0]?.body, {
+    page_size: 100,
+    filter: {
+      and: [
+        { property: 'Status', select: { equals: 'ready' } },
+        { property: 'Name', title: { contains: 'takuepicalpha' } },
+      ],
+    },
+  });
+  assert.deepEqual(hit.map((i) => i.id), ['page-epic'], 'the item whose TITLE carries the term is returned');
+
+  // (2) a term NOTHING carries returns nothing — and, just as important, the column filter
+  // was not quietly dropped either.
+  const miss = await board.listWork({ states: ['ready'], query: 'takunothingcarriesthis' });
+  assert.deepEqual(sim.requests[1]?.body, {
+    page_size: 100,
+    filter: {
+      and: [
+        { property: 'Status', select: { equals: 'ready' } },
+        { property: 'Name', title: { contains: 'takunothingcarriesthis' } },
+      ],
+    },
+  });
+  assert.deepEqual(miss, [], 'a term no page title carries must find nothing, never the whole column');
+
+  // (3) the column scope survives beside the text scope: an `or` over states stays intact
+  // inside the `and`, so scoping by BOTH state and text asks one question, once.
+  const both = await board.listWork({ states: ['ready', 'claimed'], query: 'takuepicalpha' });
+  assert.deepEqual(sim.requests[2]?.body, {
+    page_size: 100,
+    filter: {
+      and: [
+        {
+          or: [
+            { property: 'Status', select: { equals: 'ready' } },
+            { property: 'Status', select: { equals: 'claimed' } },
+          ],
+        },
+        { property: 'Name', title: { contains: 'takuepicalpha' } },
+      ],
+    },
+  });
+  assert.deepEqual(both.map((i) => i.id), ['page-epic']);
+
+  // (4) a BLANK term sends NO text filter at all: `title.contains ''` would match every
+  // page — a scope that looks applied and is not, which is the silent widening this contract
+  // forbids. The request is byte-identical to an unscoped one.
+  await board.listWork({ query: '   ' });
+  assert.deepEqual(sim.requests[3]?.body, {
+    page_size: 100,
+    filter: { property: 'Status', select: { equals: 'ready' } },
+  });
+  assert.equal(board.capabilities().canTextSearch, true);
 });
 
 // --- createWork: filing a failure as work, exactly once ---------------------

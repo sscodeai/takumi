@@ -222,10 +222,24 @@ export class JiraBoardProvider implements TaskBoardProvider {
       // create is sent (a label is not text-searchable; a property is not searchable
       // at all) — see `createWork`.
       canCreateWork: true,
+      // `POST /rest/api/3/search` takes the WHOLE filter as one JQL query, so a
+      // free-text scope is just another clause in the query this adapter already
+      // sends: one round trip, no client-side intersection that would only be as
+      // wide as the first page fetched.
+      canTextSearch: true,
       delivery: { canOpenPullRequest: false, canRunChecks: false, canMerge: false },
     };
   }
 
+  /**
+   * Issues in the requested states, and (with a `query`) in the caller's text scope.
+   *
+   * The scope is applied by the BOARD, in the same JQL the state filter travels in:
+   * Jira's own text index decides what the words mean, which is exactly why a caller
+   * can say "only this epic" without takumi inventing an epic model. `scopedJql`
+   * refuses a term that would break the query rather than sending a search whose
+   * meaning nobody can predict (see `textScopeClause`).
+   */
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
     const states: BoardWorkItemState[] = query.states === undefined ? ['ready'] : [...query.states];
     const wanted = new Set(states);
@@ -235,7 +249,7 @@ export class JiraBoardProvider implements TaskBoardProvider {
         method: 'POST',
         url: `${this.baseUrl}${this.searchPath}`,
         body: {
-          jql: this.scopedJql(states),
+          jql: this.scopedJql(states, query.query),
           fields: ['summary', 'description', 'status', 'labels', 'assignee', 'updated'],
           maxResults: query.limit ?? 100,
         },
@@ -693,12 +707,21 @@ export class JiraBoardProvider implements TaskBoardProvider {
       : `project = ${this.projectKey} AND statusCategory != Done ORDER BY created ASC`;
   }
 
-  /** Narrow the JQL to the mapped status names of the requested states. */
-  private scopedJql(states: BoardWorkItemState[]): string {
+  /**
+   * Narrow the JQL to the mapped status names of the requested states, plus — when the
+   * caller gave one — their free-text scope.
+   *
+   * Both clauses ride in the SAME query this adapter already posts to `/search`: Jira
+   * evaluates the whole JQL server-side and answers once, so a state filter and a text
+   * scope cost one round trip and one answer (intersecting two listings here would only
+   * ever be as complete as the first page of whichever list was fetched).
+   */
+  private scopedJql(states: BoardWorkItemState[], term?: string): string {
+    const clauses: string[] = [];
     const names = states.map((state) => this.statusMap[state]).filter((name) => name.length > 0);
-    const quoted = names.map((name) => `"${name.replace(/"/g, '\\"')}"`).join(', ');
-    if (quoted.length === 0) return this.jql;
-    return `${this.jql.includes(' AND ') || this.jql.includes(' WHERE ') ? this.jql : this.jql} AND status in (${quoted})`;
+    if (names.length > 0) clauses.push(`status in (${names.map(jqlLiteral).join(', ')})`);
+    if (term !== undefined) clauses.push(textScopeClause(term));
+    return withJqlClauses(this.jql, clauses);
   }
 
   /** An issue's delivery state, read from its workflow status. */
@@ -770,6 +793,72 @@ function createMarkerFor(key: string): string {
   } catch (e) {
     throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
   }
+}
+
+/**
+ * A JQL string literal. Identical escaping to what this adapter already sent for status
+ * names, factored out so the status clause and the text clause cannot drift apart.
+ */
+function jqlLiteral(value: string): string {
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * The `text ~ "<term>"` clause for a caller's free-text scope.
+ *
+ * WHAT `text ~` SEARCHES: Jira's own text index over the issue — summary, description
+ * and comments — which is the same index `createWork`'s dedupe search uses. That is
+ * deliberately the board's vocabulary, not takumi's: a caller can scope a tick to the
+ * words their epic/milestone actually carries, and this adapter never has to invent an
+ * epic model to do it.
+ *
+ * WHY A TERM IS REFUSED RATHER THAN ESCAPED, and this is the whole of the injection
+ * story: a JQL string literal ends at the next double quote, and the escape rules
+ * inside one are not stable across Jira versions (a backslash is an escape in some and
+ * a literal in others, while a bare quote is never one). Guessing wrong has only two
+ * outcomes and both are unacceptable — a term that closes the literal and injects JQL
+ * of its own, which is exactly the scope widening the operator asked to avoid, or a
+ * query Jira rejects with a syntax error, which fails EVERY list rather than just this
+ * one. So `"` and `\` are rejected with the fix named, and no clause this function
+ * returns can ever end its own literal. An empty term is rejected for the same
+ * fail-closed reason: `query: ''` names no scope at all, and quietly searching for
+ * everything is the one thing a scope must never do.
+ */
+function textScopeClause(term: string): string {
+  if (term.trim().length === 0) {
+    throw new BoardError(
+      'precondition',
+      'a text scope must contain at least one non-whitespace character: an empty term names no scope, ' +
+        'and dropping it would widen the search to every issue the caller meant to exclude',
+    );
+  }
+  if (term.includes('"') || term.includes('\\')) {
+    throw new BoardError(
+      'precondition',
+      `a text scope must not contain a double quote or a backslash, so ${JSON.stringify(term)} cannot be sent as JQL: ` +
+        'inside a JQL string literal either character can end the literal (injecting the rest of the term as JQL) or is ' +
+        'an escape whose meaning depends on the Jira version, and this adapter will not guess which — ' +
+        'search for the words without them',
+    );
+  }
+  return `text ~ ${jqlLiteral(term)}`;
+}
+
+/**
+ * Add `AND` clauses to a JQL string, BEFORE its `ORDER BY` when it has one.
+ *
+ * WHY NOT SIMPLY APPEND: `ORDER BY` terminates a JQL query, so a clause appended after
+ * it is a syntax error and Jira rejects the whole search — the caller gets an auth-shaped
+ * failure for a filter they cannot see. The default JQL carries its own `ORDER BY`
+ * (operators supply one too), so the clauses are inserted in front of it and the ordering
+ * that was asked for is preserved.
+ */
+function withJqlClauses(jql: string, clauses: readonly string[]): string {
+  if (clauses.length === 0) return jql;
+  const extra = clauses.join(' AND ');
+  const orderBy = / order by /i.exec(jql);
+  if (orderBy === null) return `${jql} AND ${extra}`;
+  return `${jql.slice(0, orderBy.index)} AND ${extra}${jql.slice(orderBy.index)}`;
 }
 
 /** Flatten a Jira ADF document (or a legacy string) into plain text. */

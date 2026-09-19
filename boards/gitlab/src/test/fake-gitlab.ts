@@ -282,7 +282,8 @@ export class FakeGitLab {
 
     if (segments[2] !== 'issues') return null;
 
-    // GET /issues supports `state`, `labels` (comma-separated = AND) and `per_page`.
+    // GET /issues supports `state`, `labels` (comma-separated = AND), `search`
+    // (free text over title + description) and `per_page`.
     if (segments.length === 3) {
       if (req.method === 'GET') return json(200, this.listIssues(url));
       // GitLab answers issue creation with 201.
@@ -340,9 +341,8 @@ export class FakeGitLab {
     return [...this.issues.values()]
       .filter((issue) => state === 'all' || issue.state === state)
       .filter((issue) => wanted.every((label) => issue.labels.includes(label)))
-      // GitLab's `search` greps the title and the description (case-insensitively).
-      // It matches TEXT, not meaning: an issue that merely mentions a create key is
-      // returned too, which is exactly why the adapter confirms a hit with the marker.
+      // GitLab's `search` greps the title and the description (case-insensitively);
+      // this is the one history-free scope the adapter forwards rather than filters.
       .filter((issue) => search === null || matchesSearch(issue, search))
       .slice(0, Number.isInteger(perPage) && perPage > 0 ? perPage : 20)
       .map((issue) => this.issueJson(issue));
@@ -496,10 +496,24 @@ function splitLabels(value: unknown): string[] {
     .filter((label) => label.length > 0);
 }
 
-/** GitLab's `search` on issues: a case-insensitive substring of title or description. */
+/**
+ * GitLab's `search` on issues, as the Free-tier backend behaves: EVERY whitespace-
+ * separated term must appear (case-insensitively) in the title or the description.
+ *
+ * Two things this deliberately keeps faithful:
+ *   - it is a TEXT match, not a meaning match, so an issue that merely MENTIONS a
+ *     create key in prose is returned too — which is exactly why `findByCreateKey`
+ *     confirms a hit with `createKeyOf` instead of trusting it;
+ *   - a term NOTHING carries returns nothing, which is what makes a scope a scope:
+ *     the shared contract suite checks a caller's term is not silently ignored.
+ */
 function matchesSearch(issue: FakeIssue, term: string): boolean {
-  const needle = term.toLowerCase();
-  return issue.title.toLowerCase().includes(needle) || issue.description.toLowerCase().includes(needle);
+  const haystack = `${issue.title}\n${issue.description}`.toLowerCase();
+  const words = term
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+  return words.length > 0 && words.every((word) => haystack.includes(word));
 }
 
 function cloneRequest(req: BoardHttpRequest): BoardHttpRequest {

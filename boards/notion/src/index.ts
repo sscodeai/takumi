@@ -103,6 +103,15 @@ function richTextRun(content: string): Record<string, unknown> {
  *     API this adapter does not speak). A caller that must record detail has to put
  *     it in the title or file on a board that has a body — the adapter says so here
  *     rather than quietly dropping the text.
+ *   - a `BoardWorkQuery.query` SEARCHES TITLES ONLY (`canTextSearch: true`): Notion
+ *     can filter a title property with `title.contains`, but it exposes NO search over
+ *     page BODIES, and this adapter does not read page content at all (previous
+ *     bullet). A caller scoping a tick to an epic must therefore carry that epic in
+ *     the item's TITLE or the scope will not find it — and the capability's own doc
+ *     demands exactly this disclosure: say what is searched when it is narrower than
+ *     "everything". The search is not silently widened to compensate, because a scope
+ *     that quietly means less than the caller asked for is how a runner works on
+ *     items the operator excluded.
  *
  * The run state record keeps the SAME versioned grammar as every other adapter
  * (renderBoardStateRecord / parseBoardStateRecord); only its storage differs —
@@ -266,17 +275,35 @@ export class NotionBoardProvider implements TaskBoardProvider {
       // Pages ARE creatable, and that is a different thing entirely: a failure has to
       // become work somewhere, and a database row is that somewhere on this board.
       canCreateWork: true,
+      // True, and NARROWER than "everything": this searches the TITLE property only.
+      // Notion's query filter can do `title.contains`, and there is no page-body search
+      // to offer (the class doc says so where a caller will read it) — declaring it
+      // any other way would promise a scope this board cannot apply.
+      canTextSearch: true,
       delivery: { canOpenPullRequest: false, canRunChecks: false, canMerge: false },
     };
   }
 
+  /**
+   * Query the database for work.
+   *
+   * `query.states` becomes the column filter (one condition, or an `or` over several);
+   * `query.query` adds a TITLE filter (`title.contains`) and nothing more, because a
+   * title is the only text Notion lets this adapter search (see the class doc). A blank
+   * term is treated as absent — see {@link textSearchTerm}. `query.labels` is applied
+   * locally: a `multi_select` AND is not one of the filter shapes this adapter keeps to.
+   */
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
     const states: readonly BoardWorkItemState[] = query.states ?? ['ready'];
     const body: Record<string, unknown> = { page_size: query.limit ?? 100 };
-    const filter = buildColumnFilter(
+    const columnFilter = buildColumnFilter(
       this.columnProperty,
       states.map((s) => this.stateMap[s]),
     );
+    const term = textSearchTerm(query.query);
+    const titleFilter =
+      term === undefined ? undefined : { property: this.titleProperty, title: { contains: term } };
+    const filter = combineFilters(columnFilter, titleFilter);
     if (filter !== undefined) body['filter'] = filter;
 
     const result = await requestBoardJson<{ results?: NotionPage[] }>(
@@ -762,6 +789,42 @@ function buildColumnFilter(property: string, options: string[]): Record<string, 
   if (options.length === 0) return undefined;
   const conditions = options.map((name) => ({ property, select: { equals: name } }));
   return conditions.length === 1 ? conditions[0] : { or: conditions };
+}
+
+/**
+ * The term to send as Notion's `title.contains`, or `undefined` for "no text scope".
+ *
+ * A blank (whitespace-only) term is treated as ABSENT rather than turned into
+ * `contains: ''`: an empty `contains` is not a narrower scope, it matches every page —
+ * a filter that looks applied and is not, which is the silent widening this contract
+ * forbids. A real term is sent as written; Notion's `contains` is case-insensitive and
+ * substring-based, so the board, not this adapter, decides how it matches.
+ */
+function textSearchTerm(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+}
+
+/**
+ * Combine the column scope with an optional TITLE scope into ONE Notion filter.
+ *
+ * Notion needs at least two conditions for a compound filter (the same rule as `or`), so
+ * a single condition is sent BARE — which also keeps a plain `listWork()` request
+ * byte-identical to what it was before search existed, so adding a scope cannot change
+ * what an unscoped call asks for.
+ *
+ * The column filter is nested whole, so an `or` over several states stays intact inside
+ * the `and`: `{and: [{or: [...states]}, {title: ...}]}` is the shape Notion documents.
+ */
+function combineFilters(
+  ...filters: Array<Record<string, unknown> | undefined>
+): Record<string, unknown> | undefined {
+  const present = filters.filter((filter): filter is Record<string, unknown> => filter !== undefined);
+  if (present.length === 0) return undefined;
+  // `present` may hold exactly one condition: send it, not a one-element `and`.
+  if (present.length === 1) return present[0];
+  return { and: present };
 }
 
 /** The default transport: Notion's REST API over curl. */

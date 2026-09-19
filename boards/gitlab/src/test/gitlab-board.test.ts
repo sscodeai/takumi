@@ -152,6 +152,13 @@ test('GitLabBoardProvider: passes the shared task-board contract suite (injected
     out.notes.some((note) => note.startsWith('createWork: PASS')),
     out.notes.join('\n'),
   );
+  // The suite searches FOR REAL now: it files a probe whose title carries a distinctive
+  // term and requires the adapter to find it, then requires a term nothing carries to
+  // find nothing. An adapter that ignored `query` could not pass that pair.
+  assert.ok(
+    out.notes.some((note) => note.startsWith('query: PASS')),
+    out.notes.join('\n'),
+  );
 });
 
 test('GitLabBoardProvider: the exact request shape of every port method', async () => {
@@ -286,11 +293,76 @@ test('GitLabBoardProvider: the exact request shape of every port method', async 
   assert.deepEqual(read, { ...run2, note: 'second write' }, 'the newest trusted record is the one read back');
 });
 
+// --- listWork: the free-text scope is GitLab's search, not a local filter ----
+
+test('listWork: a text scope reaches the request as GitLab `search`, and a term nothing carries finds nothing', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  fake.seedIssue({
+    iid: 1,
+    title: 'Epic alpha: ship the intake',
+    description: 'the milestone this belongs to is takuepicalpha',
+    labels: ['takumi-ready'],
+  });
+  fake.seedIssue({ iid: 2, title: 'Unrelated chore', description: 'nothing to see here', labels: ['takumi-ready'] });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+
+  // (1) the term REACHES the request. This is the whole point of the capability: the
+  // BOARD searches, so a scope finds work beyond the first page too — filtering this
+  // page locally would only ever find what `per_page` had already returned.
+  fake.clear();
+  const hit = await provider.listWork({ states: ['ready'], query: 'takuepicalpha' });
+  assert.deepEqual(fake.calls(), [`GET ${ISSUES}?state=opened&per_page=100&search=takuepicalpha`]);
+  assert.deepEqual(hit.map((item) => item.id), ['1'], 'the item whose text carries the term is returned');
+
+  // (2) a term NOTHING carries returns nothing — and, just as important, it did not
+  // silently degrade into "no filter at all" (the failure mode the shared suite checks).
+  fake.clear();
+  const miss = await provider.listWork({ states: ['ready'], query: 'takunothingcarriesthis' });
+  assert.deepEqual(fake.calls(), [`GET ${ISSUES}?state=opened&per_page=100&search=takunothingcarriesthis`]);
+  assert.deepEqual(miss, [], 'a term no issue carries must find nothing, never everything');
+
+  // (3) the search reads the DESCRIPTION as well as the title: GitLab greps both, so a
+  // scope does not depend on where the operator put the epic's name.
+  fake.clear();
+  const inBody = await provider.listWork({ query: 'milestone' });
+  assert.deepEqual(fake.calls(), [`GET ${ISSUES}?state=opened&per_page=100&search=milestone`]);
+  assert.deepEqual(inBody.map((item) => item.id), ['1']);
+
+  // (4) several terms are an AND, and it is GitLab's to apply: no single issue carries
+  // both of these, so a hit would mean the adapter had loosened the operator's scope.
+  assert.deepEqual(
+    await provider.listWork({ query: 'takuepicalpha unrelated' }),
+    [],
+    'every term must appear in the ONE item; a term only another issue carries is not a hit',
+  );
+
+  // (5) the scope composes with the label filter, and the local state/limit filters
+  // still apply to what came back.
+  fake.clear();
+  const scoped = await provider.listWork({ labels: ['takumi-ready'], limit: 1, query: 'Epic alpha' });
+  assert.deepEqual(fake.calls(), [
+    `GET ${ISSUES}?state=opened&per_page=100&labels=takumi-ready&search=Epic%20alpha`,
+  ]);
+  assert.deepEqual(scoped.map((item) => item.id), ['1']);
+
+  // (6) a BLANK term is absent, not a widened search: no `search=` is sent, so the
+  // request means exactly what an unscoped call means instead of looking filtered.
+  fake.clear();
+  await provider.listWork({ query: '   ' });
+  assert.deepEqual(fake.calls(), [`GET ${ISSUES}?state=opened&per_page=100`]);
+
+  assert.equal(provider.capabilities().canTextSearch, true);
+});
+
 // --- createWork: filing a failure as work, exactly once ---------------------
 
-/** The create-search URL the adapter uses: the KEY, all states, the API's page ceiling. */
+/**
+ * The create-search URL the adapter uses: all states, the API's page ceiling, and the
+ * KEY as GitLab's `search` parameter. It is built by the SAME URL builder as the work
+ * list (one shape to keep correct), so the parameter order here is that builder's.
+ */
 function createSearch(key: string): string {
-  return `${ISSUES}?search=${encodeURIComponent(key)}&state=all&per_page=100`;
+  return `${ISSUES}?state=all&per_page=100&search=${encodeURIComponent(key)}`;
 }
 
 test('createWork: the exact create request, the hidden marker, and a second call that files nothing', async () => {
@@ -653,6 +725,7 @@ test('capabilities(): GitLab declares its real limits instead of an idealised bo
   assert.equal(caps.trustedAuthorFilter, false, 'no allowlist was configured');
   assert.equal(caps.canBootstrapStates, true, 'GitLab labels are creatable through the API, so the adapter says it can');
   assert.equal(caps.canCreateWork, true, 'GitLab issues are creatable, so a failure can be filed as work');
+  assert.equal(caps.canTextSearch, true, 'the issue list takes GitLab\'s own `search` parameter, so free text is the board\'s job');
   assert.deepEqual(caps.delivery, { canOpenPullRequest: true, canRunChecks: true, canMerge: true });
   assert.equal(provider.metadata().id, 'gitlab');
 

@@ -79,9 +79,19 @@ function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = []
 
     // Issue filing: the search createWork deduplicates through, and the create itself.
     if (req.method === 'GET' && path === '/search/issues') {
-      const wanted = decodeURIComponent(url.searchParams.get('q') ?? '').replace(/^repo:[^\s]+\s+/, '');
-      const term = wanted.replace(/^"|"$/g, '');
-      return json({ total_count: issues.length, items: issues.filter((i) => (i.body ?? '').includes(term)) });
+      // A real search honours `repo:`/`is:` qualifiers and quoted phrases; this double
+      // strips every qualifier, unquotes what is left, and matches it against the text a
+      // search would look at (title + body). Matching only the body hid a real bug in the
+      // double the first time round.
+      const raw = decodeURIComponent(url.searchParams.get('q') ?? '');
+      // Both call sites quote the phrase the adapter cares about (`"<marker>"`,
+      // `"<user term>"`); qualifiers are everything outside those quotes. Stripping
+      // anything that LOOKS like `word:` would eat the marker itself, which is a colon
+      // after its own prefix — the double has to read the query the way GitHub does.
+      const quoted = /"([^"]*)"/.exec(raw);
+      const term = (quoted?.[1] ?? raw.replace(/(^|\s)[a-z_]+:[^\s]+/gi, ' ')).trim();
+      const hits = issues.filter((i) => `${i.title}\n${i.body ?? ''}`.toLowerCase().includes(term.toLowerCase()));
+      return json({ total_count: hits.length, items: term.length === 0 ? [] : hits });
     }
     if (req.method === 'POST' && /^\/repos\/([^/]+)\/([^/]+)\/issues$/.test(path)) {
       const wanted = (body['labels'] ?? []) as string[];
@@ -91,7 +101,10 @@ function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = []
         return json({ message: 'Validation Failed', errors: [{ field: 'labels', code: 'missing' }] }, 422);
       }
       const number = issues.length === 0 ? 1 : Math.max(...issues.map((i) => i.number)) + 1;
-      const created = issue(number, labels, { body: String(body['body'] ?? ''), title: String(body['title'] ?? '') });
+      // Exactly the labels the REQUEST carried. Using the repository's whole label list
+      // here gave a new issue every label at once, so it resolved to the wrong state and
+      // the scope search could not see it — a simulator bug that hid an adapter behaviour.
+      const created = issue(number, wanted, { body: String(body['body'] ?? ''), title: String(body['title'] ?? '') });
       issues.push(created);
       return json(created, 201);
     }
@@ -520,4 +533,37 @@ test('createWork: an unkeyed call files every time (the key is what dedupes, not
   assert.equal(second.created, true);
   assert.notEqual(first.item.id, second.item.id);
   assert.equal(sim.requests.some((r) => r.url.includes('/search/issues')), false, 'no key means no search');
+});
+
+test('listWork: a text scope goes through search and still honours the state', async () => {
+  const sim = githubSimulator([
+    issue(7, ['takumi-ready'], { title: 'Epic: billing', body: 'part of the billing epic' }),
+    issue(8, ['takumi-ready'], { title: 'Unrelated task', body: 'nothing to do with it' }),
+    issue(9, ['takumi-claimed'], { title: 'Billing follow-up', body: 'also billing' }),
+  ]);
+  const board = provider(sim);
+
+  const hits = await board.listWork({ states: ['ready'], query: 'billing' });
+  assert.deepEqual(hits.map((i) => i.id), ['7'], 'only the ready item whose text carries the term');
+
+  const search = sim.requests.find((r) => r.url.includes('/search/issues'));
+  const query = decodeURIComponent(new URL(search?.url ?? '').searchParams.get('q') ?? '');
+  assert.equal(query, 'repo:acme/widgets is:issue "billing"', 'the repo scope and phrase are the adapter’s job');
+
+  const none = await board.listWork({ states: ['ready'], query: 'nothing-carries-this-term' });
+  assert.deepEqual(none, []);
+});
+
+test('listWork: a scope that is only quotes fails loudly instead of searching for something else', async () => {
+  const sim = githubSimulator([issue(7, ['takumi-ready'])]);
+  const board = provider(sim);
+  await assert.rejects(
+    () => board.listWork({ states: ['ready'], query: '"""' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'precondition');
+      return true;
+    },
+  );
+  assert.equal(sim.requests.some((r) => r.url.includes('/search/issues')), false, 'no query was sent');
 });

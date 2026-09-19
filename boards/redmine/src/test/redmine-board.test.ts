@@ -83,7 +83,12 @@ interface SimIssue {
   updatedOn: string;
   customFields: SimCustomField[];
   journals: SimJournal[];
+  /** The project this issue belongs to; `acme`/1 unless a test seeds a foreign one. */
+  project?: { id: number; identifier: string; name: string };
 }
+
+/** The project every issue of this double belongs to unless a test says otherwise. */
+const SIM_PROJECT = { id: 1, identifier: 'acme', name: 'Acme Inc' } as const;
 
 interface Fault {
   matches: (req: BoardHttpRequest) => boolean;
@@ -130,7 +135,7 @@ function redmineSimulator(seedIssues: SimIssue[]) {
     subject: issue.subject,
     description: issue.description,
     status: { id: issue.statusId, name: statusNameById(issue.statusId) },
-    project: { id: 1, identifier: 'acme', name: 'Acme Inc' },
+    project: issue.project ?? SIM_PROJECT,
     assigned_to: issue.assignee === null ? null : { id: 9, name: issue.assignee },
     updated_on: issue.updatedOn,
     custom_fields: issue.customFields.map((field) => ({ id: field.id, name: field.name, value: field.value })),
@@ -185,7 +190,7 @@ function redmineSimulator(seedIssues: SimIssue[]) {
       const project = url.searchParams.get('project_id');
       const matching = issues
         .filter((issue) => statusParam === '*' || STATUSES.find((s) => s.id === issue.statusId)?.closed !== true)
-        .filter((issue) => project === null || project === 'acme');
+        .filter((issue) => project === null || (issue.project ?? SIM_PROJECT).identifier === project);
       return json({
         issues: matching.slice(offset, offset + limit).map((issue) => serialize(issue)),
         total_count: matching.length,
@@ -220,11 +225,34 @@ function redmineSimulator(seedIssues: SimIssue[]) {
 
     if (req.method === 'GET' && path === '/search.json') {
       // Redmine's full-text search answers issues whose description contains the term.
+      // `open_issues=1` is the documented filter that drops closed issues — the same
+      // "open work" scope `/issues.json?status_id=open` gives the list path — so the
+      // double applies it rather than letting a scoped query quietly return a closed
+      // issue the list path would never return.
       const query = url.searchParams.get('q') ?? '';
-      const hits = issues.filter(
-        (issue) => issue.subject.includes(query) || issue.description.includes(query),
-      );
+      const openOnly = url.searchParams.get('open_issues') === '1';
+      const hits = issues
+        .filter((issue) => !openOnly || STATUSES.find((s) => s.id === issue.statusId)?.closed !== true)
+        // Redmine's search is a full-text search: case-insensitive, over the subject AND
+        // the description. A case-sensitive double made a capitalised subject invisible to
+        // a lowercase term, which is how a real search never behaves.
+        .filter((issue) => {
+          const needle = query.toLowerCase();
+          return (
+            issue.subject.toLowerCase().includes(needle) || issue.description.toLowerCase().includes(needle)
+          );
+        });
       return json({ results: hits.map((issue) => ({ id: issue.id, type: 'issue', title: issue.subject })) });
+    }
+
+    // The documented lookup a scoped search needs to turn a project IDENTIFIER into the
+    // numeric id Redmine's `project_id` really is (`GET /projects/<id-or-identifier>.json`),
+    // and the source of the `project` block every issue is serialized with.
+    const projectPath = /^\/projects\/([^/]+)\.json$/.exec(path);
+    if (req.method === 'GET' && projectPath !== null) {
+      const asked = projectPath[1] ?? '';
+      if (asked !== 'acme' && asked !== '1') return notFound();
+      return json({ project: { id: 1, identifier: 'acme', name: 'Acme Inc', status: 1 } });
     }
 
     const issuePath = /^\/issues\/(\d+)\.json$/.exec(path);
@@ -405,6 +433,16 @@ test('RedmineBoardProvider: shared task-board contract suite over an injected tr
     out.notes.some((note) => note.startsWith('bootstrapStates: PASS (canCreate=false created=0 exists=6 notCreatable=0')),
     out.notes.join('\n'),
   );
+  // The suite drives the free-text scope itself: it files a probe item whose text carries a
+  // distinctive word, requires the adapter to FIND it with `query`, and requires nothing for
+  // a word nothing carries. Both halves only pass if the term really reached Redmine's own
+  // search — and the positive half also proves the candidate read-back: a hit is mapped by
+  // the same reader every other list path uses.
+  assert.ok(out.notes.some((note) => note.includes('canTextSearch=true')), out.notes.join('\n'));
+  assert.ok(
+    out.notes.some((note) => note.startsWith('query: PASS (1 hit(s), no false positive)')),
+    out.notes.join('\n'),
+  );
 });
 
 test('capabilities: no delivery side, trust only when declared, state only with a field', () => {
@@ -422,6 +460,11 @@ test('capabilities: no delivery side, trust only when declared, state only with 
     caps.canBootstrapStates,
     false,
     'Redmine issue statuses are administration data, so this adapter only reports them',
+  );
+  assert.equal(
+    caps.canTextSearch,
+    true,
+    "the issue list has no free-text filter, but PUT /search.json is this instance's own text index",
   );
 
   const withTrust = provider(sim, { trustedAuthors: [BOT] }).capabilities();
@@ -551,6 +594,123 @@ test('listWork: without a project the project_id parameter is simply absent', as
   const board = createRedmineBoardProvider({ baseUrl: BASE, request: sim.request, stateFieldId: STATE_FIELD_ID });
   await board.listWork();
   assert.equal(sim.requests[0]?.url, `${BASE}/issues.json?status_id=open&limit=100&offset=0`);
+});
+
+// --- listWork: the free-text scope ------------------------------------------
+
+test('listWork: a text scope goes through /search.json, then one read per candidate', async () => {
+  const sim = redmineSimulator([
+    makeIssue(101, 'ready', { subject: 'Nebula rollout kickoff' }),
+    makeIssue(102, 'ready', { description: 'please do the nebula thing' }),
+    makeIssue(103, 'ready', { subject: 'unrelated work' }),
+    makeIssue(104, 'claimed', { subject: 'Nebula rollout, continued' }),
+  ]);
+  const board = provider(sim);
+
+  const items = await board.listWork({ states: ['ready'], query: 'nebula' });
+
+  // The whole cost of this scope, on the wire: the search, ONE read per candidate (the
+  // search answers no status, so a hit is not work until it has been read), and the one
+  // project-identifier lookup a slug-configured board needs to place those candidates.
+  assert.deepEqual(
+    sim.requests.map((req) => `${req.method} ${req.url}`),
+    [
+      `GET ${BASE}/search.json?issues=1&open_issues=1&q=nebula&limit=100&offset=0`,
+      `GET ${BASE}/issues/101.json?include=journals,allowed_statuses`,
+      `GET ${BASE}/projects/acme.json`,
+      `GET ${BASE}/issues/102.json?include=journals,allowed_statuses`,
+      `GET ${BASE}/issues/104.json?include=journals,allowed_statuses`,
+    ],
+    'search first, then a read per candidate, and the slug resolved exactly once',
+  );
+  // Redmine matches the term over the subject AND the description, and the STATE filter
+  // still applies — at the point where the state can actually be known: 104 carries the
+  // term but is claimed, 103 is ready but carries nothing.
+  assert.deepEqual(
+    items.map((item) => [item.id, item.state]),
+    [
+      ['101', 'ready'],
+      ['102', 'ready'],
+    ],
+  );
+  assert.deepEqual(items.map((item) => item.title), ['Nebula rollout kickoff', 'Issue 102']);
+});
+
+test('listWork: a term nothing carries returns nothing, not everything', async () => {
+  const sim = redmineSimulator([makeIssue(101, 'ready'), makeIssue(102, 'claimed')]);
+  const board = provider(sim);
+
+  const items = await board.listWork({ states: ['ready'], query: 'takuredminenothingcarriesthis' });
+
+  assert.deepEqual(items, [], 'a term the board does not know means no work, never all work');
+  assert.deepEqual(
+    sim.requests.map((req) => req.url),
+    [`${BASE}/search.json?issues=1&open_issues=1&q=takuredminenothingcarriesthis&limit=100&offset=0`],
+    'the miss is Redmine answering nothing, not this adapter dropping the term — and it read nobody back',
+  );
+});
+
+test('listWork: a scoped search keeps the open-work scope and honours limit', async () => {
+  const sim = redmineSimulator([
+    makeIssue(101, 'ready', { subject: 'Nebula one' }),
+    makeIssue(102, 'ready', { subject: 'Nebula two' }),
+    makeIssue(103, 'Closed', { subject: 'Nebula shipped' }),
+  ]);
+  const board = provider(sim);
+
+  const items = await board.listWork({ states: ['ready'], query: 'Nebula', limit: 1 });
+
+  assert.deepEqual(items.map((item) => item.id), ['101'], 'limit bounds the collection');
+  assert.match(sim.requests[0]?.url ?? '', /&limit=1&/, 'the search page is bounded by the same limit');
+  assert.equal(
+    sim.requests.filter((request) => request.url.includes('/issues/')).length,
+    1,
+    'limit bounds the READS too: a candidate the caller cannot see is not fetched',
+  );
+  // `open_issues=1` is the same open-work scope `status_id=open` gives the list path. Had
+  // the search dropped it, the closed issue 103 would have been read back — and its status
+  // maps to no delivery state, so the scoped query would have failed as a configuration
+  // gap instead of answering with the open work it was asked about.
+  assert.match(sim.requests[0]?.url ?? '', /open_issues=1/);
+});
+
+test('listWork: a scoped search never returns another project\'s issues', async () => {
+  const sim = redmineSimulator([
+    makeIssue(101, 'ready', { subject: 'Nebula ours' }),
+    makeIssue(102, 'ready', {
+      subject: 'Nebula theirs',
+      project: { id: 7, identifier: 'other', name: 'Other Inc' },
+    }),
+  ]);
+  const board = provider(sim);
+
+  const items = await board.listWork({ states: ['ready'], query: 'Nebula' });
+
+  // /search.json is a GLOBAL search — its only documented scope values are
+  // all|my_project|subprojects, with no project-id filter — so the project check is this
+  // adapter's job, exactly as `project_id` does it server-side on the list path.
+  assert.deepEqual(items.map((item) => item.id), ['101'], "another project's issue is not this board's work");
+  assert.deepEqual(
+    sim.requests.filter((request) => request.url.includes('/issues/')).map((request) => request.url),
+    [
+      `${BASE}/issues/101.json?include=journals,allowed_statuses`,
+      `${BASE}/issues/102.json?include=journals,allowed_statuses`,
+    ],
+    'both candidates were READ: the foreign one is checked against the configured project, not assumed away',
+  );
+});
+
+test('listWork: a blank scope is refused, never sent as a search for everything', async () => {
+  const sim = redmineSimulator([makeIssue(101, 'ready')]);
+  const board = provider(sim);
+
+  // Redmine reads a blank `q` as "everything", so this is the one term that would widen
+  // the query instead of narrowing it.
+  await assert.rejects(
+    () => board.listWork({ states: ['ready'], query: '   ' }),
+    boardError('precondition', /non-whitespace/),
+  );
+  assert.deepEqual(sim.requests, [], 'nothing was sent');
 });
 
 test('getWork: one issue, asked for with journals, mapped onto BoardWorkItem', async () => {

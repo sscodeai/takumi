@@ -8,6 +8,7 @@ import {
   acquireSlot,
   assertTransition,
   BoardError,
+  BoardUnsupportedError,
   createEventLog,
   DeliveryError,
   ProviderError,
@@ -43,14 +44,18 @@ const RUN = 'c0ffee01';
 const BASE = 'a'.repeat(40);
 
 class PilotBoard implements TaskBoardProvider {
-  readonly items = new Map<string, { state: BoardWorkItemState; labels: string[]; claim?: string }>();
+  readonly items = new Map<string, { state: BoardWorkItemState; labels: string[]; title?: string; claim?: string }>();
   readonly transitions: string[] = [];
   readonly comments: string[] = [];
   readonly records = new Map<string, BoardStateRecord>();
 
-  constructor(seed: Array<{ id: string; state?: BoardWorkItemState; labels?: string[] }>) {
+  constructor(seed: Array<{ id: string; state?: BoardWorkItemState; labels?: string[]; title?: string }>) {
     for (const entry of seed) {
-      this.items.set(entry.id, { state: entry.state ?? 'ready', labels: entry.labels ?? [] });
+      this.items.set(entry.id, {
+        state: entry.state ?? 'ready',
+        labels: entry.labels ?? [],
+        ...(entry.title === undefined ? {} : { title: entry.title }),
+      });
     }
   }
 
@@ -67,6 +72,7 @@ class PilotBoard implements TaskBoardProvider {
       atomicClaim: true,
       canBootstrapStates: true,
       canCreateWork: true,
+      canTextSearch: true,
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
   }
@@ -75,7 +81,7 @@ class PilotBoard implements TaskBoardProvider {
     if (!entry) throw new BoardError('not_found', `no such item: ${id}`, { item: id });
     return {
       id,
-      title: `Item ${id}`,
+      title: entry.title ?? `Item ${id}`,
       body: '',
       url: `https://board.example/${id}`,
       state: entry.state,
@@ -89,11 +95,19 @@ class PilotBoard implements TaskBoardProvider {
     this.records.set(id, { schema: 1, runId, item: id, reviewRound, updatedAt, baseBranch: 'main' });
   }
 
-  async listWork(query: { states?: readonly BoardWorkItemState[] } = {}): Promise<BoardWorkItem[]> {
+  async listWork(query: { states?: readonly BoardWorkItemState[]; query?: string } = {}): Promise<BoardWorkItem[]> {
     const wanted = query.states ?? (['ready'] as readonly BoardWorkItemState[]);
+    if (query.query !== undefined && !this.capabilities().canTextSearch) {
+      // A board that cannot search refuses, exactly as a real adapter must: the pilot's
+      // assertion is what protects us, and this keeps a double from papering over it.
+      throw new BoardUnsupportedError('canTextSearch', this.metadata().id);
+    }
     return [...this.items.keys()]
       .filter((id) => wanted.includes(this.items.get(id)?.state ?? 'ready'))
-      .map((id) => this.workItem(id));
+      .map((id) => this.workItem(id))
+      .filter((item) =>
+        query.query === undefined ? true : `${item.title}\n${item.body}`.toLowerCase().includes(query.query.toLowerCase()),
+      );
   }
   async getWork(id: string): Promise<BoardWorkItem> {
     return this.workItem(id);
@@ -543,6 +557,71 @@ test('runPilotTick: a settled wait is reported as a number, not parsed from text
     });
     assert.equal(result.outcome, 'delivered');
     assert.equal(result.checksWaitedSeconds, 30);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// --- scoping a tick (ADR-012): a scope is never ignored ----------------------
+
+test('runPilotTick: a scope restricts the tick to matching items', async () => {
+  const h = harness([
+    { id: 'ITEM-1' },
+    { id: 'ITEM-2' },
+  ]);
+  try {
+    // Give the items the text a board would search.
+    h.board.items.get('ITEM-1')!.title = 'Epic: onboarding';
+    h.board.items.get('ITEM-2')!.title = 'Unrelated chore';
+    const log = createEventLog();
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      policy: { reviewMode: 'checks-only', scopeQuery: 'onboarding' },
+    });
+
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(result.itemId, 'ITEM-1', 'the scoped item, not the first ready one');
+    assert.equal((await h.board.getWork('ITEM-2')).state, 'ready', 'out-of-scope work is untouched');
+    assert.match(log.of('pilot.item_selected')[0]?.message ?? '', /selected ITEM-1 \(1 ready\)/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: a scope on a board that cannot search refuses to start', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    h.board.capabilities = () => ({ ...PilotBoard.prototype.capabilities.call(h.board), canTextSearch: false });
+    await assert.rejects(
+      () => runPilotTick({ ...h.deps, policy: { reviewMode: 'checks-only', scopeQuery: 'onboarding' } }),
+      (e: unknown) => {
+        assert.ok(e instanceof BoardUnsupportedError);
+        return true;
+      },
+    );
+    // Refusing to start means nothing was touched: no claim, no transition.
+    assert.equal((await h.board.getWork('ITEM-1')).state, 'ready');
+    assert.deepEqual(h.board.transitions, []);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: the in-flight sweep is NOT scoped', async () => {
+  const h = harness([{ id: 'ITEM-9', state: 'claimed' }]);
+  try {
+    h.board.seedRecord('ITEM-9', 'deadbeef', '2026-09-15T00:00:00.000Z');
+    const log = createEventLog();
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      now: () => Date.parse('2026-09-15T01:00:00.000Z'),
+      policy: { reviewMode: 'checks-only', scopeQuery: 'nothing-matches-this', blockStaleClaims: true, staleClaimSeconds: 900 },
+    });
+    assert.equal(result.outcome, 'idle');
+    assert.equal(log.of('pilot.in_flight').length, 1, 'a stranded item is reported whatever the scope');
+    assert.equal((await h.board.getWork('ITEM-9')).state, 'blocked', 'and it is still handed to a human');
   } finally {
     h.cleanup();
   }

@@ -130,7 +130,23 @@ function jiraSimulator(
       const jql = String(body['jql'] ?? '');
       const wanted = /status in \(([^)]*)\)/.exec(jql)?.[1];
       const names = wanted === undefined ? undefined : wanted.split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
-      return json({ issues: issues.filter((i) => names === undefined || names.includes(i.status)).map(toJiraShape) });
+      // `text ~ "<term>"` is Jira's own text search: it matches the issue's TEXT
+      // (summary + description), which is what a `query` scope means. The double
+      // applies BOTH clauses the way Jira would, so a search that only worked
+      // because the state filter happened to be absent could not pass here.
+      const term = /text ~ "([^"]*)"/.exec(jql)?.[1];
+      return json({
+        issues: issues
+          .filter((i) => names === undefined || names.includes(i.status))
+          // Jira's full-text search is case-insensitive; a case-sensitive double made
+          // the search look broken for a term that only appeared capitalised.
+          .filter(
+            (i) =>
+              term === undefined ||
+              `${i.summary}\n${adfToText(i.description)}`.toLowerCase().includes(term.toLowerCase()),
+          )
+          .map(toJiraShape),
+      });
     }
 
     // The create's dedupe search: `GET /rest/api/3/search?jql=... text ~ "<key>"`. Jira's
@@ -296,6 +312,16 @@ test('JiraBoardProvider: shared task-board contract suite', async (t) => {
     out.notes.some((n) => n.startsWith('bootstrapStates: PASS (canCreate=false created=0 exists=6 notCreatable=0')),
     out.notes.join('\n'),
   );
+  // The suite drives the free-text scope itself now: it files a probe item whose text
+  // carries a distinctive word, requires the adapter to FIND it with `query`, and requires
+  // it to return nothing for a word nothing carries. Both halves can only pass if the term
+  // really reached Jira's own search — an adapter that ignored it would have returned the
+  // probe for BOTH queries, and one that searched everything would have done the same.
+  assert.ok(out.notes.some((n) => n.includes('canTextSearch=true')), out.notes.join('\n'));
+  assert.ok(
+    out.notes.some((n) => n.startsWith('query: PASS (1 hit(s), no false positive)')),
+    out.notes.join('\n'),
+  );
 });
 
 test('capabilities: no delivery side at all, and trust only when the caller declares it', () => {
@@ -311,6 +337,7 @@ test('capabilities: no delivery side at all, and trust only when the caller decl
     'a Jira status lives in a workflow and is created in administration, so this adapter only reports',
   );
   assert.equal(caps.canCreateWork, true, 'POST /rest/api/3/issue files an issue, so filing is declared');
+  assert.equal(caps.canTextSearch, true, 'the search takes one JQL, so a free-text scope rides in it');
 
   const withTrust = createJiraBoardProvider({
     baseUrl: BASE,
@@ -550,8 +577,10 @@ test('request shapes: search is JQL-scoped to the mapped status, transitions are
   const search = sim.requests[0];
   assert.equal(search?.method, 'POST');
   assert.equal(search?.url, `${BASE}/rest/api/3/search`);
+  // The state clause sits BEFORE `ORDER BY`, not after it: `ORDER BY` terminates a JQL
+  // query, so a clause appended behind it is a syntax error that fails the whole search.
   assert.deepEqual(search?.body, {
-    jql: 'project = ACME AND statusCategory != Done ORDER BY created ASC AND status in ("ready")',
+    jql: 'project = ACME AND statusCategory != Done AND status in ("ready") ORDER BY created ASC',
     fields: ['summary', 'description', 'status', 'labels', 'assignee', 'updated'],
     maxResults: 100,
   });
@@ -564,6 +593,78 @@ test('request shapes: search is JQL-scoped to the mapped status, transitions are
 
   const transitions = await board.getWork('ACME-1');
   assert.equal(transitions.url, `${BASE}/browse/ACME-1`);
+});
+
+// --- listWork: the free-text scope ------------------------------------------
+
+test('listWork: a text scope is a `text ~` clause in the SAME JQL, and the board decides the hits', async () => {
+  const sim = jiraSimulator([
+    makeIssue('ACME-1', 'ready', { summary: 'Nebula rollout kickoff' }),
+    makeIssue('ACME-2', 'ready', { description: textToAdf('please do the nebula thing') }),
+    makeIssue('ACME-3', 'ready', { summary: 'unrelated work' }),
+    makeIssue('ACME-4', 'claimed', { summary: 'Nebula rollout, continued' }),
+  ]);
+  const board = provider(sim);
+
+  const items = await board.listWork({ states: ['ready'], query: 'nebula' });
+
+  // The scope reaches the BOARD in the same JQL the state filter travels in — one
+  // request, and the term is inside the literal, never a clause of its own.
+  const search = sim.requests[0];
+  assert.equal(sim.requests.length, 1, 'a scope must not cost a second round trip');
+  assert.equal(search?.url, `${BASE}/rest/api/3/search`);
+  assert.deepEqual(search?.body, {
+    jql:
+      'project = ACME AND statusCategory != Done AND status in ("ready") AND text ~ "nebula" ORDER BY created ASC',
+    fields: ['summary', 'description', 'status', 'labels', 'assignee', 'updated'],
+    maxResults: 100,
+  });
+  // Jira's text index covers the summary AND the description, so an item whose words
+  // live in the body is found too — and the STATE filter still applies: ACME-4 carries
+  // the term but is not ready, and ACME-3 is ready but carries nothing.
+  assert.deepEqual(items.map((item) => item.id), ['ACME-1', 'ACME-2']);
+  assert.deepEqual(items.map((item) => item.state), ['ready', 'ready']);
+});
+
+test('listWork: a term nothing carries returns nothing, not everything', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready'), makeIssue('ACME-2', 'claimed')]);
+  const board = provider(sim);
+
+  const items = await board.listWork({ states: ['ready'], query: 'takujiranothingcarriesthis' });
+
+  assert.deepEqual(items, [], 'a term the board does not know means no work, never all work');
+  assert.equal(sim.requests.length, 1, 'the search still reached the host');
+  assert.match(
+    String((sim.requests[0]?.body as { jql?: string }).jql),
+    /text ~ "takujiranothingcarriesthis"/,
+    'the miss is the host answering nothing, not this adapter dropping the term',
+  );
+});
+
+test('listWork: a term that would break the JQL is refused before anything is sent', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')]);
+  const board = provider(sim);
+
+  // A quote would end the literal and let the rest of the term become JQL of its own
+  // (so a scope could widen what it was asked to narrow); a backslash is JQL's escape
+  // character, whose meaning varies by version. Neither is guessed at: both are refused.
+  for (const term of ['nebula" OR project = OTHER', 'back\\slash']) {
+    await assert.rejects(
+      () => board.listWork({ states: ['ready'], query: term }),
+      (e: unknown) =>
+        e instanceof BoardError &&
+        e.kind === 'precondition' &&
+        /must not contain a double quote or a backslash/.test(e.message),
+      `term ${JSON.stringify(term)} must be refused, not escaped or dropped`,
+    );
+  }
+  // An empty scope names nothing, so honouring it would search for EVERYTHING — the one
+  // thing a scope must never do.
+  await assert.rejects(
+    () => board.listWork({ query: '   ' }),
+    (e: unknown) => e instanceof BoardError && e.kind === 'precondition' && /non-whitespace/.test(e.message),
+  );
+  assert.equal(sim.requests.length, 0, 'a term this adapter cannot build JQL from never reaches the host');
 });
 
 test('claim: resolves a real transition id, writes the ISSUE PROPERTY, verifies the re-read', async () => {

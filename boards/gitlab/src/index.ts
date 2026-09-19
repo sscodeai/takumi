@@ -42,6 +42,15 @@
  *    description and a create SEARCHES for it before writing (see `createWork`).
  *    The search is one page wide (note 3), which is the honest reach of the
  *    guarantee — the failure mode is described where it is made, never hidden.
+ * 6. `canTextSearch: true`, and WHY it is the board that searches: a
+ *    `BoardWorkQuery.query` is sent to GitLab's own `search` parameter on the
+ *    issue list (`search=<term>`), never applied by filtering one page here —
+ *    a local filter could only find what `per_page` already returned, which is
+ *    a search that silently misses work. What GitLab's basic (non-Elastic)
+ *    search matches is TEXT: the issue title and description, term by term, with
+ *    no stemming guarantee — so an issue that merely MENTIONS the term in prose
+ *    is a hit. That is exactly why the create path confirms its search hit with
+ *    the marker (note 5) instead of trusting the hit.
  */
 
 import {
@@ -170,6 +179,20 @@ function markerFor(key: string): string {
   } catch (e) {
     throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
   }
+}
+
+/**
+ * The term to send as GitLab's `search` parameter, or `undefined` for "no text scope".
+ *
+ * A blank (whitespace-only) term is treated as ABSENT rather than sent as `search=`:
+ * an empty search value is not a narrower scope, it is an unrequested narrowing that
+ * GitLab answers with everything — i.e. a filter that looks applied and is not, which
+ * is the silent widening this contract exists to forbid.
+ */
+function textSearchTerm(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
 }
 
 /** The subset of GitLab's issue JSON this adapter reads/writes. */
@@ -334,6 +357,10 @@ export class GitLabBoardProvider implements TaskBoardProvider {
       // Issues are creatable, so a failure that has to become work CAN become work
       // here instead of only being commented on (see the class doc note 5).
       canCreateWork: true,
+      // Free-text scope is a first-class GitLab parameter on the issue list
+      // (`search=`), so a caller can say "only this epic" without takumi inventing
+      // an epic model (see the class doc note 6 for what the search actually reads).
+      canTextSearch: true,
       // GitLab has merge requests and pipelines, so the delivery side is real.
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
@@ -342,13 +369,16 @@ export class GitLabBoardProvider implements TaskBoardProvider {
   /**
    * List open issues. `query.labels` is passed straight to GitLab's `labels`
    * parameter (comma-separated = AND, every listed label must be present);
-   * `query.states` is applied locally because six states map onto six labels
-   * and GitLab's parameter cannot express OR without also matching unrelated
-   * issues. At most `per_page=100` items are visible per call (see class note 3).
+   * `query.query` becomes GitLab's `search` parameter, so the TEXT scope is
+   * applied by the BOARD and not by filtering this page here — a local filter can
+   * only find what `per_page` already returned, i.e. a search that silently misses
+   * work (class note 6). `query.states` is applied locally because six states map
+   * onto six labels and GitLab's parameter cannot express OR without also matching
+   * unrelated issues. At most `per_page=100` items are visible per call (note 3).
    */
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
     const issues = await this.send<GitLabIssuePayload[]>(
-      { method: 'GET', url: this.issuesUrl('opened', query.labels) },
+      { method: 'GET', url: this.issuesUrl('opened', query.labels, textSearchTerm(query.query)) },
       'listIssues',
     );
     const items = asArray(issues).map((issue) => this.toWorkItem(issue));
@@ -731,13 +761,23 @@ export class GitLabBoardProvider implements TaskBoardProvider {
     return `${this.apiBase}/projects/${this.projectId}/issues`;
   }
 
-  private issuesUrl(state: 'opened' | 'closed' | 'all', labels?: readonly string[]): string {
+  /**
+   * The issue-list URL: ONE builder for every issue list this adapter asks for
+   * (the work list, and the create-key search, which is the same endpoint).
+   *
+   * `search` is GitLab's own free-text parameter, percent-encoded but otherwise
+   * sent as the caller wrote it: escaping a human's words would search for
+   * something they did not ask for, and GitLab is the one that decides how a term
+   * matches (class note 6).
+   */
+  private issuesUrl(state: 'opened' | 'closed' | 'all', labels?: readonly string[], search?: string): string {
     const params = [`state=${state}`, `per_page=${PAGE_SIZE}`];
     if (labels !== undefined && labels.length > 0) {
       // Comma-separated on purpose: GitLab reads `labels=a,b` as AND (all must
       // be present), which is the only filter shape it offers.
       params.push(`labels=${labels.map((label) => encodeURIComponent(label)).join(',')}`);
     }
+    if (search !== undefined) params.push(`search=${encodeURIComponent(search)}`);
     return `${this.issuesPath}?${params.join('&')}`;
   }
 
@@ -823,10 +863,13 @@ export class GitLabBoardProvider implements TaskBoardProvider {
    * The create-search URL. `per_page` sits at the API ceiling because one page is
    * all this seam can follow (class doc note 3): the limit is real, and the comment
    * on `createWork` says what a caller should expect when it is hit.
+   *
+   * It goes through the SAME builder as the work list on purpose — the create key is
+   * searched with the very same endpoint and `search` parameter a caller's epic scope
+   * uses, so there is one URL shape to keep correct instead of two that can drift.
    */
   private searchUrl(key: string): string {
-    const params = [`search=${encodeURIComponent(key)}`, 'state=all', `per_page=${PAGE_SIZE}`];
-    return `${this.issuesPath}?${params.join('&')}`;
+    return this.issuesUrl('all', undefined, key);
   }
 
   /**

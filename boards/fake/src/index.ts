@@ -66,6 +66,7 @@ const DEFAULT_CAPABILITIES: BoardCapabilities = {
   atomicClaim: true,
   canBootstrapStates: true,
   canCreateWork: true,
+  canTextSearch: true,
   delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
 };
 
@@ -171,6 +172,13 @@ export class FakeBoardProvider implements TaskBoardProvider {
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
     const limit = query.limit ?? Number.POSITIVE_INFINITY;
     return [...this.items.values()]
+      .filter((e) => {
+        if (query.query === undefined) return true;
+        // A substring search over the text a person would look at, case-insensitively:
+        // the reference behaviour the real boards' own searches are measured against.
+        const needle = query.query.toLowerCase();
+        return `${e.item.title}\n${e.item.body}`.toLowerCase().includes(needle);
+      })
       .filter((e) => (query.states === undefined ? true : query.states.includes(e.item.state)))
       .filter((e) =>
         query.labels === undefined ? true : query.labels.every((label) => e.item.labels.includes(label)),

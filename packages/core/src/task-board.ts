@@ -80,6 +80,14 @@ export interface BoardCapabilities {
    * that cannot be filed is a failure a human has to read somewhere else.
    */
   canCreateWork: boolean;
+  /**
+   * The adapter can search its items by free text (`BoardWorkQuery.query`).
+   *
+   * False is honest for a board whose API has no text search. What a `true` board
+   * searches is the board's business, and the adapter must say what that is when it is
+   * narrower than "everything" (e.g. a title-only search).
+   */
+  canTextSearch: boolean;
   delivery: BoardDeliveryCapabilities;
 }
 
@@ -162,6 +170,16 @@ export interface BoardWorkQuery {
   states?: readonly BoardWorkItemState[];
   labels?: readonly string[];
   limit?: number;
+  /**
+   * Free-text scope: the board's own text search over the items it holds.
+   *
+   * This is how a caller says "only this epic / this milestone / this component" without
+   * takumi inventing an epic model: each board searches the words it already indexes.
+   * A board that cannot search must FAIL CLOSED (`unsupported`) rather than ignore the
+   * term — an ignored scope filter means the runner works on items the operator excluded,
+   * which is worse than not running at all.
+   */
+  query?: string;
 }
 
 /** Identity of an item comment, returned by `comment()` and used by `updateComment()`. */
@@ -349,6 +367,7 @@ export function assertBoardCapability(
     | 'atomicClaim'
     | 'canBootstrapStates'
     | 'canCreateWork'
+    | 'canTextSearch'
     | 'delivery.canOpenPullRequest'
     | 'delivery.canRunChecks'
     | 'delivery.canMerge',
@@ -364,6 +383,9 @@ export function assertBoardCapability(
       return;
     case 'canBootstrapStates':
       if (caps[capability] !== true) throw new BoardUnsupportedError(capability, id);
+      return;
+    case 'canTextSearch':
+      if (caps.canTextSearch !== true) throw new BoardUnsupportedError(capability, id);
       return;
     case 'canCreateWork':
       // Its own case, NOT the fallthrough group above: grouping it there made every
@@ -457,6 +479,7 @@ export async function runTaskBoardProviderContractSuite(
     'atomicClaim',
     'canBootstrapStates',
     'canCreateWork',
+    'canTextSearch',
   ] as const) {
     if (typeof caps[key] !== 'boolean') throw new Error(`capabilities.${key} must be a boolean`);
   }
@@ -467,7 +490,7 @@ export async function runTaskBoardProviderContractSuite(
     `capabilities: PASS (states=${caps.states.join(',')} atomicClaim=${caps.atomicClaim} ` +
       `comments=${caps.comments} editableComment=${caps.editableComment} machineReadableState=${caps.machineReadableState} ` +
       `trustedAuthorFilter=${caps.trustedAuthorFilter} canBootstrapStates=${caps.canBootstrapStates} ` +
-      `canCreateWork=${caps.canCreateWork} ` +
+      `canCreateWork=${caps.canCreateWork} canTextSearch=${caps.canTextSearch} ` +
       `delivery=${JSON.stringify(caps.delivery)})`,
   );
 
@@ -517,6 +540,45 @@ export async function runTaskBoardProviderContractSuite(
       throw new Error(`createWork must fail closed as unsupported, got ${String(refused)}`);
     }
     notes.push('createWork: PASS (canCreateWork=false, refused as unsupported)');
+  }
+
+  // --- a scope filter that cannot be honoured must FAIL, not widen ---
+  // `query` is how a caller says "only this epic". An adapter that silently ignored it
+  // would have the runner working on exactly the items the operator excluded, so the
+  // suite requires a refusal from a board that cannot search — and a real search (found
+  // when it should be, absent when it should be) from one that can.
+  const scopeWord = `taku${String(opts.id).replace(/[^a-z0-9]/gi, '')}scope`;
+  if (!caps.canTextSearch) {
+    const widened = await provider
+      .listWork({ states: ['ready'], query: scopeWord })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    if (widened === null) {
+      throw new Error('listWork with a query must fail closed when capabilities().canTextSearch is false');
+    }
+    if (!(widened instanceof BoardError) || widened.kind !== 'unsupported') {
+      throw new Error(`a query on a non-searching board must fail as unsupported, got ${String(widened)}`);
+    }
+    notes.push('query: PASS (canTextSearch=false, refused as unsupported)');
+  } else if (caps.canCreateWork) {
+    const probe = await provider.createWork({
+      title: `scope probe ${scopeWord}`,
+      body: `created to prove the ${scopeWord} search works`,
+      state: 'ready',
+      idempotencyKey: `contract:${opts.id}:scope`,
+    });
+    const hit = await provider.listWork({ states: ['ready'], query: scopeWord });
+    if (!hit.some((item) => item.id === probe.item.id)) {
+      throw new Error(`a query for ${scopeWord} did not return the item whose title carries it`);
+    }
+    const miss = await provider.listWork({ states: ['ready'], query: `${scopeWord}nothingcarriesthis` });
+    if (miss.some((item) => item.id === probe.item.id)) {
+      throw new Error(`a query for a term nothing carries returned ${probe.item.id}`);
+    }
+    notes.push(`query: PASS (${hit.length} hit(s), no false positive)`);
+  } else {
+    notRun += 1;
+    notes.push('query: NOT_RUN (the board can search but cannot file a probe item for the suite to find)');
   }
 
   // --- state bootstrap: can this board even express the six states? ---

@@ -153,11 +153,21 @@ export class GitHubBoardProvider implements TaskBoardProvider {
       canBootstrapStates: true,
       // Issues are creatable. Filing is how a failure becomes work instead of a comment.
       canCreateWork: true,
+      // Search is what lets a caller scope a tick to an epic or a component without
+      // takumi inventing an epic model (ADR-012).
+      canTextSearch: true,
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
   }
 
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
+    // A text scope goes through the SEARCH API, not the issue list: the list endpoint
+    // has no free-text parameter, and a filter that cannot be expressed is not one this
+    // adapter may quietly drop (an ignored scope means working on excluded items).
+    if (query.query !== undefined) {
+      return await this.searchWork(query, query.query);
+    }
+
     // One label-filtered request per requested state: GitHub's `labels` query
     // parameter means AND, not OR, so asking for two states at once would return
     // nothing. Cross-state work has to be assembled here.
@@ -188,6 +198,41 @@ export class GitHubBoardProvider implements TaskBoardProvider {
 
   async getWork(id: string): Promise<BoardWorkItem> {
     return this.toWorkItem(await this.fetchIssue(id));
+  }
+
+  /**
+   * A search-API listing, filtered to the states the caller asked for.
+   *
+   * GitHub's search has its own query syntax, so the term is passed as a quoted phrase
+   * and the repository scope is added by this adapter — never by the caller, who should
+   * not have to know which board they are talking to. Search matches issue text, which
+   * is what "this epic" means in practice; the state filter is applied HERE because
+   * search knows nothing about takumi's labels.
+   */
+  private async searchWork(query: BoardWorkQuery, term: string): Promise<BoardWorkItem[]> {
+    // A quote inside the term would close the phrase and change the query's meaning, so
+    // it is stripped rather than escaped: a search term is a human's words, and silently
+    // searching for something else is worse than searching for slightly less.
+    const safe = term.replaceAll('"', ' ').trim();
+    if (safe.length === 0) {
+      throw new BoardError('precondition', 'a text scope must contain at least one non-quote character');
+    }
+    const states: BoardWorkItemState[] = query.states === undefined ? ['ready'] : [...query.states];
+    const terms = `repo:${this.repo} is:issue "${safe}"`;
+    const params = new URLSearchParams({ q: terms, per_page: String(query.limit ?? 100) });
+    const found = await requestBoardJson<{ items?: GitHubIssue[] }>(
+      this.request,
+      { method: 'GET', url: `${this.apiBase}/search/issues?${params.toString()}` },
+      'listWork: search',
+    );
+    const items: BoardWorkItem[] = [];
+    for (const issue of found.items ?? []) {
+      if (issue.pull_request !== undefined || issue.number === undefined) continue;
+      const item = this.toWorkItemOrNull(issue);
+      if (item === null || !states.includes(item.state)) continue;
+      items.push(item);
+    }
+    return items;
   }
 
   /**
