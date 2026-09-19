@@ -37,6 +37,38 @@ export interface BoardCommandOptions {
 }
 
 /** Parse `takumi board` arguments. Unknown flags are rejected, never ignored. */
+/** Parse the fake board's `items` option: a JSON array of work-item seeds. */
+function parseBoardItems(raw: string): Array<{ id: string; title?: string; body?: string; state?: BoardWorkItemState }> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`--items must be a JSON array of {id,title,body,state}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error('--items must be a JSON array');
+  return parsed.map((entry, index) => {
+    const item = (entry ?? {}) as Record<string, unknown>;
+    const id = item['id'];
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new Error(`--items[${index}] needs a non-empty string id`);
+    }
+    const state = item['state'];
+    if (state !== undefined && !(BOARD_WORK_ITEM_STATES as readonly unknown[]).includes(state)) {
+      // Fail closed: a typo in a seeded state would otherwise park the item in a state no
+      // runner reads, and the tick would look idle for no visible reason.
+      throw new Error(
+        `--items[${index}] state ${JSON.stringify(state)} is not one of ${BOARD_WORK_ITEM_STATES.join(', ')}`,
+      );
+    }
+    return {
+      id,
+      ...(typeof item['title'] === 'string' ? { title: item['title'] } : {}),
+      ...(typeof item['body'] === 'string' ? { body: item['body'] } : {}),
+      ...(state === undefined ? {} : { state: state as BoardWorkItemState }),
+    };
+  });
+}
+
 export function parseBoardArgs(rest: string[]): BoardCommandOptions {
   const providerOptions: Record<string, string> = {};
   let providerId = 'fake';
@@ -73,6 +105,9 @@ export function parseBoardArgs(rest: string[]): BoardCommandOptions {
         break;
       case '--api-base':
         providerOptions['apiBase'] = next();
+        break;
+      case '--items':
+        providerOptions['items'] = next();
         break;
       case '--states':
         states = next()
@@ -151,11 +186,19 @@ export async function createBoardProvider(options: BoardCommandOptions): Promise
   switch (options.providerId) {
     case 'fake': {
       const { FakeBoardProvider } = await import('@takumi/board-fake');
+      // A demo board is only useful if the demo can be REAL: `items` lets a caller seed
+      // actual work (a JSON array of {id,title,body,state}), which is what a pilot tick
+      // with a real agent needs — a hardcoded "A ready item" title hands the agent a task
+      // that says nothing. Without `items` the built-in demo pair stands.
+      const seeded = options.providerOptions['items'];
       return new FakeBoardProvider({
-        items: [
-          { id: 'DEMO-1', state: 'ready', title: 'A ready item (the fake board is a demo)' },
-          { id: 'DEMO-2', state: 'pr_open', title: 'An item awaiting review' },
-        ],
+        items:
+          seeded === undefined
+            ? [
+                { id: 'DEMO-1', state: 'ready', title: 'A ready item (the fake board is a demo)' },
+                { id: 'DEMO-2', state: 'pr_open', title: 'An item awaiting review' },
+              ]
+            : parseBoardItems(seeded),
       });
     }
     case 'github': {

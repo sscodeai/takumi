@@ -254,3 +254,36 @@ test('runBoardCommand: a filtered state list is honoured', async () => {
   assert.match(out, /pr_open \(1\)/);
   assert.doesNotMatch(out, /ready \(/);
 });
+
+test('fake board: `items` seeds REAL work, and a bad seed fails closed', async () => {
+  // A demo board that can only carry "A ready item" is useless to a real agent: the pilot
+  // hands the item's title and body to the agent command, so the demo has to be able to
+  // describe actual work (this is how the OpenHands spike got a task).
+  const args = parseBoardArgs([
+    '--provider',
+    'fake',
+    '--items',
+    '[{"id":"OH-1","state":"ready","title":"Add multiply(a, b)","body":"with a unittest"}]',
+  ]);
+  const board = await createBoardProvider(args);
+  const ready = await board.listWork({ states: ['ready'] });
+  assert.equal(ready.length, 1);
+  assert.equal(ready[0]?.id, 'OH-1');
+  assert.equal(ready[0]?.title, 'Add multiply(a, b)');
+  assert.equal(ready[0]?.body, 'with a unittest');
+
+  // Without `items`, the built-in demo pair still stands (nothing regressed).
+  const demo = await createBoardProvider(parseBoardArgs(['--provider', 'fake']));
+  assert.deepEqual((await demo.listWork({ states: ['ready'] })).map((i) => i.id), ['DEMO-1']);
+
+  // A state nobody reads would park the item where no runner finds it, so a typo is an
+  // error, not a silently empty tick.
+  await assert.rejects(
+    () => createBoardProvider(parseBoardArgs(['--provider', 'fake', '--items', '[{"id":"X","state":"readyy"}]'])),
+    /not one of/,
+  );
+  await assert.rejects(
+    () => createBoardProvider(parseBoardArgs(['--provider', 'fake', '--items', '{"id":"X"}'])),
+    /must be a JSON array/,
+  );
+});

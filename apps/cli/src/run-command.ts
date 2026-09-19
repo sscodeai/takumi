@@ -192,6 +192,13 @@ function report(out: (line: string) => void, tick: PilotTickResult): void {
  * The child receives the item's identity (`TAKUMI_ITEM_ID`, `TAKUMI_RUN_ID`,
  * `TAKUMI_BRANCH`) so its own logs and commits can be tied to the run without takumi
  * parsing anything it prints.
+ *
+ * It ALSO receives the work itself (`TAKUMI_ITEM_TITLE`, `TAKUMI_ITEM_BODY`,
+ * `TAKUMI_ITEM_URL`). Without them the command is handed a task it cannot read: a wrapper
+ * around a real agent (OpenHands, say) has no way to know what to do, and the only
+ * alternatives are re-reading the board from inside the agent — a second, unauthenticated
+ * path to the same state — or hardcoding the task, which is not an agent at all. Found by
+ * running a real agent against a real worktree (see docs/openhands-spike-report.md).
  */
 export async function runAgentCommand(ctx: AgentContext, config: PilotAgentConfig): Promise<void> {
   const args = (config.args ?? []).map((arg) =>
@@ -207,6 +214,9 @@ export async function runAgentCommand(ctx: AgentContext, config: PilotAgentConfi
         ...process.env,
         ...config.env,
         TAKUMI_ITEM_ID: ctx.item.id,
+        TAKUMI_ITEM_TITLE: ctx.item.title,
+        TAKUMI_ITEM_BODY: ctx.item.body,
+        TAKUMI_ITEM_URL: ctx.item.url,
         TAKUMI_RUN_ID: ctx.runId,
         TAKUMI_BRANCH: ctx.branch,
         TAKUMI_ROUND: String(ctx.round),

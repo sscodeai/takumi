@@ -183,11 +183,31 @@ test('runAgentCommand: the item identity reaches the child, and its failure is c
   try {
     const out = join(dir, 'env.json');
     await runAgentCommand(
-      { item: { id: 'ITEM-9', title: 't', body: '', url: 'u', state: 'ready', labels: [], assignees: [], updatedAt: '' }, worktree: dir, branch: 'takumi/x', runId: 'c0ffee01', round: 2 },
+      {
+        item: {
+          id: 'ITEM-9',
+          title: 'Add multiply to calc.py',
+          body: 'the item the operator wrote',
+          url: 'https://board.example/ITEM-9',
+          state: 'ready',
+          labels: [],
+          assignees: [],
+          updatedAt: '',
+        },
+        worktree: dir,
+        branch: 'takumi/x',
+        runId: 'c0ffee01',
+        round: 2,
+      },
       { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify(process.env))`] },
     );
     const env = JSON.parse(readFileSync(out, 'utf8')) as Record<string, string>;
     assert.equal(env['TAKUMI_ITEM_ID'], 'ITEM-9');
+    // The work itself, not just its identity: a real agent (OpenHands, say) is a command
+    // with no board access, so without these it is handed a task it cannot read.
+    assert.equal(env['TAKUMI_ITEM_TITLE'], 'Add multiply to calc.py');
+    assert.equal(env['TAKUMI_ITEM_BODY'], 'the item the operator wrote');
+    assert.equal(env['TAKUMI_ITEM_URL'], 'https://board.example/ITEM-9');
     assert.equal(env['TAKUMI_RUN_ID'], 'c0ffee01');
     assert.equal(env['TAKUMI_BRANCH'], 'takumi/x');
     assert.equal(env['TAKUMI_ROUND'], '2');
