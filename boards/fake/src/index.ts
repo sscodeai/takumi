@@ -2,6 +2,7 @@ import {
   assertBoardCapability,
   BOARD_WORK_ITEM_STATES,
   BoardError,
+  renderCreateMarker,
   assertTransition,
   parseBoardStateRecord,
   renderBoardStateRecord,
@@ -10,6 +11,8 @@ import type {
   BoardBootstrapAction,
   BoardBootstrapReport,
   BoardCapabilities,
+  BoardWorkItemSpec,
+  CreateWorkResult,
   BoardCommentAuthor,
   BoardCommentRef,
   BoardDeliveryCapabilities,
@@ -62,6 +65,7 @@ const DEFAULT_CAPABILITIES: BoardCapabilities = {
   machineReadableState: true,
   atomicClaim: true,
   canBootstrapStates: true,
+  canCreateWork: true,
   delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
 };
 
@@ -80,6 +84,7 @@ interface FakeComment {
 export class FakeBoardProvider implements TaskBoardProvider {
   private readonly items = new Map<string, FakeItem>();
   private readonly comments = new Map<string, FakeComment>();
+  private itemSeq = 0;
   private readonly records = new Map<string, Array<{ record: BoardStateRecord; trusted: boolean }>>();
   /** States this board has already created (so bootstrap is idempotent). */
   private readonly bootstrapStates_ = new Set<BoardWorkItemState>();
@@ -133,6 +138,34 @@ export class FakeBoardProvider implements TaskBoardProvider {
 
   capabilities(): BoardCapabilities {
     return this.capabilities_;
+  }
+
+  /**
+   * The reference `createWork`: deduplication by the marker in the body, exactly the way
+   * an adapter has to do it without a native idempotency key.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    if (spec.idempotencyKey !== undefined) {
+      const marker = renderCreateMarker(spec.idempotencyKey);
+      const existing = [...this.items.values()].find((entry) => entry.item.body.includes(marker));
+      if (existing !== undefined) return { item: { ...existing.item }, created: false };
+    }
+    this.itemSeq += 1;
+    const id = `FAKE-${this.itemSeq}`;
+    const marker = spec.idempotencyKey === undefined ? '' : `\n\n${renderCreateMarker(spec.idempotencyKey)}`;
+    const item: BoardWorkItem = {
+      id,
+      title: spec.title,
+      body: `${spec.body ?? ''}${marker}`,
+      url: `https://board.example/${id}`,
+      state: spec.state ?? 'ready',
+      labels: [...(spec.labels ?? [])],
+      assignees: [],
+      updatedAt: new Date(this.clock()).toISOString(),
+    };
+    this.items.set(id, { item });
+    return { item: { ...item }, created: true };
   }
 
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {

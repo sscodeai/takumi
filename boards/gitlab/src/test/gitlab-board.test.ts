@@ -146,6 +146,12 @@ test('GitLabBoardProvider: passes the shared task-board contract suite (injected
     out.notes.some((note) => note.startsWith('bootstrapStates: PASS (canCreate=true created=6 exists=0 notCreatable=0')),
     out.notes.join('\n'),
   );
+  // ...and it files an issue of its own: `canCreateWork: true` is a promise, and the
+  // suite checks the hard part of it (one item per idempotency key, claimable after).
+  assert.ok(
+    out.notes.some((note) => note.startsWith('createWork: PASS')),
+    out.notes.join('\n'),
+  );
 });
 
 test('GitLabBoardProvider: the exact request shape of every port method', async () => {
@@ -278,6 +284,159 @@ test('GitLabBoardProvider: the exact request shape of every port method', async 
   const read = await provider.readState('7');
   assert.deepEqual(fake.calls(), [`GET ${notes}`]);
   assert.deepEqual(read, { ...run2, note: 'second write' }, 'the newest trusted record is the one read back');
+});
+
+// --- createWork: filing a failure as work, exactly once ---------------------
+
+/** The create-search URL the adapter uses: the KEY, all states, the API's page ceiling. */
+function createSearch(key: string): string {
+  return `${ISSUES}?search=${encodeURIComponent(key)}&state=all&per_page=100`;
+}
+
+test('createWork: the exact create request, the hidden marker, and a second call that files nothing', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request, trustedAuthors: [TRUSTED] });
+  const KEY = 'ci:red:481';
+
+  const first = await provider.createWork({
+    title: 'Pipeline red on main',
+    body: 'job test failed on retry 2',
+    labels: ['ci'],
+    idempotencyKey: KEY,
+  });
+
+  // --- the request shape: search FIRST, then one create ---
+  assert.deepEqual(fake.calls(), [`GET ${createSearch(KEY)}`, `POST ${ISSUES}`]);
+  assert.deepEqual(fake.bodies()[1], {
+    title: 'Pipeline red on main',
+    // The marker rides in the description, where the reader greps for it.
+    description: `job test failed on retry 2\n\n<!-- takumi:created=${KEY} -->`,
+    // The state comes from the adapter's own vocabulary, and the caller's labels ride along.
+    labels: ['ci', 'takumi-ready'],
+  });
+
+  // --- the result: a real, ready, claimable work item ---
+  assert.equal(first.created, true);
+  assert.equal(first.item.id, '1', 'the created issue is addressed by its iid');
+  assert.equal(first.item.state, 'ready', 'the state label IS the delivery state, so a filed item starts ready');
+  assert.equal(first.item.body, `job test failed on retry 2\n\n<!-- takumi:created=${KEY} -->`);
+  assert.deepEqual(fake.labelsOf(1), ['ci', 'takumi-ready']);
+
+  fake.clear();
+  const ready = await provider.listWork({ states: ['ready'] });
+  assert.equal(ready.filter((item) => item.id === first.item.id).length, 1, 'the filed item appears exactly once');
+
+  // --- the retry: the search decides, and nothing is filed twice ---
+  fake.clear();
+  const second = await provider.createWork({
+    title: 'Pipeline red on main',
+    body: 'job test failed on retry 2',
+    labels: ['ci'],
+    idempotencyKey: KEY,
+  });
+  assert.equal(second.created, false, 'a repeated key must not report a creation');
+  assert.equal(second.item.id, first.item.id, 'and must return the FIRST item');
+  assert.deepEqual(second.item.labels, ['ci', 'takumi-ready']);
+  assert.deepEqual(fake.calls(), [`GET ${createSearch(KEY)}`], 'the search alone answers the retry');
+});
+
+test('createWork: the key is found after the item moved on (a retried tick must not re-file delivered work)', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request, trustedAuthors: [TRUSTED] });
+  const KEY = 'flake:timeout:9';
+
+  const filed = await provider.createWork({ title: 'Flaky test', idempotencyKey: KEY });
+  // The work happens: the item is claimed and a merge request is opened.
+  assert.equal((await provider.claim(filed.item.id, 'c0ffee01')).claimed, true);
+  await provider.transition(filed.item.id, 'pr_open', { runId: 'c0ffee01', note: 'opened MR !4' });
+
+  fake.clear();
+  const again = await provider.createWork({ title: 'Flaky test', idempotencyKey: KEY });
+  assert.equal(again.created, false);
+  assert.equal(again.item.id, filed.item.id);
+  assert.equal(again.item.state, 'pr_open', "the returned item is the board's CURRENT view of it");
+  // `state=all` in the search is what makes this work: the label has changed, so an
+  // open-issues-only search would have filed a second copy of finished work.
+  assert.deepEqual(fake.calls(), [`GET ${createSearch(KEY)}`]);
+});
+
+test('createWork: the title is the search result, the MARKER is the proof', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  // A person happened to write the key into a description, and GitLab's full-text
+  // search returns that issue for it. Only the marker can tell the two apart.
+  fake.seedIssue({ iid: 1, title: 'Discussion', description: 'we hit ci:red:481 yesterday' });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+
+  const filed = await provider.createWork({ title: 'Pipeline red', idempotencyKey: 'ci:red:481' });
+  assert.equal(filed.created, true, 'a search hit without the create marker is not our item');
+  assert.equal(filed.item.id, '2');
+  assert.deepEqual(fake.calls(), [`GET ${createSearch('ci:red:481')}`, `POST ${ISSUES}`]);
+});
+
+test('createWork: the requested state is the label it is filed under, and no key means no marker', async () => {
+  const fake = new FakeGitLab({ project: 'team/app', username: TRUSTED });
+  const provider = new GitLabBoardProvider({
+    project: 'team/app',
+    labelPrefix: 'ship-',
+    apiBase: API,
+    request: fake.request,
+  });
+
+  // Without a key there is nothing to search for: one create, and the description is
+  // exactly what the caller wrote (no stray blank line, no empty marker).
+  const filed = await provider.createWork({ title: 'Blocked intake', body: 'needs a human', state: 'blocked' });
+  assert.deepEqual(fake.calls(), [`POST ${API}/projects/team%2Fapp/issues`]);
+  assert.deepEqual(fake.bodies()[0], { title: 'Blocked intake', description: 'needs a human', labels: ['ship-blocked'] });
+  assert.equal(filed.item.state, 'blocked', 'a filed item can start in any state this adapter can express');
+  assert.equal(filed.created, true);
+  assert.deepEqual((await provider.listWork({ states: ['blocked'] })).map((item) => item.id), [filed.item.id]);
+
+  // The same through the ready default, with an empty body: the marker alone.
+  fake.clear();
+  const ready = await provider.createWork({ title: 'No body', idempotencyKey: 'k:1' });
+  assert.deepEqual(fake.bodies()[1], {
+    title: 'No body',
+    description: '<!-- takumi:created=k:1 -->',
+    labels: ['ship-ready'],
+  });
+  assert.equal(ready.item.state, 'ready');
+});
+
+test('createWork: a create the host rejects is classified, and the message names the fix', async () => {
+  const { fake, provider } = board({ iid: 1, labels: ['takumi-ready'] });
+  // GitLab's real answer for a label the project does not have.
+  fake.failWhen(
+    (req) => req.method === 'POST' && req.url.endsWith('/issues'),
+    400,
+    '{"message":"Label(s) not allowed for this project: takumi-ready"}',
+  );
+
+  await assert.rejects(
+    () => provider.createWork({ title: 'will not be filed', idempotencyKey: 'ci:red:2' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError, 'a rejected create must be a classified board error');
+      assert.equal(e.kind, 'precondition', 'retrying a refused create changes nothing');
+      assert.equal(e.retriable, false);
+      assert.match(e.message, /Label\(s\) not allowed/);
+      assert.match(e.message, /"takumi-ready"/, 'the label that caused it is named');
+      assert.match(e.message, /takumi board --bootstrap/, 'and so is the command that creates it');
+      return true;
+    },
+  );
+  // Nothing was filed, and nothing is pretended to have been.
+  assert.deepEqual(fake.calls(), [`GET ${createSearch('ci:red:2')}`, `POST ${ISSUES}`]);
+  assert.equal((await provider.listWork()).length, 1, 'the board still holds only the seeded issue');
+});
+
+test('createWork: a malformed idempotency key fails before any request', async () => {
+  const { fake, provider } = board({ iid: 1, labels: ['takumi-ready'] });
+  await assert.rejects(
+    () => provider.createWork({ title: 'x', idempotencyKey: 'not a key!' }),
+    boardError('precondition', /invalid idempotency key/),
+  );
+  // A marker nothing can find again would file a duplicate on every retry, so the
+  // key is rejected before the search rather than after the create.
+  assert.deepEqual(fake.calls(), []);
 });
 
 test('readState: control flow only ever follows a TRUSTED author', async () => {
@@ -493,6 +652,7 @@ test('capabilities(): GitLab declares its real limits instead of an idealised bo
   assert.equal(caps.atomicClaim, false, 'GitLab cannot update labels conditionally');
   assert.equal(caps.trustedAuthorFilter, false, 'no allowlist was configured');
   assert.equal(caps.canBootstrapStates, true, 'GitLab labels are creatable through the API, so the adapter says it can');
+  assert.equal(caps.canCreateWork, true, 'GitLab issues are creatable, so a failure can be filed as work');
   assert.deepEqual(caps.delivery, { canOpenPullRequest: true, canRunChecks: true, canMerge: true });
   assert.equal(provider.metadata().id, 'gitlab');
 
@@ -547,6 +707,32 @@ test('gated operations fail closed BEFORE any request', async () => {
   assert.deepEqual(fake.calls(), [], 'a gated operation must not touch the board');
   // The ungated part of the port keeps working.
   assert.equal((await stateOf(provider, '7')), 'ready');
+});
+
+/** A provider that declares it cannot file items: `createWork` must fail closed. */
+class NoCreateGitLabBoard extends GitLabBoardProvider {
+  override capabilities(): BoardCapabilities {
+    return { ...super.capabilities(), canCreateWork: false };
+  }
+}
+
+test('createWork: a board that declares it cannot file work refuses it, before any request', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  fake.seedIssue({ iid: 7, labels: ['takumi-ready'] });
+  const provider = new NoCreateGitLabBoard({ project: PROJECT, apiBase: API, request: fake.request });
+
+  await assert.rejects(
+    () => provider.createWork({ title: 'must be refused', idempotencyKey: 'ci:red:3' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardUnsupportedError);
+      assert.equal(e.capability, 'canCreateWork');
+      assert.equal(e.kind, 'unsupported');
+      return true;
+    },
+  );
+  // Refusing is the honest answer; quietly filing anyway (or returning a fabricated
+  // item) would hand the caller an id nothing backs.
+  assert.deepEqual(fake.calls(), []);
 });
 
 test('the state-label vocabulary is explicit: intake, precedence and custom prefixes', async () => {

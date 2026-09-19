@@ -6,8 +6,10 @@ import {
   BOARD_WORK_ITEM_STATES,
   BoardStateError,
   createCurlRequestFn,
+  createKeyOf,
   parseBoardStateRecord,
   renderBoardStateRecord,
+  renderCreateMarker,
   requestBoardJson,
   unconfiguredRequestFn,
 } from '@takumi/core';
@@ -22,9 +24,11 @@ import type {
   BoardStateRecord,
   BoardTransitionEvidence,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkItemState,
   BoardWorkQuery,
   ClaimResult,
+  CreateWorkResult,
   CurlRequestFnOptions,
   TaskBoardProvider,
 } from '@takumi/core';
@@ -68,6 +72,16 @@ export interface JiraBoardOptions {
   bearerToken?: string;
   /** Delivery state → Jira status name. Defaults to the state name itself. */
   statusMap?: JiraStatusMap;
+  /**
+   * The ISSUE TYPE a filed item is created as, e.g. `Task` or `Bug`.
+   *
+   * Deliberately NO default. A Jira issue type is per-PROJECT administration data and
+   * this adapter never reads it: it reads the project's STATUSES, which the API happens
+   * to bucket by issue type, but a bucket name is not a decision the caller made — so
+   * any default here would file work into a queue nobody chose. Without this option
+   * `createWork` fails closed naming it, instead of sending a request Jira answers 400.
+   */
+  issueType?: string;
   /** Author accountIds or display names allowed to supply decisions. */
   trustedAuthors?: string[];
   /** Search path; Jira Cloud is migrating `/search` → `/search/jql`. Default `/rest/api/3/search`. */
@@ -87,6 +101,14 @@ const DEFAULT_STATUS_MAP: Record<BoardWorkItemState, string> = {
 
 /** The issue property that carries the run record (versioned inside the block). */
 export const JIRA_STATE_PROPERTY = 'takumi.boardstate.v1';
+
+/**
+ * How many text-search hits `createWork` inspects for an idempotency marker.
+ *
+ * Small on purpose: the marker is confirmed EXACTLY (`createKeyOf`), so the first real
+ * match wins, and the limit only bounds what a fuzzy `text ~` query drags in.
+ */
+const CREATE_SEARCH_LIMIT = 50;
 
 interface AdfNode {
   type?: string;
@@ -137,6 +159,7 @@ export class JiraBoardProvider implements TaskBoardProvider {
   private readonly jql: string;
   private readonly projectKey: string | undefined;
   private readonly statusMap: Record<BoardWorkItemState, string>;
+  private readonly issueType: string | undefined;
   private readonly trustedAuthors: Set<string> | undefined;
   private readonly searchPath: string;
   private readonly request: BoardRequestFn;
@@ -150,6 +173,7 @@ export class JiraBoardProvider implements TaskBoardProvider {
     this.projectKey = opts.projectKey;
     this.jql = opts.jql ?? this.defaultJql();
     this.statusMap = { ...DEFAULT_STATUS_MAP, ...opts.statusMap };
+    this.issueType = opts.issueType;
     this.searchPath = opts.searchPath ?? '/rest/api/3/search';
     this.trustedAuthors = opts.trustedAuthors === undefined ? undefined : new Set(opts.trustedAuthors);
 
@@ -192,6 +216,12 @@ export class JiraBoardProvider implements TaskBoardProvider {
       // (or a workflow-scheme edit), not an API call this adapter may make. So the
       // honest answer is false, and `bootstrapStates()` only REPORTS.
       canBootstrapStates: false,
+      // `POST /rest/api/3/issue` files an issue, so filing is possible. The
+      // idempotency marker rides in the DESCRIPTION, because only the summary and the
+      // description are in the text index a Jira search can reach before a second
+      // create is sent (a label is not text-searchable; a property is not searchable
+      // at all) — see `createWork`.
+      canCreateWork: true,
       delivery: { canOpenPullRequest: false, canRunChecks: false, canMerge: false },
     };
   }
@@ -228,6 +258,121 @@ export class JiraBoardProvider implements TaskBoardProvider {
   async getWork(id: string): Promise<BoardWorkItem> {
     const issue = await this.fetchIssue(id);
     return this.toWorkItem(issue);
+  }
+
+  /**
+   * File an issue, idempotently.
+   *
+   * WHY THE DESCRIPTION CARRIES THE MARKER: filing has to be able to find its own item
+   * before sending a second create, and only the summary and the description are in the
+   * text index Jira's `text ~` search reads. `adfToText` flattens the ADF document, so
+   * the marker written here is exactly what the adapter's own reader finds on the way
+   * back; a label is not text-searchable and an issue property is invisible to search.
+   *
+   * Two things are never guessed:
+   *
+   * 1. the ISSUE TYPE — it comes from the `issueType` option; without it the call fails
+   *    closed naming the option instead of letting Jira answer 400;
+   * 2. the STARTING STATUS — a create answers with `{id,key,self}` and the new issue's
+   *    status is the WORKFLOW's decision, so the item is read back; when the workflow did
+   *    not start it in the status `statusMap` gives the requested state, it is moved
+   *    there through a real transition. Reporting a workflow's initial status as `ready`
+   *    is the exact lie `statusMap` exists to prevent, and a status the project does not
+   *    have at all is refused BEFORE anything is filed.
+   *
+   * RESIDUAL RISK, stated rather than hidden: Jira's text index is eventually
+   * consistent, so an item filed by a previous tick may not be searchable for a few
+   * seconds and a retry inside that window can still file a duplicate. Jira offers no
+   * native idempotency key, so this search is the whole of the guarantee the board can
+   * give; the exact marker is what keeps it from adopting a mere mention of the key.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    const state = spec.state ?? 'ready';
+
+    const projectKey = this.projectKey;
+    if (projectKey === undefined) {
+      throw new BoardError(
+        'precondition',
+        'createWork needs a project to file into: pass the projectKey option (e.g. projectKey: "ACME") — Jira rejects an issue create without one',
+      );
+    }
+    const issueType = this.issueType;
+    if (issueType === undefined || issueType.trim().length === 0) {
+      throw new BoardError(
+        'precondition',
+        'createWork needs an issue type: pass the issueType option (e.g. issueType: "Task") — every Jira issue belongs to one, ' +
+          'and this adapter will not guess which type a project uses',
+      );
+    }
+
+    const key = spec.idempotencyKey;
+    const marker = key === undefined ? null : createMarkerFor(key);
+    if (key !== undefined) {
+      const alreadyFiled = await this.findFiledIssue(projectKey, key);
+      if (alreadyFiled !== null) return { item: this.toWorkItem(alreadyFiled), created: false };
+    }
+
+    // The status the item must START in has to exist in the project's OWN workflow:
+    // Jira resolves a new issue's status from that workflow, so a state whose status
+    // nobody added would land the item somewhere nobody asked for.
+    const target = this.statusMap[state];
+    const available = await this.projectStatusNames(projectKey);
+    if (!available.has(target.toLowerCase())) {
+      throw new BoardError(
+        'precondition',
+        `createWork cannot start an item in state ${JSON.stringify(state)}: project ${projectKey} has no workflow status named ` +
+          `${JSON.stringify(target)} (available: ${[...available].sort().join(', ') || 'none'}). Add that status to the project's ` +
+          'workflow in Jira administration and/or map the state with statusMap (delivery state -> status name) — this adapter ' +
+          'will not file work that starts in a status nobody asked for',
+      );
+    }
+
+    const body = marker === null ? (spec.body ?? '') : `${spec.body ?? ''}\n\n${marker}`;
+    const fields: Record<string, unknown> = {
+      project: { key: projectKey },
+      summary: spec.title,
+      // Jira Cloud v3 takes ADF here, not a plain string: a bare string is rejected.
+      description: textToAdf(body),
+      issuetype: { name: issueType },
+    };
+    // Jira labels are honoured when asked for, and omitted otherwise so the body stays
+    // exactly the documented create shape.
+    if (spec.labels !== undefined && spec.labels.length > 0) fields['labels'] = [...spec.labels];
+
+    const created = await requestBoardJson<JiraIssue>(
+      this.request,
+      { method: 'POST', url: `${this.baseUrl}/rest/api/3/issue`, body: { fields } },
+      'createWork',
+    );
+    if (created.key === undefined) {
+      throw new BoardError(
+        'transport',
+        `Jira accepted a create in ${projectKey} but returned no issue key, so the filed item cannot be addressed`,
+        { item: projectKey },
+      );
+    }
+
+    // A create answers with the new issue's identity, not its fields: the status the
+    // workflow gave it is read back, never assumed from the request that was sent.
+    let issue = created.fields?.status === undefined ? await this.fetchIssue(created.key) : created;
+    if ((issue.fields?.status?.name ?? '').toLowerCase() !== target.toLowerCase()) {
+      // Status names are compared case-insensitively, the way the rest of this adapter
+      // compares them. The transition is what makes "a created item starts in the
+      // requested state" true rather than hoped for.
+      await this.applyStatus(created.key, state);
+      issue = await this.fetchIssue(created.key);
+      const settled = issue.fields?.status?.name;
+      if ((settled ?? '').toLowerCase() !== target.toLowerCase()) {
+        throw new BoardError(
+          'precondition',
+          `filed ${created.key} but this workflow settled it in status ${JSON.stringify(settled ?? null)} instead of ` +
+            `${JSON.stringify(target)} (the status state ${JSON.stringify(state)} maps to)`,
+          { item: created.key },
+        );
+      }
+    }
+    return { item: this.toWorkItem(issue), created: true };
   }
 
   async claim(id: string, runId: string): Promise<ClaimResult> {
@@ -500,6 +645,39 @@ export class JiraBoardProvider implements TaskBoardProvider {
     return result.comments ?? [];
   }
 
+  /**
+   * The issue this adapter already filed for `key`, or `null`.
+   *
+   * The search is Jira's OWN text search (`text ~`), not a scan of `listWork`: a scan is
+   * one page wide and covers only the states the caller asked for, so a duplicate filed
+   * because page one happened not to contain the original is exactly what this avoids.
+   * `text ~` is a fuzzy full-text match, so every hit is confirmed with `createKeyOf` —
+   * the EXACT marker decides, never a passing mention of the key.
+   *
+   * A match is returned as-is whether or not its status still maps: an existing item is
+   * the answer to "was this already filed?", and re-filing because the original moved on
+   * is precisely the duplicate this exists to prevent.
+   */
+  private async findFiledIssue(projectKey: string, key: string): Promise<JiraIssue | null> {
+    const jql = `project = ${projectKey} AND text ~ "${key.replace(/"/g, '\\"')}"`;
+    const found = await requestBoardJson<{ issues?: JiraIssue[] }>(
+      this.request,
+      {
+        method: 'GET',
+        url:
+          `${this.baseUrl}${this.searchPath}?jql=${encodeURIComponent(jql)}` +
+          `&fields=summary,description&maxResults=${CREATE_SEARCH_LIMIT}`,
+      },
+      'createWork: search',
+    );
+    for (const issue of found.issues ?? []) {
+      const description = issue.fields?.description;
+      const text = `${issue.fields?.summary ?? ''}\n${description === undefined ? '' : adfToText(description)}`;
+      if (createKeyOf(text) === key) return issue;
+    }
+    return null;
+  }
+
   private async authenticatedAccountId(): Promise<string | undefined> {
     this.myselfPromise ??= requestBoardJson<{ accountId?: string }>(
       this.request,
@@ -574,6 +752,21 @@ import { renderRunMarker } from '@takumi/core';
 export function runMarker(runId: string): string {
   try {
     return renderRunMarker(runId);
+  } catch (e) {
+    throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
+  }
+}
+
+/**
+ * The create marker is CORE's (`renderCreateMarker`) too: the reader greps for exactly
+ * that spelling, so a second format here would produce items nothing can find again —
+ * which is a duplicate generator, the one thing the marker exists to prevent. A
+ * malformed key is reported as a `precondition` through this port's own error family
+ * instead of escaping as a bare Error.
+ */
+function createMarkerFor(key: string): string {
+  try {
+    return renderCreateMarker(key);
   } catch (e) {
     throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
   }

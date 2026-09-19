@@ -74,7 +74,39 @@ export interface BoardCapabilities {
    * `bootstrapStates()` reports either way.
    */
   canBootstrapStates: boolean;
+  /**
+   * The adapter can FILE a new item. False is honest for a board whose API cannot, and
+   * a caller that needs to file something must check this rather than assume: a failure
+   * that cannot be filed is a failure a human has to read somewhere else.
+   */
+  canCreateWork: boolean;
   delivery: BoardDeliveryCapabilities;
+}
+
+/**
+ * What is needed to file a new work item.
+ *
+ * `idempotencyKey` is not optional in spirit: no board here offers a native idempotency
+ * guarantee, so the key is written into the item as a machine-readable marker and looked
+ * for BEFORE creating. Without it, a retried tick files a second issue for the same
+ * failure — which is how a board fills with duplicates nobody dares close.
+ */
+export interface BoardWorkItemSpec {
+  title: string;
+  body?: string;
+  /** Extra labels, if the board has labels. The state label comes from `state`. */
+  labels?: string[];
+  /** The state the new item starts in. Default `ready`. */
+  state?: BoardWorkItemState;
+  /** Makes a repeated create for the same reason return the FIRST item, not a second. */
+  idempotencyKey?: string;
+}
+
+/** What `createWork` did, and the item either way. */
+export interface CreateWorkResult {
+  item: BoardWorkItem;
+  /** False when the idempotency key was already on the board. */
+  created: boolean;
 }
 
 /** One state's outcome in a bootstrap report. */
@@ -203,6 +235,15 @@ export interface TaskBoardProvider {
   /** List work items the board considers available (the provider's own filter scope). */
   listWork(query?: BoardWorkQuery): Promise<BoardWorkItem[]>;
 
+  /**
+   * File a new item.
+   *
+   * With an `idempotencyKey`, creating twice must yield ONE item: the second call returns
+   * the first, with `created: false`. Adapters with `canCreateWork === false` must fail
+   * `BoardError('unsupported')` — never pretend, and never return a fabricated item.
+   */
+  createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult>;
+
   /** Read one item; unknown id → `BoardError('not_found')`. */
   getWork(id: string): Promise<BoardWorkItem>;
 
@@ -307,6 +348,7 @@ export function assertBoardCapability(
     | 'machineReadableState'
     | 'atomicClaim'
     | 'canBootstrapStates'
+    | 'canCreateWork'
     | 'delivery.canOpenPullRequest'
     | 'delivery.canRunChecks'
     | 'delivery.canMerge',
@@ -318,8 +360,16 @@ export function assertBoardCapability(
     case 'editableComment':
     case 'machineReadableState':
     case 'atomicClaim':
+      if (caps[capability] !== true) throw new BoardUnsupportedError(capability, id);
+      return;
     case 'canBootstrapStates':
       if (caps[capability] !== true) throw new BoardUnsupportedError(capability, id);
+      return;
+    case 'canCreateWork':
+      // Its own case, NOT the fallthrough group above: grouping it there made every
+      // capability in the group check `canCreateWork` instead of its own flag, which
+      // silenced four gate checks at once. The contract suite caught it.
+      if (caps.canCreateWork !== true) throw new BoardUnsupportedError(capability, id);
       return;
     case 'delivery.canOpenPullRequest':
       if (caps.delivery.canOpenPullRequest !== true) throw new BoardUnsupportedError(capability, id);
@@ -406,6 +456,7 @@ export async function runTaskBoardProviderContractSuite(
     'machineReadableState',
     'atomicClaim',
     'canBootstrapStates',
+    'canCreateWork',
   ] as const) {
     if (typeof caps[key] !== 'boolean') throw new Error(`capabilities.${key} must be a boolean`);
   }
@@ -416,8 +467,57 @@ export async function runTaskBoardProviderContractSuite(
     `capabilities: PASS (states=${caps.states.join(',')} atomicClaim=${caps.atomicClaim} ` +
       `comments=${caps.comments} editableComment=${caps.editableComment} machineReadableState=${caps.machineReadableState} ` +
       `trustedAuthorFilter=${caps.trustedAuthorFilter} canBootstrapStates=${caps.canBootstrapStates} ` +
+      `canCreateWork=${caps.canCreateWork} ` +
       `delivery=${JSON.stringify(caps.delivery)})`,
   );
+
+  // --- createWork: filing must be idempotent, or a retried tick duplicates ---
+  // A failure that gets filed twice is worse than one that gets filed never: the board
+  // fills with copies nobody dares close. The suite therefore requires the IDEMPOTENCY
+  // guarantee, not merely that a create succeeds — and requires an honest refusal when
+  // the adapter cannot create at all.
+  const createKey = `contract:${opts.id}:1`;
+  if (caps.canCreateWork) {
+    const first = await provider.createWork({
+      title: `${opts.id} contract probe`,
+      body: 'filed by the shared task-board contract suite',
+      state: 'ready',
+      idempotencyKey: createKey,
+    });
+    if (!first.created) throw new Error('the first create with a fresh idempotency key must report created: true');
+    if (first.item.state !== 'ready') {
+      throw new Error(`a created item must start in the requested state, got ${first.item.state}`);
+    }
+    const second = await provider.createWork({
+      title: `${opts.id} contract probe`,
+      body: 'filed by the shared task-board contract suite',
+      state: 'ready',
+      idempotencyKey: createKey,
+    });
+    if (second.created) throw new Error('the second create with the same idempotency key must NOT create again');
+    if (second.item.id !== first.item.id) {
+      throw new Error(`idempotency returned ${second.item.id}, expected ${first.item.id}`);
+    }
+    const readyNow = await provider.listWork({ states: ['ready'] });
+    const copies = readyNow.filter((item) => item.id === first.item.id).length;
+    if (copies !== 1) throw new Error(`the created item appeared ${copies} times in listWork, expected once`);
+    // A created item must be usable: the caller files work so that work can be done.
+    const claim = await provider.claim(first.item.id, runId);
+    if (!claim.claimed && !/claim/i.test(claim.reason ?? '')) {
+      throw new Error(`a freshly created item could not be claimed: ${claim.reason ?? 'no reason'}`);
+    }
+    notes.push(`createWork: PASS (idempotent on the key, claimable, ${readyNow.length} ready)`);
+  } else {
+    const refused = await provider
+      .createWork({ title: 'must be refused', idempotencyKey: createKey })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    if (refused === null) throw new Error('createWork must fail when capabilities().canCreateWork is false');
+    if (!(refused instanceof BoardError) || refused.kind !== 'unsupported') {
+      throw new Error(`createWork must fail closed as unsupported, got ${String(refused)}`);
+    }
+    notes.push('createWork: PASS (canCreateWork=false, refused as unsupported)');
+  }
 
   // --- state bootstrap: can this board even express the six states? ---
   // This is the first minute of a real deployment: a board that cannot express a

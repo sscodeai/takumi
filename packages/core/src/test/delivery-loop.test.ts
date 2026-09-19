@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   acquireSlot,
   BoardError,
+  BoardUnsupportedError,
   createEventLog,
   DeliveryError,
   formatEventLine,
@@ -66,6 +67,7 @@ class LoopBoard implements TaskBoardProvider {
       machineReadableState: true,
       atomicClaim: true,
       canBootstrapStates: true,
+      canCreateWork: true,
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
   }
@@ -126,6 +128,27 @@ class LoopBoard implements TaskBoardProvider {
     this.records.set(id, record);
     this.seen.push(`record:round${record.reviewRound}`);
   }
+  /** Items this double filed, in order, with the key each was filed under. */
+  readonly filed: Array<{ id: string; title: string; body: string; key?: string }> = [];
+  /** Set to make filing fail, so the fail-soft rule can be tested. */
+  failCreate: Error | null = null;
+
+  async createWork(spec: { title: string; body?: string; state?: BoardWorkItemState; idempotencyKey?: string }): Promise<{ item: BoardWorkItem; created: boolean }> {
+    if (!this.capabilities().canCreateWork) {
+      throw new BoardUnsupportedError('canCreateWork', this.metadata().id);
+    }
+    if (this.failCreate !== null) throw this.failCreate;
+    const existing = spec.idempotencyKey === undefined ? undefined : this.filed.find((f) => f.key === spec.idempotencyKey);
+    if (existing !== undefined) {
+      return { item: { id: existing.id, title: existing.title, body: existing.body, url: `https://board.example/${existing.id}`, state: 'ready', labels: [], assignees: [], updatedAt: '2026-09-15T00:00:00.000Z' }, created: false };
+    }
+    const id = `NEW-${this.filed.length + 1}`;
+    const body = spec.body ?? '';
+    this.filed.push({ id, title: spec.title, body, ...(spec.idempotencyKey === undefined ? {} : { key: spec.idempotencyKey }) });
+    this.items.set(id, { state: spec.state ?? 'ready' });
+    return { item: { id, title: spec.title, body, url: `https://board.example/${id}`, state: spec.state ?? 'ready', labels: [], assignees: [], updatedAt: '2026-09-15T00:00:00.000Z' }, created: true };
+  }
+
   async bootstrapStates(desired: readonly BoardWorkItemState[]): Promise<BoardBootstrapReport> {
     return {
       provider: this.metadata().id,
@@ -704,4 +727,100 @@ test('runDeliveryLoop: the progress record is throttled while the loop waits', a
     `six checks() calls must not mean six board writes (saw ${writes.length}: ${writes.join(', ')})`,
   );
   assert.match(result.steps.map((s) => s.detail).join('\n'), /throttled \(unchanged/);
+});
+
+// --- a red pipeline becomes WORK, not a comment (createWork's reason to exist) ----
+
+test('runDeliveryLoop: exhausted red checks FILE the failure as work, once', async () => {
+  const h = harness();
+  const log = createEventLog();
+  h.delivery.checkRuns = [{ name: 'e2e', conclusion: 'failure' }];
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan: { ...plan, maxReviewRounds: 1, fileIssueOnExhaustedChecks: true },
+    events: log,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'blocked');
+  assert.equal((await h.board.getWork('ITEM-7')).state, 'blocked');
+  assert.equal(h.board.filed.length, 1, 'the failure became exactly one work item');
+  assert.match(h.board.filed[0]?.title ?? '', /CI is red: ITEM-7 \(e2e\)/);
+  assert.match(h.board.filed[0]?.body ?? '', /https:\/\/host\.example\/pull\/1/);
+  assert.equal(log.of('issue.filed')[0]?.fields?.created, true);
+
+  // A human moves the item back to ready (the only way automation resumes it) and the
+  // next run hits the same red pipeline. The filing must NOT become a second issue.
+  const entry = h.board.items.get('ITEM-7');
+  assert.ok(entry !== undefined);
+  entry.state = 'ready';
+  entry.claim = undefined;
+  const again = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan: { ...plan, maxReviewRounds: 1, fileIssueOnExhaustedChecks: true },
+    events: log,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+  assert.equal(again.outcome, 'blocked');
+  assert.equal(h.board.filed.length, 1, 'the same item and pull request must not file a second issue');
+  assert.deepEqual(
+    log.of('issue.filed').map((e) => e.fields?.created),
+    [true, false],
+    'the second attempt reports the first issue rather than creating one',
+  );
+});
+
+test('runDeliveryLoop: a board that cannot file is told so, and the run still blocks', async () => {
+  const h = harness();
+  h.board.capabilities = () => ({ ...LoopBoard.prototype.capabilities.call(h.board), canCreateWork: false });
+  const log = createEventLog();
+  h.delivery.checkRuns = [{ name: 'e2e', conclusion: 'failure' }];
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan: { ...plan, maxReviewRounds: 1, fileIssueOnExhaustedChecks: true },
+    events: log,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'blocked', 'the conclusion is unchanged: filing is a side channel');
+  assert.equal(h.board.filed.length, 0);
+  assert.match(log.of('issue.skipped')[0]?.message ?? '', /cannot file work items/);
+});
+
+test('runDeliveryLoop: a filing that FAILS does not change the delivery conclusion', async () => {
+  const h = harness();
+  const log = createEventLog();
+  h.board.failCreate = new ProviderError('transport', 'the board refused the write');
+  h.delivery.checkRuns = [{ name: 'e2e', conclusion: 'failure' }];
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan: { ...plan, maxReviewRounds: 1, fileIssueOnExhaustedChecks: true },
+    events: log,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'blocked');
+  assert.match(result.error ?? '', /no fix round left/);
+  assert.match(log.of('issue.skipped')[0]?.message ?? '', /refused the write/);
+  assert.equal((await h.board.getWork('ITEM-7')).state, 'blocked', 'the item is still handed to a human');
+});
+
+test('runDeliveryLoop: filing stays OFF unless asked for', async () => {
+  const h = harness();
+  h.delivery.checkRuns = [{ name: 'e2e', conclusion: 'failure' }];
+  const log = createEventLog();
+  await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan: { ...plan, maxReviewRounds: 1 },
+    events: log,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+  assert.equal(h.board.filed.length, 0);
+  assert.equal(log.of('issue.filed').length, 0);
+  assert.equal(log.of('issue.skipped').length, 0, 'nothing is reported when the feature is off');
 });

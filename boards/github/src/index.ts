@@ -2,6 +2,7 @@ import {
   assertBoardCapability,
   BOARD_WORK_ITEM_STATES,
   boardErrorFromResponse,
+  renderCreateMarker,
   BoardError,
   assertTransition,
   createCurlRequestFn,
@@ -15,6 +16,8 @@ import type {
   BoardBootstrapAction,
   BoardBootstrapReport,
   BoardCapabilities,
+  BoardWorkItemSpec,
+  CreateWorkResult,
   BoardCommentAuthor,
   BoardCommentRef,
   BoardProviderMetadata,
@@ -148,6 +151,8 @@ export class GitHubBoardProvider implements TaskBoardProvider {
       // GitHub labels are creatable through the API, so a fresh repository can be
       // made ready by takumi itself instead of by hand.
       canBootstrapStates: true,
+      // Issues are creatable. Filing is how a failure becomes work instead of a comment.
+      canCreateWork: true,
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
   }
@@ -183,6 +188,59 @@ export class GitHubBoardProvider implements TaskBoardProvider {
 
   async getWork(id: string): Promise<BoardWorkItem> {
     return this.toWorkItem(await this.fetchIssue(id));
+  }
+
+  /**
+   * File an issue, idempotently.
+   *
+   * The state is the label, so the new issue starts with the state's label attached —
+   * which means the label must exist: GitHub rejects an issue carrying an unknown label
+   * with a 422. That failure is re-thrown with the fix in it (run `takumi board
+   * --bootstrap`), because the raw "Validation Failed" tells an operator nothing.
+   *
+   * Deduplication goes through the search API rather than a scan of the issue list: a
+   * scan is one page wide (the same limitation `listWork` documents), and a duplicate
+   * filed because the first page did not contain it is exactly what this prevents.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    const state = spec.state ?? 'ready';
+    const marker = spec.idempotencyKey === undefined ? null : renderCreateMarker(spec.idempotencyKey);
+
+    if (marker !== null) {
+      const query = encodeURIComponent(`repo:${this.repo} "${marker}"`);
+      const found = await requestBoardJson<{ items?: GitHubIssue[] }>(
+        this.request,
+        { method: 'GET', url: `${this.apiBase}/search/issues?q=${query}&per_page=10` },
+        'createWork: search',
+      );
+      const hit = (found.items ?? []).find((issue) => (issue.body ?? '').includes(marker));
+      if (hit !== undefined) return { item: this.toWorkItem(hit), created: false };
+    }
+
+    const body = marker === null ? (spec.body ?? '') : `${spec.body ?? ''}\n\n${marker}`;
+    const labels = [...(spec.labels ?? []), this.labelFor(state)];
+    try {
+      const created = await requestBoardJson<GitHubIssue>(
+        this.request,
+        {
+          method: 'POST',
+          url: `${this.apiBase}/repos/${this.repo}/issues`,
+          body: { title: spec.title, body, labels },
+        },
+        'createWork',
+      );
+      return { item: this.toWorkItem(created), created: true };
+    } catch (e) {
+      if (e instanceof BoardError && e.kind === 'precondition' && /label/i.test(e.message)) {
+        throw new BoardError(
+          'precondition',
+          `${e.message} — the state label ${JSON.stringify(this.labelFor(state))} may not exist on ${this.repo}; run \`takumi board --bootstrap\` to create the state labels`,
+          { item: this.repo },
+        );
+      }
+      throw e;
+    }
   }
 
   async claim(id: string, runId: string): Promise<ClaimResult> {

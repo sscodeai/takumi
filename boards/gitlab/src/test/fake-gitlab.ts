@@ -13,6 +13,13 @@
  * It is a test double, NOT a GitLab emulator: only the endpoints, fields and
  * statuses the adapter touches are modelled, and each one is documented with the
  * API fact it stands for.
+ *
+ * What is deliberately NOT modelled: GitLab REFUSES an issue that carries a label
+ * the project does not have (`400 Label(s) not allowed for this project`), but the
+ * shared contract suite files its probe BEFORE it bootstraps the state vocabulary,
+ * so enforcing that rule here would make the suite's own create fail. A test that
+ * wants the refusal injects it with `failWhen` — the same surface the existing
+ * bootstrap tests use — and the adapter's translation of it is proven there.
  */
 
 import type { BoardHttpRequest, BoardHttpResponse, BoardRequestFn } from '@takumi/core';
@@ -277,8 +284,10 @@ export class FakeGitLab {
 
     // GET /issues supports `state`, `labels` (comma-separated = AND) and `per_page`.
     if (segments.length === 3) {
-      if (req.method !== 'GET') return json(405, { message: '405 Method Not Allowed' });
-      return json(200, this.listIssues(url));
+      if (req.method === 'GET') return json(200, this.listIssues(url));
+      // GitLab answers issue creation with 201.
+      if (req.method === 'POST') return this.createIssue(req);
+      return json(405, { message: '405 Method Not Allowed' });
     }
 
     const iid = Number.parseInt(segments[3] ?? '', 10);
@@ -321,6 +330,7 @@ export class FakeGitLab {
   /** List-issue semantics: `state` filter, `labels` filter (all must match), `per_page` slice. */
   private listIssues(url: URL): Record<string, unknown>[] {
     const state = url.searchParams.get('state') ?? 'all';
+    const search = url.searchParams.get('search');
     const wanted = url.searchParams
       .getAll('labels')
       .flatMap((value) => value.split(','))
@@ -330,8 +340,48 @@ export class FakeGitLab {
     return [...this.issues.values()]
       .filter((issue) => state === 'all' || issue.state === state)
       .filter((issue) => wanted.every((label) => issue.labels.includes(label)))
+      // GitLab's `search` greps the title and the description (case-insensitively).
+      // It matches TEXT, not meaning: an issue that merely mentions a create key is
+      // returned too, which is exactly why the adapter confirms a hit with the marker.
+      .filter((issue) => search === null || matchesSearch(issue, search))
       .slice(0, Number.isInteger(perPage) && perPage > 0 ? perPage : 20)
       .map((issue) => this.issueJson(issue));
+  }
+
+  /**
+   * Issue-create semantics: `title` is required (400 without it), `description`
+   * defaults to empty, `labels` is an array, the new iid is the next free one, and
+   * the issue starts `opened` with no notes.
+   */
+  private createIssue(req: BoardHttpRequest): BoardHttpResponse {
+    const body = bodyOf(req);
+    const title = body['title'];
+    if (typeof title !== 'string' || title.length === 0) return json(400, { message: 'title is missing' });
+    const description = body['description'];
+    const labels = Array.isArray(body['labels'])
+      ? body['labels'].filter((label): label is string => typeof label === 'string')
+      : [];
+    const iid = this.nextIid();
+    const issue: FakeIssue = {
+      iid,
+      title,
+      description: typeof description === 'string' ? description : '',
+      webUrl: `https://gitlab.test/${this.project}/-/issues/${iid}`,
+      state: 'opened',
+      labels: [...labels],
+      assignees: [],
+      updatedAt: this.now(),
+      notes: [],
+    };
+    this.issues.set(iid, issue);
+    return json(201, this.issueJson(issue));
+  }
+
+  /** The next free iid: GitLab numbers issues per project, seeded ones included. */
+  private nextIid(): number {
+    let max = 0;
+    for (const iid of this.issues.keys()) max = Math.max(max, iid);
+    return max + 1;
   }
 
   /**
@@ -444,6 +494,12 @@ function splitLabels(value: unknown): string[] {
     .split(',')
     .map((label) => label.trim())
     .filter((label) => label.length > 0);
+}
+
+/** GitLab's `search` on issues: a case-insensitive substring of title or description. */
+function matchesSearch(issue: FakeIssue, term: string): boolean {
+  const needle = term.toLowerCase();
+  return issue.title.toLowerCase().includes(needle) || issue.description.toLowerCase().includes(needle);
 }
 
 function cloneRequest(req: BoardHttpRequest): BoardHttpRequest {

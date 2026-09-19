@@ -6,6 +6,7 @@ import {
   BOARD_WORK_ITEM_STATES,
   BoardError,
   BoardUnsupportedError,
+  renderCreateMarker,
   runTaskBoardProviderContractSuite,
   validateBoardCapabilities,
 } from '../index.js';
@@ -17,9 +18,11 @@ import type {
   BoardCommentRef,
   BoardStateRecord,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkItemState,
   BoardWorkQuery,
   ClaimResult,
+  CreateWorkResult,
   TaskBoardProvider,
 } from '../index.js';
 
@@ -66,8 +69,39 @@ class ProbeProvider implements TaskBoardProvider {
     machineReadableState: true,
     atomicClaim: true,
     canBootstrapStates: true,
+    canCreateWork: true,
     delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
   };
+
+  /**
+   * The probe's createWork: idempotent on the marker, exactly as an adapter must be. The
+   * suite's createWork assertions run against THIS, so a suite that stopped checking the
+   * key would be visible here rather than at an adapter.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    const finding = (): { item: BoardWorkItem; claim?: string } | undefined =>
+      spec.idempotencyKey === undefined
+        ? undefined
+        : [...this.items.values()].find((entry) => entry.item.body.includes(renderCreateMarker(spec.idempotencyKey ?? '')));
+    const existing = finding();
+    if (existing !== undefined) return { item: { ...existing.item }, created: false };
+    this.seq += 1;
+    const id = `T-${this.seq + 1}`;
+    const marker = spec.idempotencyKey === undefined ? '' : `\n\n${renderCreateMarker(spec.idempotencyKey)}`;
+    const item: BoardWorkItem = {
+      id,
+      title: spec.title,
+      body: `${spec.body ?? ''}${marker}`,
+      url: `https://board.example/${id}`,
+      state: spec.state ?? 'ready',
+      labels: [...(spec.labels ?? [])],
+      assignees: [],
+      updatedAt: '2026-09-15T00:00:00.000Z',
+    };
+    this.items.set(id, { item });
+    return { item: { ...item }, created: true };
+  }
 
   metadata() {
     return { id: this.opts.id ?? 'probe', name: 'Probe Board', version: '0.1.0' };

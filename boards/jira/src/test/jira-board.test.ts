@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   BoardError,
   BoardStateError,
+  createKeyOf,
   renderBoardStateRecord,
   runTaskBoardProviderContractSuite,
 } from '@takumi/core';
@@ -83,9 +84,18 @@ function toJiraShape(issue: SimIssue) {
   };
 }
 
-function jiraSimulator(seedIssues: SimIssue[], options: { projectStatuses?: readonly string[] } = {}) {
+function jiraSimulator(
+  seedIssues: SimIssue[],
+  options: { projectStatuses?: readonly string[]; createInitialStatus?: string } = {},
+) {
   const issues = seedIssues;
   const projectStatuses = options.projectStatuses ?? DEFAULT_PROJECT_STATUSES;
+  /**
+   * The status a NEW issue starts in. It is the WORKFLOW's decision in Jira, not the
+   * caller's, which is exactly why `createWork` reads the created issue back; the
+   * default here is a project whose workflow happens to start at `ready`.
+   */
+  const createInitialStatus = options.createInitialStatus ?? 'ready';
   const comments: SimComment[] = [];
   const properties = new Map<string, string>();
   const requests: BoardHttpRequest[] = [];
@@ -122,6 +132,44 @@ function jiraSimulator(seedIssues: SimIssue[], options: { projectStatuses?: read
       const names = wanted === undefined ? undefined : wanted.split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
       return json({ issues: issues.filter((i) => names === undefined || names.includes(i.status)).map(toJiraShape) });
     }
+
+    // The create's dedupe search: `GET /rest/api/3/search?jql=... text ~ "<key>"`. Jira's
+    // `text ~` matches the issue's TEXT (summary and description), which is where the
+    // create marker is written — the double matches the same way rather than on the key
+    // alone, so it cannot pass for a search that would not really find the item.
+    if (req.method === 'GET' && path === '/rest/api/3/search') {
+      const jql = url.searchParams.get('jql') ?? '';
+      const term = /text ~ "(.*)"/.exec(jql)?.[1] ?? '\u0000';
+      return json({
+        issues: issues
+          .filter((issue) => `${issue.summary}\n${adfToText(issue.description)}`.includes(term))
+          .map(toJiraShape),
+      });
+    }
+
+    // What `POST /rest/api/3/issue` answers. The documented create body carries the
+    // project, the summary, an ADF description and the ISSUE TYPE — Jira rejects a
+    // create without the type, which is why the adapter refuses before sending one.
+    if (req.method === 'POST' && path === '/rest/api/3/issue') {
+      const fields = (body['fields'] ?? {}) as Record<string, unknown>;
+      const project = (fields['project'] ?? {}) as { key?: string };
+      const issuetype = (fields['issuetype'] ?? {}) as { name?: string };
+      if (project.key === undefined || issuetype.name === undefined) {
+        return json({ errorMessages: ['issuetype is required'] }, 400);
+      }
+      const number =
+        issues.reduce((max, issue) => Math.max(max, Number(issue.key.replace(/^\D+/, '')) || 0), 0) + 1;
+      const created = makeIssue(`${project.key}-${number}`, createInitialStatus, {
+        summary: String(fields['summary'] ?? ''),
+        description: fields['description'],
+        labels: Array.isArray(fields['labels']) ? (fields['labels'] as string[]) : [],
+      });
+      issues.push(created);
+      // Jira Cloud answers a create with the new issue's IDENTITY only: the status the
+      // workflow gave it is not in this payload, so the adapter has to read it back.
+      return json({ id: String(10_000 + number), key: created.key, self: `${BASE}/rest/api/3/issue/${String(10_000 + number)}` }, 201);
+    }
+
     const issueMatch = /^\/rest\/api\/3\/issue\/([^/]+)$/.exec(path);
     if (req.method === 'GET' && issueMatch) {
       const found = issues.find((i) => i.key === issueMatch[1]);
@@ -215,12 +263,19 @@ function provider(sim: ReturnType<typeof jiraSimulator>, extra: Record<string, u
 const RUN = 'c0ffee01';
 
 test('JiraBoardProvider: shared task-board contract suite', async (t) => {
+  // The suite files an item itself now, so the adapter needs the one thing it refuses
+  // to guess: the issue type this project's issues are created as.
   const sim = jiraSimulator([makeIssue('ACME-1', 'ready')]);
-  const out = await runTaskBoardProviderContractSuite(provider(sim), { id: 'jira', itemId: 'ACME-1' });
+  const out = await runTaskBoardProviderContractSuite(provider(sim, { issueType: 'Task' }), {
+    id: 'jira',
+    itemId: 'ACME-1',
+  });
   assert.equal(out.gate, 'task-board-contract');
-  // The suite's own verdict on the state-bootstrap port, printed as a diagnostic so
-  // the evidence is in the run's output and not only in an assertion message.
-  for (const note of out.notes.filter((n) => n.startsWith('bootstrapStates:'))) t.diagnostic(note);
+  // The suite's own verdict on the state-bootstrap and create ports, printed as a
+  // diagnostic so the evidence is in the run's output and not only in an assertion.
+  for (const note of out.notes.filter((n) => n.startsWith('bootstrapStates:') || n.startsWith('createWork:'))) {
+    t.diagnostic(note);
+  }
   // Jira passes everything except the trust-boundary check: without a configured
   // author allowlist there is no trust signal to prove, so the suite reports the
   // round-trip as PARTIAL instead of pretending.
@@ -228,6 +283,12 @@ test('JiraBoardProvider: shared task-board contract suite', async (t) => {
   assert.ok(out.notes.some((n) => n.includes('trustedAuthorFilter=false')), out.notes.join('\n'));
   assert.ok(out.notes.some((n) => n.startsWith('claim: PASS')));
   assert.ok(out.notes.some((n) => n.startsWith('terminal: PASS')));
+  // Filing: the created item appeared once among the ready work and was claimable, and
+  // the suite's second create with the same key found the first instead of filing again.
+  assert.ok(
+    out.notes.some((n) => n.startsWith('createWork: PASS (idempotent on the key, claimable,')),
+    out.notes.join('\n'),
+  );
   // The suite calls bootstrapStates itself now: Jira can express all six states
   // (the seeded project has the six workflow statuses), but it reports them rather
   // than creating them — canCreate=false, nothing created, nothing not-creatable.
@@ -249,6 +310,7 @@ test('capabilities: no delivery side at all, and trust only when the caller decl
     false,
     'a Jira status lives in a workflow and is created in administration, so this adapter only reports',
   );
+  assert.equal(caps.canCreateWork, true, 'POST /rest/api/3/issue files an issue, so filing is declared');
 
   const withTrust = createJiraBoardProvider({
     baseUrl: BASE,
@@ -322,6 +384,162 @@ test('bootstrapStates: with no project configured every state is a reported conf
   assert.match(report.actions[0]?.instruction ?? '', /no Jira project is configured/);
   assert.match(report.actions[0]?.instruction ?? '', /projectKey/);
   assert.equal(sim.requests.length, 0, 'with no project there is nothing to read, so no request is made');
+});
+
+// --- createWork --------------------------------------------------------------
+
+test('createWork: files an ADF issue in the requested state, marker in the description', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')]);
+  const board = provider(sim, { issueType: 'Task' });
+
+  const first = await board.createWork({
+    title: 'CI is red on main',
+    body: 'the pipeline failed before this run started',
+    labels: ['ci'],
+    idempotencyKey: 'ci-red:acme:main',
+  });
+  assert.equal(first.created, true);
+  assert.equal(first.item.id, 'ACME-2');
+  assert.equal(first.item.state, 'ready', 'the created item starts in the requested state');
+  assert.equal(first.item.title, 'CI is red on main');
+  // The adapter's OWN description reader finds the marker again: that is what makes the
+  // item adoptable by a later tick.
+  assert.equal(createKeyOf(first.item.body), 'ci-red:acme:main');
+  assert.equal(
+    first.item.body,
+    'the pipeline failed before this run started\n\n<!-- takumi:created=ci-red:acme:main -->',
+  );
+
+  // Search first (nothing filed yet), then the project's own workflow, then the create,
+  // then the read-back that reveals the status the workflow gave the new issue.
+  assert.deepEqual(
+    sim.requests.map((req) => `${req.method} ${new URL(req.url).pathname}`),
+    [
+      'GET /rest/api/3/search',
+      'GET /rest/api/3/project/ACME/statuses',
+      'POST /rest/api/3/issue',
+      'GET /rest/api/3/issue/ACME-2',
+    ],
+  );
+  const search = sim.requests[0];
+  assert.equal(
+    search?.url,
+    `${BASE}/rest/api/3/search?jql=${encodeURIComponent('project = ACME AND text ~ "ci-red:acme:main"')}` +
+      '&fields=summary,description&maxResults=50',
+    'the dedupe search is Jira text search, scoped to the project',
+  );
+
+  const create = sim.requests.find((req) => req.method === 'POST' && req.url.endsWith('/rest/api/3/issue'));
+  assert.deepEqual(create?.body, {
+    fields: {
+      project: { key: 'ACME' },
+      summary: 'CI is red on main',
+      // Jira Cloud v3 takes ADF, not a plain string: the marker is a text node.
+      description: textToAdf('the pipeline failed before this run started\n\n<!-- takumi:created=ci-red:acme:main -->'),
+      issuetype: { name: 'Task' },
+      labels: ['ci'],
+    },
+  });
+  const adf = (create?.body as { fields: { description: unknown } }).fields.description;
+  assert.match(adfToText(adf), /<!-- takumi:created=ci-red:acme:main -->/);
+});
+
+test('createWork: a retried tick adopts the first item instead of filing a second', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')]);
+  const board = provider(sim, { issueType: 'Task' });
+
+  const first = await board.createWork({ title: 'flaky spec', idempotencyKey: 'flaky:spec:9' });
+  sim.clearRequests();
+  const second = await board.createWork({ title: 'flaky spec', idempotencyKey: 'flaky:spec:9' });
+
+  assert.equal(second.created, false, 'the key was already on the board');
+  assert.equal(second.item.id, first.item.id, 'the FIRST item comes back, not a new one');
+  assert.deepEqual(
+    sim.requests.map((req) => req.method),
+    ['GET'],
+    'the retry searches and files nothing: no second create reached the host',
+  );
+  assert.equal(sim.issues.length, 2, 'the seeded issue plus ONE filed, not two');
+});
+
+test('createWork: without a key the title never dedupes — the key is the guarantee', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')]);
+  const board = provider(sim, { issueType: 'Task' });
+
+  const first = await board.createWork({ title: 'same title' });
+  const second = await board.createWork({ title: 'same title' });
+  assert.equal(first.created, true);
+  assert.equal(second.created, true);
+  assert.notEqual(second.item.id, first.item.id);
+  assert.ok(first.item.body === '', 'no key means no marker to find, and no invented one');
+});
+
+test('createWork: an item the workflow started elsewhere is moved to the requested state', async () => {
+  // A project whose workflow starts new issues in `blocked`. The status a create lands
+  // in is the WORKFLOW's decision, so the adapter reads it back and moves the item:
+  // reporting that as `ready` would be the lie `statusMap` exists to prevent.
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')], { createInitialStatus: 'blocked' });
+  const board = provider(sim, { issueType: 'Task' });
+
+  const result = await board.createWork({ title: 'started somewhere else' });
+  assert.equal(result.created, true);
+  assert.equal(result.item.state, 'ready', 'the requested state is guaranteed, not assumed');
+  const transition = sim.requests.find((req) => req.method === 'POST' && req.url.endsWith('/transitions'));
+  assert.equal(transition?.url, `${BASE}/rest/api/3/issue/ACME-2/transitions`);
+  assert.deepEqual(transition?.body, { transition: { id: 't-ready' } }, 'a REAL transition id, resolved by name');
+  assert.equal(sim.issues[1]?.status, 'ready');
+});
+
+test('createWork: a missing issue type is refused, naming the option, before any request', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')]);
+
+  await assert.rejects(
+    () => provider(sim).createWork({ title: 'no issue type' }),
+    (e: unknown) => e instanceof BoardError && e.kind === 'precondition' && /issueType/.test(e.message),
+  );
+  // A create also needs a project, and that is the option it names when it is missing.
+  const noProject = new JiraBoardProvider({ baseUrl: BASE, request: sim.request, issueType: 'Task' });
+  await assert.rejects(
+    () => noProject.createWork({ title: 'no project' }),
+    (e: unknown) => e instanceof BoardError && e.kind === 'precondition' && /projectKey/.test(e.message),
+  );
+  assert.equal(sim.requests.length, 0, 'a create this adapter cannot shape correctly is never sent to Jira');
+});
+
+test('createWork: an unmapped status is refused, so nothing is filed in a status nobody asked for', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')], { projectStatuses: ['claimed', 'merged'] });
+  const board = provider(sim, { issueType: 'Task' });
+
+  await assert.rejects(
+    () => board.createWork({ title: 'nowhere to start' }),
+    (e: unknown) =>
+      e instanceof BoardError && e.kind === 'precondition' && /no workflow status named "ready"/.test(e.message),
+  );
+  assert.ok(
+    sim.requests.every((req) => req.method === 'GET'),
+    'the project workflow was read; no create was sent',
+  );
+  assert.equal(sim.issues.length, 1, 'nothing was filed');
+
+  // An unmapped state NAMES the state, so the operator knows which mapping to fix.
+  const mapped = provider(sim, { issueType: 'Task', statusMap: { ready: 'Nowhere' } });
+  await assert.rejects(
+    () => mapped.createWork({ title: 'still nowhere' }),
+    (e: unknown) =>
+      e instanceof BoardError &&
+      e.kind === 'precondition' &&
+      /state "ready"/.test(e.message) &&
+      /"Nowhere"/.test(e.message),
+  );
+});
+
+test('createWork: a malformed idempotency key fails as precondition, never an unfindable marker', async () => {
+  const sim = jiraSimulator([makeIssue('ACME-1', 'ready')]);
+  await assert.rejects(
+    () => provider(sim, { issueType: 'Task' }).createWork({ title: 'bad key', idempotencyKey: 'not a key!' }),
+    (e: unknown) => e instanceof BoardError && e.kind === 'precondition' && /invalid idempotency key/.test(e.message),
+  );
+  assert.equal(sim.requests.length, 0, 'the key is validated before anything is sent');
 });
 
 test('request shapes: search is JQL-scoped to the mapped status, transitions are resolved by name', async () => {

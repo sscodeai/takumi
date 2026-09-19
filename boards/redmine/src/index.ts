@@ -37,6 +37,15 @@
  *    no merge, so `delivery` is all false and a caller that needs those is told so
  *    instead of discovering it in production.
  *
+ * WHAT `createWork` FILES, AND WHAT IT REFUSES TO GUESS: an issue is created through
+ * `POST /issues.json` in the status the requested state maps to, with the idempotency
+ * marker written into the DESCRIPTION (Redmine's issue query exposes a `description`
+ * text filter, so the marker is findable server-side before a second create is sent —
+ * see `createWork`). The project must be the NUMERIC id Redmine's `project_id` really
+ * is, and a state whose status this installation does not have fails naming the state
+ * rather than filing work into the wrong status. Labels are refused, not dropped,
+ * because a core Redmine issue has nowhere to put them.
+ *
  * WHY A JOURNAL CANNOT FORGE THE RUN STATE: the record is addressed by CUSTOM
  * FIELD ID/NAME, not by scanning text. A commenter (or a bot with comment rights)
  * can paste `<!-- takumi:boardstate:v1 {...} -->` into a journal and `readState`
@@ -47,11 +56,13 @@
 
 import {
   assertBoardCapability,
+  renderCreateMarker,
   assertBoardHttpOk,
   assertTransition,
   BoardError,
   BOARD_WORK_ITEM_STATES,
   createCurlRequestFn,
+  createKeyOf,
   parseBoardStateRecord,
   renderBoardStateRecord,
   requestBoardJson,
@@ -68,9 +79,11 @@ import type {
   BoardStateRecord,
   BoardTransitionEvidence,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkItemState,
   BoardWorkQuery,
   ClaimResult,
+  CreateWorkResult,
   CurlRequestFnOptions,
   TaskBoardProvider,
 } from '@takumi/core';
@@ -117,6 +130,10 @@ export interface RedmineBoardOptions {
    * so a slug here yields Redmine's own (empty) answer rather than a client-side
    * guess. Callers that only hold an identifier should look the numeric id up with
    * `GET /projects/<identifier>.json`.
+   *
+   * `createWork` is stricter for the same reason, because filing is a WRITE: a create
+   * with a non-numeric project FAILS closed (naming the id to look up) rather than
+   * filing work wherever Redmine would resolve an identifier to.
    */
   project?: string;
   /** API key for `X-Redmine-API-Key`; falls back to `process.env.REDMINE_API_KEY`. */
@@ -175,7 +192,11 @@ interface RedmineIssuePayload {
   allowed_statuses?: Array<{ id?: number; name?: string }>;
 }
 
-/** The envelope `/issues.json` answers with. */
+/** What `POST /issues.json` answers with: `{ issue: {...} }`. */
+interface RedmineIssueEnvelope {
+  issue?: RedmineIssuePayload;
+}
+
 interface RedmineIssuePage {
   issues?: RedmineIssuePayload[];
   total_count?: number;
@@ -244,6 +265,11 @@ export class RedmineBoardProvider implements TaskBoardProvider {
       // read-only, so a status cannot be created through this API. The honest
       // answer is false, and `bootstrapStates()` only REPORTS.
       canBootstrapStates: false,
+      // `POST /issues.json` files an issue. The idempotency marker goes into the
+      // DESCRIPTION, because that is both where a human expects the reason and what
+      // Redmine's `description` text filter can search BEFORE a second create is sent
+      // (the state custom field already has exactly one writer: the run record).
+      canCreateWork: true,
       delivery: { canOpenPullRequest: false, canRunChecks: false, canMerge: false },
     };
   }
@@ -335,6 +361,83 @@ export class RedmineBoardProvider implements TaskBoardProvider {
 
   async getWork(id: string): Promise<BoardWorkItem> {
     return this.toWorkItem(await this.fetchIssue(id));
+  }
+
+  /**
+   * File an issue in the status the requested state maps to.
+   *
+   * Three things this refuses to guess, because each of them would put work in the wrong
+   * place: an unmapped state (no `statusMap` entry, or a status this instance does not
+   * have) fails naming the available statuses rather than filing something in the wrong
+   * one; a `labels` request fails because Redmine core issues have no labels; and a
+   * project is used exactly as the adapter already uses it (the numeric id), never
+   * resolved from a name.
+   *
+   * Deduplication: the marker is written into the DESCRIPTION and looked for with
+   * Redmine's full-text search first, then VERIFIED locally by fetching the candidates and
+   * parsing the description with `createKeyOf`. The search is a prefilter, the local check
+   * is authoritative — Redmine's search index can lag behind a write by seconds, and a
+   * duplicate filed because the index had not caught up is the thing this prevents. That
+   * lag is the known limit here; it is stated rather than hidden.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    if (spec.labels !== undefined && spec.labels.length > 0) {
+      throw new BoardError(
+        'unsupported',
+        'Redmine core issues carry no labels, so a create with labels cannot be honoured (refusing instead of dropping them)',
+      );
+    }
+
+    const state = spec.state ?? 'ready';
+    const marker = spec.idempotencyKey === undefined ? null : renderCreateMarker(spec.idempotencyKey);
+
+    if (marker !== null) {
+      const search = await requestBoardJson<{ results?: Array<{ id?: number; type?: string }> }>(
+        this.request,
+        {
+          method: 'GET',
+          url: `${this.baseUrl}/search.json?issues=1&limit=100&q=${encodeURIComponent(spec.idempotencyKey ?? '')}`,
+        },
+        'createWork: search',
+      );
+      const candidates = (search.results ?? []).filter((r) => r.type === 'issue' && typeof r.id === 'number');
+      for (const candidate of candidates) {
+        const issue = await this.fetchIssue(String(candidate.id));
+        if (Object.values(this.issueDescription(issue)).some((text) => text.includes(marker))) {
+          return { item: this.toWorkItem(issue), created: false };
+        }
+      }
+    }
+
+    const statusId = await this.resolveStatusId(this.statusMap[state]);
+    const description = marker === null ? (spec.body ?? '') : `${spec.body ?? ''}\n\n${marker}`;
+    const created = await requestBoardJson<RedmineIssueEnvelope>(
+      this.request,
+      {
+        method: 'POST',
+        url: `${this.baseUrl}/issues.json`,
+        body: {
+          issue: {
+            ...(this.project === undefined ? {} : { project_id: this.project }),
+            subject: spec.title,
+            description,
+            status_id: statusId,
+          },
+        },
+      },
+      'createWork',
+    );
+    const issue = created.issue;
+    if (issue === undefined) {
+      throw new BoardError('precondition', 'Redmine accepted the create but returned no issue');
+    }
+    return { item: this.toWorkItem(issue), created: true };
+  }
+
+  /** The description as this adapter sees it: one field today, and one place to look. */
+  private issueDescription(issue: RedmineIssuePayload): Record<string, string> {
+    return typeof issue.description === 'string' ? { description: issue.description } : {};
   }
 
   /**

@@ -54,7 +54,7 @@ function issue(number: number, labels: string[], extra: Partial<SimIssue> = {}):
   };
 }
 
-function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = [], seedLabels: string[] = []) {
+function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = [], seedLabels: string[] = ['takumi-ready']) {
   const issues = seedIssues;
   const comments = seedComments;
   /** Repository labels: what `bootstrapStates` lists and creates. */
@@ -76,6 +76,25 @@ function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = []
     const commentPatch = /^\/repos\/([^/]+)\/([^/]+)\/issues\/comments\/(\d+)$/.exec(path);
 
     if (req.method === 'GET' && path === '/user') return json({ login: 'bot-user' });
+
+    // Issue filing: the search createWork deduplicates through, and the create itself.
+    if (req.method === 'GET' && path === '/search/issues') {
+      const wanted = decodeURIComponent(url.searchParams.get('q') ?? '').replace(/^repo:[^\s]+\s+/, '');
+      const term = wanted.replace(/^"|"$/g, '');
+      return json({ total_count: issues.length, items: issues.filter((i) => (i.body ?? '').includes(term)) });
+    }
+    if (req.method === 'POST' && /^\/repos\/([^/]+)\/([^/]+)\/issues$/.test(path)) {
+      const wanted = (body['labels'] ?? []) as string[];
+      // A label GitHub does not have is a 422, which createWork must translate into the fix.
+      const missing = wanted.filter((label) => !labels.includes(label));
+      if (missing.length > 0) {
+        return json({ message: 'Validation Failed', errors: [{ field: 'labels', code: 'missing' }] }, 422);
+      }
+      const number = issues.length === 0 ? 1 : Math.max(...issues.map((i) => i.number)) + 1;
+      const created = issue(number, labels, { body: String(body['body'] ?? ''), title: String(body['title'] ?? '') });
+      issues.push(created);
+      return json(created, 201);
+    }
 
     // Repository labels: what bootstrapStates lists and creates.
     const repoLabels = /^\/repos\/([^/]+)\/([^/]+)\/labels$/.exec(path);
@@ -445,4 +464,60 @@ test('fail closed without a transport: a missing token is an auth error, not a h
 
 test('options: a malformed repo is rejected at construction', () => {
   assert.throws(() => new GitHubBoardProvider({ repo: 'no-slash', request: async () => ({ status: 200, body: '{}' }) }), /owner\/name/);
+});
+
+test('createWork: files an issue in `ready`, and the same key never files a second one', async () => {
+  const sim = githubSimulator([issue(7, ['takumi-ready'])]);
+  const board = provider(sim);
+
+  const first = await board.createWork({
+    title: 'CI is red on main',
+    body: 'the build failed before this run started',
+    idempotencyKey: 'ci-red:repo:main',
+  });
+  assert.equal(first.created, true);
+  assert.equal(first.item.state, 'ready', 'the new issue carries the state label, which IS the state');
+  assert.equal(first.item.title, 'CI is red on main');
+
+  const create = sim.requests.find((r) => r.method === 'POST' && r.url.endsWith('/issues'));
+  const body = create?.body as Record<string, unknown>;
+  assert.deepEqual(body['labels'], ['takumi-ready']);
+  assert.match(String(body['body']), /<!-- takumi:created=ci-red:repo:main -->/);
+
+  // The retry: the tick runs again, the search finds the first issue, nothing is filed.
+  const second = await board.createWork({ title: 'CI is red on main', idempotencyKey: 'ci-red:repo:main' });
+  assert.equal(second.created, false);
+  assert.equal(second.item.id, first.item.id);
+  assert.equal(
+    sim.requests.filter((r) => r.method === 'POST' && r.url.endsWith('/issues')).length,
+    1,
+    'exactly one create ever reached the host',
+  );
+  assert.equal(sim.issues.length, 2, 'the original issue plus one filed, not two filed');
+});
+
+test('createWork: a missing state label tells the operator to bootstrap', async () => {
+  const sim = githubSimulator([], [], []); // no labels on the repository at all
+  const board = provider(sim);
+  await assert.rejects(
+    () => board.createWork({ title: 'filed without bootstrap' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'precondition');
+      assert.match(e.message, /takumi board --bootstrap/);
+      assert.match(e.message, /takumi-ready/);
+      return true;
+    },
+  );
+});
+
+test('createWork: an unkeyed call files every time (the key is what dedupes, not the title)', async () => {
+  const sim = githubSimulator([], [], ['takumi-ready', 'other']);
+  const board = provider(sim);
+  const first = await board.createWork({ title: 'same title' });
+  const second = await board.createWork({ title: 'same title' });
+  assert.equal(first.created, true);
+  assert.equal(second.created, true);
+  assert.notEqual(first.item.id, second.item.id);
+  assert.equal(sim.requests.some((r) => r.url.includes('/search/issues')), false, 'no key means no search');
 });

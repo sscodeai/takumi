@@ -37,6 +37,11 @@
  *    pages until one comes back short (note 3 applies to any list endpoint) and
  *    creates what is missing, with one shared colour; a label that already
  *    exists is reported `exists` and never rewritten.
+ * 5. `createWork()` files issues, and is idempotent through a MARKER rather than a
+ *    native key: GitLab has none, so the item carries CORE's create marker in its
+ *    description and a create SEARCHES for it before writing (see `createWork`).
+ *    The search is one page wide (note 3), which is the honest reach of the
+ *    guarantee — the failure mode is described where it is made, never hidden.
  */
 
 import {
@@ -45,9 +50,11 @@ import {
   assertTransition,
   BoardError,
   BOARD_WORK_ITEM_STATES,
+  createKeyOf,
   createCurlRequestFn,
   newestBoardStateRecord,
   parseBoardStateRecord,
+  renderCreateMarker,
   renderBoardStateRecord,
   unconfiguredRequestFn,
 } from '@takumi/core';
@@ -63,9 +70,11 @@ import type {
   BoardStateRecord,
   BoardTransitionEvidence,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkItemState,
   BoardWorkQuery,
   ClaimResult,
+  CreateWorkResult,
   TaskBoardProvider,
 } from '@takumi/core';
 
@@ -141,6 +150,23 @@ import { renderRunMarker } from '@takumi/core';
 function runMarker(runId: string): string {
   try {
     return renderRunMarker(runId);
+  } catch (e) {
+    throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
+  }
+}
+
+/**
+ * The create marker is CORE's (`renderCreateMarker`): one grammar for one thing
+ * and — because the reader greps for exactly this spelling — the only thing that
+ * makes a retried create find what the first one filed.
+ *
+ * A malformed key fails HERE, as this port's own `precondition`, and before any
+ * request: a marker nothing can find again is a duplicate generator, which is the
+ * one outcome this whole mechanism exists to prevent.
+ */
+function markerFor(key: string): string {
+  try {
+    return renderCreateMarker(key);
   } catch (e) {
     throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
   }
@@ -305,6 +331,9 @@ export class GitLabBoardProvider implements TaskBoardProvider {
       // its own vocabulary instead of asking a human to click six labels first
       // (see the class doc note 4).
       canBootstrapStates: true,
+      // Issues are creatable, so a failure that has to become work CAN become work
+      // here instead of only being commented on (see the class doc note 5).
+      canCreateWork: true,
       // GitLab has merge requests and pipelines, so the delivery side is real.
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
@@ -331,6 +360,69 @@ export class GitLabBoardProvider implements TaskBoardProvider {
   /** Read one issue; an unknown iid is GitLab's 404 → `BoardError('not_found')`. */
   async getWork(id: string): Promise<BoardWorkItem> {
     return this.toWorkItem(await this.fetchIssue(id));
+  }
+
+  /**
+   * File a new issue — idempotently, or not at all.
+   *
+   * The delivery state IS a label, so the issue is filed carrying the state's label
+   * (plus any `spec.labels`) and is therefore immediately a normal work item: it
+   * lists, claims and transitions like any other. That also means the state label
+   * has to exist before this can succeed, which is why a refusal is translated into
+   * an instruction rather than passed through (see `createFailure`).
+   *
+   * WHY a search and not a `listWork` scan: no board here has a native idempotency
+   * key, so the key is rendered by CORE (`renderCreateMarker`) into the issue's
+   * description and looked for BEFORE writing anything. A scan of the issue list
+   * would be one page wide and would miss a delivered item (whose state label no
+   * longer matches) — and a duplicate filed because the first page did not contain
+   * the item is exactly the outcome this prevents.
+   *
+   * HOW FAR the guarantee reaches, stated plainly: the search endpoint answers one
+   * page (100 items, class doc note 3 — the seam exposes no `X-Next-Page`), and a
+   * `search` index can lag behind a write on installations backed by advanced
+   * search. If the search cannot SEE the item, this method files a second one and
+   * reports `created: true`; the caller should expect that, and the marker makes the
+   * duplicate findable by hand. It is not silently skipped: every create searches.
+   * The alternative — trusting the search and returning a fabricated item — would be
+   * worse: a caller that gets `created: true` must be able to believe it.
+   *
+   * The adoption test is the marker itself (`createKeyOf`), never the search hit: an
+   * issue that merely MENTIONS the key in prose was not created for it and must not
+   * be adopted, or a retry would silently point at somebody else's issue.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    const state = spec.state ?? 'ready';
+    const key = spec.idempotencyKey;
+    const marker = key === undefined ? null : markerFor(key);
+
+    if (key !== undefined && marker !== null) {
+      const existing = await this.findByCreateKey(key);
+      if (existing !== null) return { item: this.toWorkItem(existing), created: false };
+    }
+
+    const labels = [...(spec.labels ?? []), this.labelFor(state)];
+    try {
+      const created = await this.send<GitLabIssuePayload>(
+        {
+          method: 'POST',
+          url: this.issuesPath,
+          body: { title: spec.title, description: withCreateMarker(spec.body ?? '', marker), labels },
+        },
+        'createWork',
+      );
+      if (created.iid === undefined || created.iid === null) {
+        // A 2xx without an iid is not a filed item: reporting one would hand the
+        // caller an id that addresses nothing.
+        throw new BoardError('transport', `createWork filed ${JSON.stringify(spec.title)} but GitLab returned no iid`, {
+          item: this.projectId,
+        });
+      }
+      return { item: this.toWorkItem(created), created: true };
+    } catch (e) {
+      throw this.createFailure(e, state);
+    }
   }
 
   /**
@@ -709,6 +801,35 @@ export class GitLabBoardProvider implements TaskBoardProvider {
   }
 
   /**
+   * The issue a create key already filed, or `null`.
+   *
+   * `state=all` on purpose: an item filed by a previous tick may since have been
+   * claimed, delivered or closed, and a search that only looked at open issues
+   * would file a SECOND copy of work that is already done.
+   *
+   * The KEY is what gets searched for (a plain token an index can match), but a
+   * search hit is not proof: GitLab's full-text search also returns an issue that
+   * merely MENTIONS the key. The hit is therefore confirmed with `createKeyOf`,
+   * which only answers for an item that carries the real marker.
+   */
+  private async findByCreateKey(key: string): Promise<GitLabIssuePayload | null> {
+    const issues = asArray(
+      await this.send<GitLabIssuePayload[]>({ method: 'GET', url: this.searchUrl(key) }, `searchIssues ${key}`),
+    );
+    return issues.find((issue) => createKeyOf(issue.description ?? undefined) === key) ?? null;
+  }
+
+  /**
+   * The create-search URL. `per_page` sits at the API ceiling because one page is
+   * all this seam can follow (class doc note 3): the limit is real, and the comment
+   * on `createWork` says what a caller should expect when it is hit.
+   */
+  private searchUrl(key: string): string {
+    const params = [`search=${encodeURIComponent(key)}`, 'state=all', `per_page=${PAGE_SIZE}`];
+    return `${this.issuesPath}?${params.join('&')}`;
+  }
+
+  /**
    * Replace the issue's state label: add the target and drop every OTHER state
    * label the issue physically carries (see `transition`). Both keys are always
    * sent so the request shape is stable and one write is enough.
@@ -755,6 +876,32 @@ export class GitLabBoardProvider implements TaskBoardProvider {
       { method: 'POST', url: this.labelsPath, body: { name, color: STATE_LABEL_COLOR } },
       `createLabel ${name}`,
     );
+  }
+
+  /**
+   * Translate a rejected create into this port's classified error, naming the fix.
+   *
+   * GitLab's own answer for an issue carrying a label the project does not have is
+   * `400 {"message":"Label(s) not allowed for this project: ..."}` — true, classified
+   * by the shared status table as `precondition` (retrying changes nothing), and
+   * useless to an operator. The adapter therefore adds the state label it tried to
+   * attach and the command that creates it; `canBootstrapStates` is true on this
+   * board, so that instruction is a real answer, not hand-waving.
+   *
+   * Anything else (an `auth` or `transport` failure) is returned untouched: the
+   * taxonomy already said what it was, and inventing a second message for it would
+   * hide the status.
+   */
+  private createFailure(e: unknown, state: BoardWorkItemState): unknown {
+    if (e instanceof BoardError && e.kind === 'precondition' && /label/i.test(e.message)) {
+      return new BoardError(
+        'precondition',
+        `${e.message} — nothing was filed: the state label ${JSON.stringify(this.labelFor(state))} may not exist in ` +
+          `project ${decodeURIComponent(this.projectId)}; run \`takumi board --bootstrap\` to create the state labels`,
+        { item: this.projectId, cause: e },
+      );
+    }
+    return e;
   }
 
   // --- vocabulary ---------------------------------------------------------
@@ -917,6 +1064,17 @@ function bodyOf(note: GitLabNotePayload): string {
 /** Append the hidden run marker unless the text already carries it. */
 function withMarker(text: string, marker: string): string {
   return text.includes(marker) ? text : `${text}\n\n${marker}`;
+}
+
+/**
+ * The description a create writes: the caller's body plus the hidden create marker.
+ *
+ * No marker (no idempotency key) means the description is exactly the caller's body —
+ * never a stray blank line, because the description is also what a human reads.
+ */
+function withCreateMarker(body: string, marker: string | null): string {
+  if (marker === null) return body;
+  return body.length === 0 ? marker : `${body}\n\n${marker}`;
 }
 
 /** GitLab list endpoints return `[]`; anything else (e.g. an error object) is treated as empty. */

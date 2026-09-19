@@ -194,6 +194,39 @@ function redmineSimulator(seedIssues: SimIssue[]) {
       });
     }
 
+    // Filing: createWork posts here, and searches with /search.json first.
+    if (req.method === 'POST' && path === '/issues.json') {
+      const fields = (body['issue'] ?? {}) as Record<string, unknown>;
+      const statusId = fields['status_id'];
+      if (STATUSES.find((status) => status.id === statusId) === undefined) {
+        return json({ errors: ['Status is not valid'] }, 422);
+      }
+      const created: SimIssue = {
+        id: Math.max(0, ...issues.map((issue) => issue.id)) + 1,
+        subject: String(fields['subject'] ?? ''),
+        description: String(fields['description'] ?? ''),
+        statusId: Number(statusId),
+        assignee: null,
+        updatedOn: '2026-09-15T00:00:00Z',
+        // A real instance gives the tracker's issues the state custom field, empty; a
+        // created issue without it could not be claimed (the write would 422), which is
+        // exactly what the suite caught when this double first omitted it.
+        customFields: [{ id: STATE_FIELD_ID, name: STATE_FIELD_NAME, value: null }],
+        journals: [],
+      };
+      issues.push(created);
+      return json({ issue: serialize(created) }, 201);
+    }
+
+    if (req.method === 'GET' && path === '/search.json') {
+      // Redmine's full-text search answers issues whose description contains the term.
+      const query = url.searchParams.get('q') ?? '';
+      const hits = issues.filter(
+        (issue) => issue.subject.includes(query) || issue.description.includes(query),
+      );
+      return json({ results: hits.map((issue) => ({ id: issue.id, type: 'issue', title: issue.subject })) });
+    }
+
     const issuePath = /^\/issues\/(\d+)\.json$/.exec(path);
     if (issuePath !== null && req.method === 'GET') {
       // Redmine only returns the comment thread when `include=journals` is asked
@@ -943,4 +976,66 @@ test('transport: the API key travels as X-Redmine-API-Key (curl stub, no network
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- createWork: filing a failure as work, once ------------------------------
+
+test('createWork: files in the mapped status, and the same key never files twice', async () => {
+  const sim = redmineSimulator([makeIssue(101, 'ready')]);
+  const board = provider(sim);
+
+  const first = await board.createWork({
+    title: 'CI is red on main',
+    body: 'the build failed before this run started',
+    idempotencyKey: 'ci-red:101:7',
+  });
+  assert.equal(first.created, true);
+  assert.equal(first.item.state, 'ready');
+  assert.equal(first.item.title, 'CI is red on main');
+
+  const create = sim.requests.find((r) => r.method === 'POST' && r.url.endsWith('/issues.json'));
+  const fields = (create?.body as { issue?: Record<string, unknown> } | undefined)?.issue ?? {};
+  assert.equal(fields['status_id'], statusIdByName('ready'), 'the created issue starts in the status the state maps to');
+  assert.match(String(fields['description']), /<!-- takumi:created=ci-red:101:7 -->/);
+
+  // The retry: the search finds it, the description check confirms it, nothing is filed.
+  const second = await board.createWork({ title: 'CI is red on main', idempotencyKey: 'ci-red:101:7' });
+  assert.equal(second.created, false);
+  assert.equal(second.item.id, first.item.id);
+  assert.equal(
+    sim.requests.filter((r) => r.method === 'POST' && r.url.endsWith('/issues.json')).length,
+    1,
+    'exactly one create ever reached the instance',
+  );
+  assert.equal(sim.requests.some((r) => r.url.includes('/search.json')), true, 'the search is what dedupes');
+});
+
+test('createWork: a state whose status this instance lacks fails instead of filing in the wrong one', async () => {
+  const sim = redmineSimulator([makeIssue(101, 'ready')]);
+  const strict = provider(sim, { statusMap: { ready: 'No Such Status' } });
+  await assert.rejects(
+    () => strict.createWork({ title: 'unmapped' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'unsupported');
+      assert.match(e.message, /No Such Status/);
+      return true;
+    },
+  );
+  assert.equal(sim.requests.some((r) => r.method === 'POST'), false, 'nothing was filed');
+});
+
+test('createWork: labels are refused, not silently dropped', async () => {
+  const sim = redmineSimulator([makeIssue(101, 'ready')]);
+  const board = provider(sim);
+  await assert.rejects(
+    () => board.createWork({ title: 'labelled', labels: ['urgent'] }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'unsupported');
+      assert.match(e.message, /no labels/);
+      return true;
+    },
+  );
+  assert.equal(sim.requests.some((r) => r.method === 'POST'), false, 'a refused create must not reach the instance');
 });

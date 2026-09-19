@@ -66,6 +66,7 @@ class PilotBoard implements TaskBoardProvider {
       machineReadableState: true,
       atomicClaim: true,
       canBootstrapStates: true,
+      canCreateWork: true,
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
   }
@@ -123,6 +124,13 @@ class PilotBoard implements TaskBoardProvider {
   async writeState(id: string, record: BoardStateRecord): Promise<void> {
     this.records.set(id, record);
   }
+  async createWork(spec: { title: string; body?: string; state?: BoardWorkItemState; idempotencyKey?: string }): Promise<{ item: BoardWorkItem; created: boolean }> {
+    const id = `NEW-${this.items.size + 1}`;
+    const body = spec.body ?? '';
+    this.items.set(id, { state: spec.state ?? 'ready', labels: [] });
+    return { item: { id, title: spec.title, body, url: `https://board.example/${id}`, state: spec.state ?? 'ready', labels: [], assignees: [], updatedAt: '2026-09-15T00:00:00.000Z' }, created: true };
+  }
+
   async bootstrapStates(desired: readonly BoardWorkItemState[]): Promise<BoardBootstrapReport> {
     return {
       provider: this.metadata().id,

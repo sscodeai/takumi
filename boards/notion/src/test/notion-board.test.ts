@@ -8,6 +8,7 @@ import {
   runTaskBoardProviderContractSuite,
 } from '@takumi/core';
 import type {
+  BoardCapabilities,
   BoardHttpRequest,
   BoardHttpResponse,
   BoardRequestFn,
@@ -89,6 +90,7 @@ function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean; c
   const columnOptions = opts.columnOptions ?? ALL_STATES;
   const comments: Array<{ id: string; block_id: string; text: string; author: string }> = [];
   let commentSeq = 0;
+  let pageSeq = 0;
   let clock = Date.parse('2026-09-15T00:00:00.000Z');
 
   const request: BoardRequestFn = async (req): Promise<BoardHttpResponse> => {
@@ -100,14 +102,38 @@ function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean; c
       return json(databasePayload(columnOptions, opts.statusColumnType === true ? 'status' : 'select'));
     }
     if (req.method === 'POST' && path === `/databases/${DB_ID}/query`) {
-      const wanted = optionsFromFilter(body['filter']);
+      // TWO filter shapes reach this route: the column filter `listWork` builds, and the
+      // machine-property `contains` filter `createWork` searches with.
+      const filter = body['filter'];
+      const contains = richTextContains(filter);
+      const wanted = optionsFromFilter(filter);
       const results = pages.filter((p) => {
+        if (contains !== undefined) return propertyText(p, contains.property).includes(contains.value);
         if (wanted.length === 0) return true;
         const column = p.properties['Status'] as { select?: { name?: string }; status?: { name?: string } } | undefined;
         const name = column?.select?.name ?? column?.status?.name;
         return name !== undefined && wanted.includes(name);
       });
       return json({ results, object: 'list' });
+    }
+    if (req.method === 'POST' && path === '/pages') {
+      // Notion creates a database ROW: `parent.database_id` says where, `properties` is
+      // the write shape, and the response is the page in its READ shape.
+      const parent = body['parent'] as { database_id?: string } | undefined;
+      if (parent?.database_id !== DB_ID) return { status: 400, body: '{"code":"validation_error"}' };
+      const written = (body['properties'] ?? {}) as Record<string, unknown>;
+      const properties: Record<string, unknown> = {};
+      for (const [name, value] of Object.entries(written)) properties[name] = toNotionReadShape(value);
+      pageSeq += 1;
+      clock += 1000;
+      const page: SimPage = {
+        id: `page-new-${pageSeq}`,
+        url: `https://www.notion.so/page-new-${pageSeq}`,
+        last_edited_time: new Date(clock).toISOString(),
+        properties,
+      };
+      pages.push(page);
+      return json(page);
     }
     if (req.method === 'GET' && path.startsWith('/pages/')) {
       const page = pages.find((p) => p.id === path.slice('/pages/'.length));
@@ -147,7 +173,23 @@ function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean; c
     return { status: 404, body: '{"object":"error","code":"not_found"}' };
   };
 
-  return { request, requests, comments };
+  return { request, requests, comments, pages };
+}
+
+/** The `rich_text contains` condition of a query filter, when that is the shape. */
+function richTextContains(filter: unknown): { property: string; value: string } | undefined {
+  if (filter === undefined || filter === null || typeof filter !== 'object') return undefined;
+  const f = filter as Record<string, unknown>;
+  const property = f['property'];
+  const condition = f['rich_text'] as { contains?: unknown } | undefined;
+  if (typeof property !== 'string' || typeof condition?.contains !== 'string') return undefined;
+  return { property, value: condition.contains };
+}
+
+/** The text a page carries in one rich_text property, in Notion's READ shape. */
+function propertyText(page: SimPage, property: string): string {
+  const value = page.properties[property] as { rich_text?: Array<{ plain_text?: string }> } | undefined;
+  return plainText(value?.rich_text);
 }
 
 /** Notion answers a select-typed column with a `status` value when asked to. */
@@ -269,6 +311,9 @@ test('NotionBoardProvider: shared task-board contract suite', async () => {
   assert.ok(out.notes.some((n) => n.includes('trustedAuthorFilter=false')), out.notes.join('\n'));
   assert.ok(out.notes.some((n) => n.startsWith('claim: PASS')));
   assert.ok(out.notes.some((n) => n.startsWith('terminal: PASS')));
+  // The suite files a page of its own: `canCreateWork: true` is a promise, and the hard
+  // half of it (one page per idempotency key, claimable afterwards) is checked there.
+  assert.ok(out.notes.some((n) => n.startsWith('createWork: PASS')), out.notes.join('\n'));
 });
 
 test('capabilities: the delivery claims are all false and the gates are honest', () => {
@@ -280,6 +325,7 @@ test('capabilities: the delivery claims are all false and the gates are honest',
   assert.equal(caps.trustedAuthorFilter, false);
   assert.equal(caps.machineReadableState, true);
   assert.equal(caps.atomicClaim, false);
+  assert.equal(caps.canCreateWork, true, 'a database row is creatable, so a failure can be filed');
 });
 
 test('request shapes: listWork queries the database, getWork reads the page', async () => {
@@ -315,6 +361,167 @@ test('request shapes: listWork sends an `or` filter for several states', async (
       ],
     },
   });
+});
+
+// --- createWork: filing a failure as work, exactly once ---------------------
+
+const CREATE_KEY = 'ci:red:notion:7';
+const CREATE_MARKER = `<!-- takumi:created=${CREATE_KEY} -->`;
+const PAGES_URL = 'https://api.notion.com/v1/pages';
+
+/** The create requests a simulator recorded, so a test can prove one did NOT happen. */
+function creates(sim: ReturnType<typeof notionSimulator>): BoardHttpRequest[] {
+  return sim.requests.filter((r) => r.method === 'POST' && r.url === PAGES_URL);
+}
+
+test('createWork: the exact create request, the marker in the machine property, and a retry that files nothing', async () => {
+  const sim = notionSimulator([]);
+  const board = provider(sim);
+
+  const first = await board.createWork({ title: 'Pipeline red', idempotencyKey: CREATE_KEY });
+
+  // --- the search: a database query filtered on the adapter's OWN machine property ---
+  assert.equal(sim.requests[0]?.method, 'POST');
+  assert.equal(sim.requests[0]?.url, `https://api.notion.com/v1/databases/${DB_ID}/query`);
+  assert.deepEqual(sim.requests[0]?.body, {
+    page_size: 100,
+    filter: { property: 'Takumi State', rich_text: { contains: CREATE_MARKER } },
+  });
+  // The column's type is learned BEFORE it is written: a `status` board rejects `select`.
+  assert.equal(sim.requests[1]?.url, `https://api.notion.com/v1/databases/${DB_ID}`);
+
+  // --- the create: one POST /v1/pages, parented to the DATABASE ---
+  const create = creates(sim)[0];
+  assert.ok(create !== undefined, 'a create must reach POST /v1/pages');
+  assert.deepEqual(create.body, {
+    parent: { database_id: DB_ID },
+    properties: {
+      Name: { title: [{ type: 'text', text: { content: 'Pipeline red' } }] },
+      Status: { select: { name: 'ready' } },
+      'Takumi State': { rich_text: [{ type: 'text', text: { content: CREATE_MARKER } }] },
+    },
+  });
+
+  // --- the result: a real, ready item, with no run invented for it ---
+  assert.equal(first.created, true);
+  assert.equal(first.item.id, 'page-new-1');
+  assert.equal(first.item.title, 'Pipeline red');
+  assert.equal(first.item.state, 'ready', 'the column option IS the delivery state, so a filed page starts ready');
+  assert.equal(first.item.body, '', 'a page has no body field, and the adapter returns "" rather than inventing one');
+  assert.equal(await board.readState(first.item.id), null, 'the marker is NOT a record: no run has started yet');
+  assert.deepEqual((await board.listWork({ states: ['ready'] })).map((i) => i.id), ['page-new-1']);
+
+  // --- the retry: the query answers, and nothing is created ---
+  const before = sim.requests.length;
+  const second = await board.createWork({ title: 'Pipeline red', idempotencyKey: CREATE_KEY });
+  assert.equal(second.created, false, 'a repeated key must not report a creation');
+  assert.equal(second.item.id, first.item.id, 'the FIRST page comes back');
+  assert.equal(creates(sim).length, 1, 'a repeated key must never reach POST /v1/pages again');
+  assert.equal(sim.requests.length, before + 1, 'the retry costs exactly one search query');
+});
+
+test('createWork: the key survives a claim and a transition (the record write carries the marker forward)', async () => {
+  const sim = notionSimulator([]);
+  const board = provider(sim);
+  const filed = await board.createWork({ title: 'Flaky test', idempotencyKey: CREATE_KEY });
+
+  assert.equal((await board.claim(filed.item.id, RUN)).claimed, true);
+  await board.transition(filed.item.id, 'pr_open', { runId: RUN, note: 'PR #7' });
+
+  // Notion replaces a rich_text value wholesale, so this is where the marker would be
+  // lost — and a retried tick would then file a SECOND page for the same failure.
+  const patch = sim.requests.filter((r) => r.method === 'PATCH').at(-1);
+  const written = (patch?.body as { properties: Record<string, { rich_text?: unknown[] }> }).properties['Takumi State'];
+  assert.equal(written?.rich_text?.length, 2, 'the marker keeps its own run, in front of the record');
+  assert.deepEqual(written?.rich_text?.[0], { type: 'text', text: { content: CREATE_MARKER } });
+  assert.equal((await board.readState(filed.item.id))?.runId, RUN, 'and the record still parses beside it');
+
+  const again = await board.createWork({ title: 'Flaky test', idempotencyKey: CREATE_KEY });
+  assert.equal(again.created, false, 'a retried tick must not re-file work that is already in review');
+  assert.equal(again.item.id, filed.item.id);
+  assert.equal(again.item.state, 'pr_open', "the returned item is the board's CURRENT view of it");
+});
+
+test('createWork: a page that merely quotes the marker is not adopted as ours', async () => {
+  // Notion's `rich_text contains` is a SUBSTRING match, so the query returns any page
+  // whose text carries the marker — including one created for a different key that has
+  // since quoted ours. `createKeyOf` takes the FIRST marker in the text, which is the
+  // page's own creation, so the quoted one cannot impersonate it.
+  const quoting = makePage('page-other', 'ready');
+  quoting.properties['Takumi State'] = rich(`<!-- takumi:created=other:key --> quotes ${CREATE_MARKER}`);
+  const sim = notionSimulator([quoting]);
+  const board = provider(sim);
+
+  const filed = await board.createWork({ title: 'Pipeline red', idempotencyKey: CREATE_KEY });
+  assert.equal(filed.created, true, "another page's creation must not be adopted as ours");
+  assert.notEqual(filed.item.id, 'page-other');
+  assert.equal(creates(sim).length, 1);
+});
+
+test('createWork: labels need a property to live in, and a missing one is refused before any request', async () => {
+  const sim = notionSimulator([]);
+  const labelled = provider(sim, { labelsProperty: 'Tags' });
+  const filed = await labelled.createWork({ title: 'Labelled', labels: ['ci', 'flaky'], idempotencyKey: 'k:1' });
+  assert.deepEqual(filed.item.labels, ['ci', 'flaky']);
+  assert.deepEqual(
+    (creates(sim)[0]?.body as { properties: Record<string, unknown> }).properties['Tags'],
+    { multi_select: [{ name: 'ci' }, { name: 'flaky' }] },
+  );
+
+  // A board with no labels property cannot record them: that is an error the caller can
+  // fix (a construction option), never a silent drop of what they asked for.
+  const sim2 = notionSimulator([]);
+  await assert.rejects(
+    () => provider(sim2).createWork({ title: 'Labelled', labels: ['ci'] }),
+    (e: unknown) =>
+      e instanceof BoardError && e.kind === 'precondition' && /labelsProperty/.test(e.message),
+  );
+  assert.deepEqual(sim2.requests, [], 'it must fail before touching the board');
+
+  // ...and a create with no labels does not demand one.
+  const plain = await provider(sim2).createWork({ title: 'No labels' });
+  assert.deepEqual(plain.item.labels, []);
+  const body = creates(sim2)[0]?.body as { properties: Record<string, unknown> };
+  assert.equal('Tags' in body.properties, false, 'no labels property is written when there is nothing to write');
+});
+
+test('createWork: a status-typed column is written as `status`, learned from the database', async () => {
+  const sim = notionSimulator([], { statusColumnType: true });
+  const filed = await provider(sim).createWork({ title: 'Status board', state: 'blocked' });
+  const body = creates(sim)[0]?.body as { properties: Record<string, unknown> };
+  assert.deepEqual(body.properties['Status'], { status: { name: 'blocked' } });
+  assert.equal(filed.item.state, 'blocked');
+});
+
+test('createWork: a rejected create is classified, and the message names what to fix', async () => {
+  const sim = notionSimulator([]);
+  const refusing: BoardRequestFn = async (req) =>
+    req.method === 'POST' && req.url.endsWith('/pages')
+      ? { status: 400, body: '{"object":"error","code":"validation_error","message":"Status is expected to be select."}' }
+      : sim.request(req);
+
+  await assert.rejects(
+    () => new NotionBoardProvider({ databaseId: DB_ID, request: refusing }).createWork({ title: 'Rejected', idempotencyKey: 'x:1' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError, 'a rejected create must be a classified board error');
+      assert.equal(e.kind, 'precondition', 'retrying a refused create changes nothing');
+      assert.equal(e.retriable, false);
+      assert.match(e.message, /validation_error/);
+      assert.match(e.message, /"ready"/, 'the option it tried to write is named');
+      assert.match(e.message, /takumi board --check/, 'and so is the step that fixes it');
+      return true;
+    },
+  );
+  assert.deepEqual(sim.pages, [], 'nothing was filed, and nothing is pretended to have been');
+});
+
+test('createWork: a malformed idempotency key fails before any request', async () => {
+  const sim = notionSimulator([]);
+  await assert.rejects(
+    () => provider(sim).createWork({ title: 'x', idempotencyKey: 'not a key!' }),
+    (e: unknown) => e instanceof BoardError && e.kind === 'precondition' && /invalid idempotency key/.test(e.message),
+  );
+  assert.deepEqual(sim.requests, []);
 });
 
 test('claim: writes the column and the state record, then verifies the re-read', async () => {

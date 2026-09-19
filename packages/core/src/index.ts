@@ -83,7 +83,9 @@ export type {
   BoardCapabilities,
   BoardDeliveryCapabilities,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkQuery,
+  CreateWorkResult,
   BoardCommentRef,
   BoardCommentAuthor,
   ClaimResult,
@@ -122,6 +124,7 @@ export type { EventKind, EventLog, EventLogOptions, EventSink, EventValue, RunEv
 export { createGitRunner, unconfiguredGitRunner, gitFailure } from './git-runner.js';
 export type { GitRunner, GitResult, GitRunnerOptions } from './git-runner.js';
 export { renderRunMarker, parseRunMarkers, hasRunMarker } from './run-marker.js';
+export { createKeyOf, hasCreateMarker, parseCreateMarkers, renderCreateMarker } from './create-marker.js';
 
 // Pilot metrics: counters a scheduler's monitoring can scrape.
 export {
