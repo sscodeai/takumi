@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import {
   assertBoardCapability,
   assertTransition,
+  BOARD_WORK_ITEM_STATES,
   BoardError,
   BoardUnsupportedError,
   runTaskBoardProviderContractSuite,
   validateBoardCapabilities,
 } from '../index.js';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -30,6 +33,8 @@ class ProbeProvider implements TaskBoardProvider {
   private readonly items = new Map<string, { item: BoardWorkItem; claim?: string }>();
   private readonly comments = new Map<string, { body: string; seq: number }>();
   private readonly records = new Map<string, { record: BoardStateRecord; trusted: boolean }>();
+  /** States this probe has already created (bootstrap is idempotent). */
+  private readonly bootstrapped = new Set<BoardWorkItemState>();
   private seq = 0;
 
   constructor(
@@ -60,6 +65,7 @@ class ProbeProvider implements TaskBoardProvider {
     trustedAuthorFilter: true,
     machineReadableState: true,
     atomicClaim: true,
+    canBootstrapStates: true,
     delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
   };
 
@@ -141,6 +147,37 @@ class ProbeProvider implements TaskBoardProvider {
     assertBoardCapability(this, 'machineReadableState');
     this.must(id);
     this.records.set(id, { record, trusted: opts?.author?.trusted !== false });
+  }
+
+  /**
+   * The probe can create its own states (it owns them), so the suite exercises the
+   * creation path here: dry run says would-create, the real call creates, the second
+   * call reports exists.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts: { dryRun?: boolean } = {},
+  ): Promise<BoardBootstrapReport> {
+    const actions: BoardBootstrapAction[] = [];
+    let created = false;
+    for (const state of desired) {
+      const name = `state:${state}`;
+      if (this.bootstrapped.has(state)) {
+        actions.push({ state, name, outcome: 'exists' });
+      } else if (opts.dryRun === true) {
+        actions.push({ state, name, outcome: 'would-create' });
+      } else {
+        this.bootstrapped.add(state);
+        created = true;
+        actions.push({ state, name, outcome: 'created' });
+      }
+    }
+    return {
+      provider: this.metadata().id,
+      applied: created,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((s) => !this.capabilities().states.includes(s)),
+    };
   }
 }
 

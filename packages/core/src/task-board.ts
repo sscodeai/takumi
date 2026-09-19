@@ -67,7 +67,46 @@ export interface BoardCapabilities {
   machineReadableState: boolean;
   /** `claim` is decided by the provider itself (not read-then-write by us). */
   atomicClaim: boolean;
+  /**
+   * The adapter can CREATE the states it needs (labels, statuses) rather than only
+   * reporting them. False is honest and common: a Jira workflow and a Redmine
+   * installation keep their statuses in administration, out of the API's reach.
+   * `bootstrapStates()` reports either way.
+   */
+  canBootstrapStates: boolean;
   delivery: BoardDeliveryCapabilities;
+}
+
+/** One state's outcome in a bootstrap report. */
+export interface BoardBootstrapAction {
+  state: BoardWorkItemState;
+  /** What this board calls the state: label name, status name, property option. */
+  name: string;
+  /**
+   * `exists` (already there), `created` (this call made it), `would-create` (a dry
+   * run), or `not-creatable` (the operator must do it — see `instruction`).
+   */
+  outcome: 'exists' | 'created' | 'would-create' | 'not-creatable';
+  /** For `not-creatable`: exactly what a human must do, with no hand-waving. */
+  instruction?: string;
+}
+
+/**
+ * What a board was missing, and what was done about it.
+ *
+ * This is the answer to the first minute of a real deployment: the adapter cannot
+ * claim work until the board can express the six states, and a runner that fails
+ * with "no such label" teaches nothing. The report names every state, says which
+ * are missing, and — when the adapter cannot create them — tells the operator the
+ * exact administrative step.
+ */
+export interface BoardBootstrapReport {
+  provider: string;
+  /** True when this call changed the board (a dry run never does). */
+  applied: boolean;
+  actions: BoardBootstrapAction[];
+  /** States this board cannot express at all (the complement of `capabilities().states`). */
+  unsupported: BoardWorkItemState[];
 }
 
 /** One unit of work as the board sees it. */
@@ -202,6 +241,21 @@ export interface TaskBoardProvider {
 
   /** Write the versioned state record (an upsert: one record per item). */
   writeState(id: string, record: BoardStateRecord, opts?: { author?: BoardCommentAuthor }): Promise<void>;
+
+  /**
+   * Report (and, where the board allows, create) the states this adapter needs.
+   *
+   * MUST NOT throw for a state it cannot create: `not-creatable` plus an
+   * instruction IS the answer. MUST be idempotent — a second call reports
+   * `exists` and changes nothing. A dry run MUST NOT change the board.
+   *
+   * Only boards with `canBootstrapStates === false` may fail closed here, and
+   * only as `BoardError('unsupported')` when called with nothing to report on.
+   */
+  bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts?: { dryRun?: boolean },
+  ): Promise<BoardBootstrapReport>;
 }
 
 /** What a caller needs from a provider before wiring it into a workflow. */
@@ -252,6 +306,7 @@ export function assertBoardCapability(
     | 'editableComment'
     | 'machineReadableState'
     | 'atomicClaim'
+    | 'canBootstrapStates'
     | 'delivery.canOpenPullRequest'
     | 'delivery.canRunChecks'
     | 'delivery.canMerge',
@@ -263,6 +318,7 @@ export function assertBoardCapability(
     case 'editableComment':
     case 'machineReadableState':
     case 'atomicClaim':
+    case 'canBootstrapStates':
       if (caps[capability] !== true) throw new BoardUnsupportedError(capability, id);
       return;
     case 'delivery.canOpenPullRequest':
@@ -343,7 +399,14 @@ export async function runTaskBoardProviderContractSuite(
   for (const state of caps.states) {
     if (!isBoardWorkItemState(state)) throw new Error(`capabilities.states contains unknown state: ${String(state)}`);
   }
-  for (const key of ['comments', 'editableComment', 'trustedAuthorFilter', 'machineReadableState', 'atomicClaim'] as const) {
+  for (const key of [
+    'comments',
+    'editableComment',
+    'trustedAuthorFilter',
+    'machineReadableState',
+    'atomicClaim',
+    'canBootstrapStates',
+  ] as const) {
     if (typeof caps[key] !== 'boolean') throw new Error(`capabilities.${key} must be a boolean`);
   }
   for (const key of ['canOpenPullRequest', 'canRunChecks', 'canMerge'] as const) {
@@ -352,7 +415,52 @@ export async function runTaskBoardProviderContractSuite(
   notes.push(
     `capabilities: PASS (states=${caps.states.join(',')} atomicClaim=${caps.atomicClaim} ` +
       `comments=${caps.comments} editableComment=${caps.editableComment} machineReadableState=${caps.machineReadableState} ` +
-      `trustedAuthorFilter=${caps.trustedAuthorFilter} delivery=${JSON.stringify(caps.delivery)})`,
+      `trustedAuthorFilter=${caps.trustedAuthorFilter} canBootstrapStates=${caps.canBootstrapStates} ` +
+      `delivery=${JSON.stringify(caps.delivery)})`,
+  );
+
+  // --- state bootstrap: can this board even express the six states? ---
+  // This is the first minute of a real deployment: a board that cannot express a
+  // state, and does not say what to do about it, strands the runner before it has
+  // claimed anything. The suite therefore requires a REPORT in every case, and
+  // creation only where the adapter claims it can create.
+  const desired = [...caps.states];
+  const dry = await provider.bootstrapStates(desired, { dryRun: true });
+  assertBootstrapReport(dry, desired, caps.canBootstrapStates, opts.id, 'dry run');
+  if (dry.applied) throw new Error('a dry-run bootstrap must not report applied: true');
+  const createdInDry = dry.actions.filter((a) => a.outcome === 'created');
+  if (createdInDry.length > 0) {
+    throw new Error(`a dry run created ${createdInDry.map((a) => a.state).join(', ')} — it must change nothing`);
+  }
+
+  const applied = await provider.bootstrapStates(desired);
+  assertBootstrapReport(applied, desired, caps.canBootstrapStates, opts.id, 'bootstrap');
+  const pending = applied.actions.filter((a) => a.outcome === 'would-create');
+  if (pending.length > 0) {
+    throw new Error(
+      `a real bootstrap reported would-create for ${pending.map((a) => a.state).join(', ')} — that is a dry-run outcome`,
+    );
+  }
+  // What the dry run said it would create, the real run must have created.
+  for (const action of dry.actions) {
+    if (action.outcome !== 'would-create') continue;
+    const real = applied.actions.find((a) => a.state === action.state);
+    if (real?.outcome !== 'created') {
+      throw new Error(`the dry run promised to create ${action.state} but the real run reported ${String(real?.outcome)}`);
+    }
+  }
+
+  const again = await provider.bootstrapStates(desired);
+  if (again.applied) throw new Error('a second bootstrap changed the board: bootstrapStates must be idempotent');
+  if (again.actions.some((a) => a.outcome === 'created')) {
+    throw new Error('a second bootstrap reported created: bootstrapStates must be idempotent');
+  }
+  const notCreatable = applied.actions.filter((a) => a.outcome === 'not-creatable');
+  notes.push(
+    `bootstrapStates: PASS (canCreate=${caps.canBootstrapStates} ` +
+      `created=${applied.actions.filter((a) => a.outcome === 'created').length} ` +
+      `exists=${applied.actions.filter((a) => a.outcome === 'exists').length} ` +
+      `notCreatable=${notCreatable.length}, idempotent, dry run changed nothing)`,
   );
 
   // --- listWork ---
@@ -547,7 +655,56 @@ function assertWorkItemShape(item: BoardWorkItem): void {
   }
 }
 
-/** Run `fn` and require a {@link BoardError} of `kind` — no bare Error, no silent success. */
+/**
+ * Validate a bootstrap report without knowing the board: the same shape rules apply
+ * to a GitHub label set, a Jira workflow and a Redmine status list.
+ */
+function assertBootstrapReport(
+  report: BoardBootstrapReport,
+  desired: readonly BoardWorkItemState[],
+  canCreate: boolean,
+  providerId: string,
+  what: string,
+): void {
+  if (report === null || typeof report !== 'object') throw new Error(`${what} must resolve a report object`);
+  if (report.provider !== providerId) {
+    throw new Error(`${what} must name its provider (${providerId}), got ${JSON.stringify(report.provider)}`);
+  }
+  if (!Array.isArray(report.actions)) throw new Error(`${what} must resolve an actions array`);
+  const seen = new Set<string>();
+  for (const action of report.actions) {
+    if (!desired.includes(action.state)) {
+      throw new Error(`${what} reported a state that was not asked for: ${action.state}`);
+    }
+    if (seen.has(action.state)) throw new Error(`${what} reported ${action.state} twice`);
+    seen.add(action.state);
+    if (typeof action.name !== 'string' || action.name.length === 0) {
+      throw new Error(`${what} reported ${action.state} without the board's own name for it`);
+    }
+    if (!['exists', 'created', 'would-create', 'not-creatable'].includes(action.outcome)) {
+      throw new Error(`${what} reported an unknown outcome for ${action.state}: ${String(action.outcome)}`);
+    }
+    if (action.outcome === 'not-creatable') {
+      if (action.instruction === undefined || action.instruction.trim().length === 0) {
+        // Without the instruction this is the "no such label" error we set out to
+        // abolish, just with a nicer name.
+        throw new Error(
+          `${what} reported ${action.state} as not-creatable without telling the operator what to do about it`,
+        );
+      }
+    }
+    if (!canCreate && (action.outcome === 'created' || action.outcome === 'would-create')) {
+      throw new Error(
+        `${what} reported ${action.outcome} for ${action.state} while capabilities().canBootstrapStates is false`,
+      );
+    }
+  }
+  for (const state of desired) {
+    if (!seen.has(state)) throw new Error(`${what} did not report on ${state}`);
+  }
+}
+
+/** Run `fn` and require a `BoardError` of `kind` — no bare Error, no silent success. */
 async function assertBoardError(
   fn: () => Promise<unknown>,
   kind: BoardErrorKind,

@@ -23,7 +23,9 @@
 
 import type { BoardWorkItemState } from './board-state.js';
 import { DeliveryError, type DeliveryProvider, type PullRequestRef } from './delivery.js';
+import { createEventLog, nullEventLog, type EventLog } from './events.js';
 import { ProviderError } from './provider-error.js';
+import { acquireSlot, type SlotHandle } from './slot-lock.js';
 import type { TaskBoardProvider } from './task-board.js';
 import type { BoardStateRecord } from './board-state-record.js';
 
@@ -42,6 +44,16 @@ export interface DeliveryLoopPlan {
   body?: string;
   /** Bounded review/fix rounds. Default 3. */
   maxReviewRounds?: number;
+  /**
+   * Serialise this delivery against other runners (ADR-008).
+   *
+   * Every board here declares `atomicClaim: false`, so two runners sharing one
+   * account can both believe they own an item. Passing a slot directory makes the
+   * loop take an exclusive per-item lock before it claims anything and report
+   * `busy` instead of racing. Omitting it keeps the old behaviour, and the caller
+   * then owns that exclusion itself.
+   */
+  slot?: { dir: string; key?: string; staleAfterSeconds?: number };
 }
 
 export interface ReviewContext {
@@ -73,7 +85,7 @@ export interface LoopStep {
   at: string;
 }
 
-export type DeliveryLoopOutcome = 'merged' | 'blocked' | 'retriable' | 'not_claimed';
+export type DeliveryLoopOutcome = 'merged' | 'blocked' | 'retriable' | 'not_claimed' | 'busy';
 
 export interface DeliveryLoopResult {
   outcome: DeliveryLoopOutcome;
@@ -92,6 +104,11 @@ export interface DeliveryLoopDeps {
   hooks: DeliveryLoopHooks;
   /** Injectable clock so the recorded timeline is deterministic in tests. */
   now?: () => number;
+  /**
+   * Where the run's events go (ADR-008). Omitting it keeps nothing, so wiring the
+   * loop up never forces an audit trail on a caller that does not want one.
+   */
+  events?: EventLog;
 }
 
 /**
@@ -105,6 +122,7 @@ export interface DeliveryLoopDeps {
 export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryLoopResult> {
   const { board, delivery, plan, hooks } = deps;
   const clock = deps.now ?? (() => Date.now());
+  const events = deps.events ?? nullEventLog();
   const steps: LoopStep[] = [];
   const record = (step: string, detail: string): void => {
     steps.push({ step, detail, at: new Date(clock()).toISOString() });
@@ -113,9 +131,47 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
   let rounds = 0;
   let pr: PullRequestRef | undefined;
 
+  // The exclusion rail, before anything is claimed: every board here is
+  // non-atomic, so a second runner must be turned away before it can believe it
+  // owns the item. `busy` is an outcome, not an error — a scheduled runner
+  // journals it and exits 0.
+  let slot: SlotHandle | undefined;
+  if (plan.slot !== undefined) {
+    const acquisition = acquireSlot({
+      dir: plan.slot.dir,
+      key: plan.slot.key ?? plan.itemId,
+      owner: { runId: plan.runId, itemId: plan.itemId },
+      ...(plan.slot.staleAfterSeconds === undefined ? {} : { staleAfterSeconds: plan.slot.staleAfterSeconds }),
+    });
+    if (!acquisition.acquired || acquisition.handle === undefined) {
+      const reason = acquisition.reason ?? 'another runner holds this slot';
+      events.emit({ kind: 'slot.busy', runId: plan.runId, itemId: plan.itemId, message: reason });
+      record('slot', `busy: ${reason}`);
+      return { outcome: 'busy', itemId: plan.itemId, rounds: 0, steps, error: reason };
+    }
+    slot = acquisition.handle;
+    slot.startHeartbeat();
+    events.emit({
+      kind: 'slot.acquired',
+      runId: plan.runId,
+      itemId: plan.itemId,
+      message: `slot ${plan.slot.key ?? plan.itemId} acquired`,
+      fields: { path: slot.path },
+    });
+    record('slot', `acquired ${slot.path}`);
+  }
+
   /** Move the item, tolerating a board that cannot express the target state. */
   const transition = async (to: BoardWorkItemState, note: string): Promise<void> => {
     await board.transition(plan.itemId, to, { runId: plan.runId, note });
+    events.emit({
+      kind: to === 'blocked' ? 'board.blocked' : 'board.transitioned',
+      runId: plan.runId,
+      itemId: plan.itemId,
+      ...(pr === undefined ? {} : { pr: pr.number }),
+      message: `${plan.itemId} → ${to}`,
+      fields: { note },
+    });
     record('transition', `${plan.itemId} → ${to} (${note})`);
   };
 
@@ -132,13 +188,17 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     await board.writeState(plan.itemId, record_);
   };
 
+  const run = async (): Promise<DeliveryLoopResult> => {
   try {
     // --- 1. claim -------------------------------------------------------------
     const claim = await board.claim(plan.itemId, plan.runId);
     if (!claim.claimed) {
-      record('claim', `refused: ${claim.reason ?? 'no reason given'}`);
+      const reason = claim.reason ?? 'no reason given';
+      events.emit({ kind: 'claim.refused', runId: plan.runId, itemId: plan.itemId, message: reason });
+      record('claim', `refused: ${reason}`);
       return { outcome: 'not_claimed', itemId: plan.itemId, rounds: 0, steps };
     }
+    events.emit({ kind: 'claim.acquired', runId: plan.runId, itemId: plan.itemId, message: `${plan.itemId} claimed` });
     record('claim', `${plan.itemId} claimed by run ${plan.runId}`);
     await writeRecord(0);
 
@@ -146,7 +206,20 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     for (let round = 0; round < maxRounds; round++) {
       rounds = round + 1;
 
+      events.emit({
+        kind: 'agent.started',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        message: `round ${round + 1} starting`,
+        fields: { worktree: plan.worktree },
+      });
       await hooks.agent({ round, worktree: plan.worktree, branch: plan.branch });
+      events.emit({
+        kind: 'agent.finished',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        message: `round ${round + 1} finished; a commit is expected`,
+      });
       record('agent', `round ${round + 1} finished; expecting a commit in ${plan.worktree}`);
 
       const delivered = await delivery.deliver(
@@ -172,6 +245,21 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       // The item returns to review after every round: on the first one it enters
       // pr_open, and after a fix round it leaves fix_needed — without this move a
       // fixed delivery could never legally reach merged.
+      events.emit({
+        kind: 'deliver.pushed',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        pr: pr.number,
+        message: `pushed ${delivered.push.mode} ${delivered.push.branch} at ${pr.headSha.slice(0, 12)}`,
+        fields: { mode: delivered.push.mode, head: pr.headSha },
+      });
+      events.emit({
+        kind: delivered.created ? 'deliver.pr_opened' : 'deliver.pr_reused',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        pr: pr.number,
+        message: delivered.created ? `opened PR #${pr.number}` : `reused PR #${pr.number}`,
+      });
       const current = (await board.getWork(plan.itemId)).state;
       if (current === 'fix_needed' || (round === 0 && delivered.created)) {
         await transition('pr_open', `PR #${pr.number} ready for review${round === 0 ? '' : ` (round ${round + 1})`}`);
@@ -182,6 +270,24 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       const checks = await delivery.checks(pr);
       const failed = checks.filter((c) => c.conclusion === 'failure');
       const pending = checks.filter((c) => c.conclusion === 'pending');
+      events.emit({
+        kind: 'checks.read',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        pr: pr.number,
+        message: checks.length === 0 ? 'no checks reported' : checks.map((c) => `${c.name}=${c.conclusion}`).join(' '),
+        fields: { total: checks.length, failed: failed.length, pending: pending.length },
+      });
+      for (const check of failed) {
+        events.emit({
+          kind: 'check.failed',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          pr: pr.number,
+          message: `check ${check.name} failed`,
+          fields: { check: check.name },
+        });
+      }
       record('checks', checks.length === 0 ? 'none reported' : checks.map((c) => `${c.name}=${c.conclusion}`).join(' '));
       if (failed.length > 0) {
         // A failing check is work, not a verdict: the agent gets the remaining
@@ -212,6 +318,17 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
           ? []
           : await hooks.changedFiles({ worktree: plan.worktree, baseSha: plan.baseSha });
       const review = await hooks.review({ round, pr, headSha: pr.headSha, changedFiles });
+      events.emit({
+        kind: review.verdict === 'clean' ? 'review.clean' : 'review.findings',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        pr: pr.number,
+        message:
+          review.verdict === 'clean'
+            ? `round ${round + 1}: clean at ${pr.headSha.slice(0, 12)}`
+            : `round ${round + 1}: findings${review.note === undefined ? '' : ` — ${review.note}`}`,
+        fields: { round, head: pr.headSha },
+      });
       record('review', `round ${round + 1}: ${review.verdict}${review.verdict === 'findings' && review.note ? ` — ${review.note}` : ''}`);
 
       if (review.verdict === 'findings') {
@@ -249,6 +366,14 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       }
 
       const merged = await delivery.merge(pr, { expectedHeadSha: pr.headSha, method: 'merge' });
+      events.emit({
+        kind: 'merge.done',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        pr: pr.number,
+        message: `PR #${pr.number} merged at ${merged.headSha.slice(0, 12)}`,
+        fields: { method: merged.method, head: merged.headSha },
+      });
       record('merge', `PR #${pr.number} merged at ${merged.headSha.slice(0, 12)} (${merged.method})`);
       await transition('merged', `merged ${merged.headSha.slice(0, 8)}`);
       await board.comment(plan.itemId, `Delivered and merged: ${pr.url}`, { runId: plan.runId });
@@ -265,6 +390,14 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     // worth another tick; anything else is a human decision.
     const retriable = e instanceof ProviderError && e.retriable;
     const kind = e instanceof ProviderError ? e.kind : 'unknown';
+    events.emit({
+      kind: retriable ? 'run.retriable' : 'run.failed',
+      runId: plan.runId,
+      itemId: plan.itemId,
+      ...(pr === undefined ? {} : { pr: pr.number }),
+      message,
+      fields: { kind, retriable },
+    });
     record('failed', `${kind}: ${message}`);
     if (!retriable) {
       // Best effort: record the block even when the board itself was the failure.
@@ -282,6 +415,23 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       steps,
       error: message,
     };
+  }
+  };
+
+  try {
+    return await run();
+  } finally {
+    // Released whatever happened: a crashed or failed delivery must not wedge the
+    // slot until the stale window expires.
+    if (slot !== undefined) {
+      slot.release();
+      events.emit({
+        kind: 'slot.released',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        message: `slot ${plan.slot?.key ?? plan.itemId} released`,
+      });
+    }
   }
 }
 

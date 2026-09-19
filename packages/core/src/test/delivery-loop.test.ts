@@ -1,13 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
+  acquireSlot,
   BoardError,
+  createEventLog,
   DeliveryError,
+  formatEventLine,
   ProviderError,
   assertTransition,
   runDeliveryLoop,
 } from '../index.js';
 import type {
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentRef,
   BoardStateRecord,
@@ -58,6 +65,7 @@ class LoopBoard implements TaskBoardProvider {
       trustedAuthorFilter: true,
       machineReadableState: true,
       atomicClaim: true,
+      canBootstrapStates: true,
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
   }
@@ -117,6 +125,14 @@ class LoopBoard implements TaskBoardProvider {
   async writeState(id: string, record: BoardStateRecord): Promise<void> {
     this.records.set(id, record);
     this.seen.push(`record:round${record.reviewRound}`);
+  }
+  async bootstrapStates(desired: readonly BoardWorkItemState[]): Promise<BoardBootstrapReport> {
+    return {
+      provider: this.metadata().id,
+      applied: false,
+      actions: desired.map((state) => ({ state, name: `state:${state}`, outcome: 'exists' as const })),
+      unsupported: [],
+    };
   }
 }
 
@@ -397,4 +413,165 @@ test('runDeliveryLoop: an unsupported capability blocks with the reason, not an 
   assert.equal(result.outcome, 'blocked');
   assert.match(result.error ?? '', /does not support canMerge/);
   assert.equal((await board.getWork('ITEM-7')).state, 'blocked');
+});
+
+// --- the P0 rails: an event trail and one runner per item (ADR-008) ---------
+
+test('runDeliveryLoop: emits the documented event trail for a clean delivery', async () => {
+  const { board, delivery } = harness();
+  const log = createEventLog({ now: () => Date.parse('2026-09-15T02:00:00.000Z') });
+  const result = await runDeliveryLoop({
+    board,
+    delivery,
+    plan,
+    events: log,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'merged');
+  assert.deepEqual(
+    log.events().map((e) => e.kind),
+    [
+      'claim.acquired',
+      'agent.started',
+      'agent.finished',
+      'deliver.pushed',
+      'deliver.pr_opened',
+      'board.transitioned',
+      'checks.read',
+      'review.clean',
+      'merge.done',
+      'board.transitioned',
+    ],
+  );
+  // Every event carries the run id, and every line is one parseable JSON object:
+  // that is what makes the trail greppable by run.
+  for (const event of log.events()) {
+    assert.equal(event.runId, RUN);
+    assert.equal(event.itemId, 'ITEM-7');
+    assert.equal(formatEventLine(event).includes('\n'), false);
+  }
+  const merge = log.of('merge.done')[0];
+  assert.equal(merge?.pr, '1');
+  assert.equal(merge?.fields?.head, COMMIT_1);
+});
+
+test('runDeliveryLoop: a findings round and a failure are events too', async () => {
+  const { board, delivery } = harness();
+  const log = createEventLog();
+  let reviews = 0;
+  await runDeliveryLoop({
+    board,
+    delivery,
+    plan,
+    events: log,
+    hooks: {
+      agent: async () => {},
+      review: async () => (++reviews === 1 ? { verdict: 'findings', note: 'missing case' } : { verdict: 'clean' }),
+    },
+  });
+  assert.deepEqual(
+    log.of('review.findings').map((e) => e.message),
+    ['round 1: findings — missing case'],
+  );
+  assert.deepEqual(
+    log.of('board.transitioned').map((e) => e.message),
+    ['ITEM-7 → pr_open', 'ITEM-7 → fix_needed', 'ITEM-7 → pr_open', 'ITEM-7 → merged'],
+  );
+
+  const failing = harness();
+  const failLog = createEventLog();
+  failing.delivery.dirty = true;
+  await runDeliveryLoop({
+    board: failing.board,
+    delivery: failing.delivery,
+    plan,
+    events: failLog,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+  assert.equal(failLog.of('run.failed').length, 1);
+  assert.equal(failLog.of('board.blocked').length, 1);
+  assert.equal(failLog.of('run.retriable').length, 0);
+});
+
+test('runDeliveryLoop: a slot turns a second runner away instead of racing it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-loop-slots-'));
+  try {
+    const planWithSlot = { ...plan, slot: { dir } };
+    const { board, delivery } = harness();
+    const log = createEventLog();
+
+    // Hold the slot exactly as another runner would.
+    const other = acquireSlot({ dir, key: plan.itemId, owner: { runId: 'otherrun' } });
+    assert.equal(other.acquired, true);
+    const busy = await runDeliveryLoop({
+      board,
+      delivery,
+      plan: planWithSlot,
+      events: log,
+      hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+    });
+    assert.equal(busy.outcome, 'busy');
+    assert.match(busy.error ?? '', /held by run otherrun/);
+    assert.equal(log.of('slot.busy').length, 1);
+    assert.deepEqual(board.seen, [], 'a busy run must not touch the board at all');
+    assert.equal(delivery.pushCount, 0);
+
+    // Once released, the run goes through and the trail says so.
+    other.handle?.release();
+    const ran = await runDeliveryLoop({
+      board,
+      delivery,
+      plan: planWithSlot,
+      events: log,
+      hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+    });
+    assert.equal(ran.outcome, 'merged');
+    assert.equal(log.of('slot.acquired').length, 1);
+    assert.equal(log.of('slot.released').length, 1);
+    assert.equal(existsSync(join(dir, `${plan.itemId}.lock`)), false, 'the slot file is gone after the run');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runDeliveryLoop: a failed delivery releases its slot instead of wedging it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-loop-slots-'));
+  try {
+    const { board, delivery } = harness();
+    delivery.dirty = true; // the agent left work uncommitted: a precondition failure
+    const failed = await runDeliveryLoop({
+      board,
+      delivery,
+      plan: { ...plan, slot: { dir } },
+      hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+    });
+    assert.equal(failed.outcome, 'blocked');
+    assert.equal(existsSync(join(dir, `${plan.itemId}.lock`)), false, 'the slot must not survive a failure');
+    const reacquire = acquireSlot({ dir, key: plan.itemId, owner: { runId: 'another1' } });
+    assert.equal(reacquire.acquired, true);
+    reacquire.handle?.release();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runDeliveryLoop: an unregistered event kind fails loudly (the registry is closed)', async () => {
+  const { board, delivery } = harness();
+  const log = createEventLog();
+  log.emit = () => {
+    throw new ProviderError('precondition', 'unregistered event kind: "made.up"');
+  };
+  // The trail is a side channel, but a BUG in the emitter is not: it must surface.
+  await assert.rejects(
+    () =>
+      runDeliveryLoop({
+        board,
+        delivery,
+        plan,
+        events: log,
+        hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+      }),
+    /unregistered event kind/,
+  );
 });

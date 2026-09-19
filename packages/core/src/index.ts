@@ -78,6 +78,8 @@ export {
 export type {
   TaskBoardProvider,
   BoardProviderMetadata,
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardDeliveryCapabilities,
   BoardWorkItem,
@@ -100,6 +102,21 @@ export {
   unconfiguredRequestFn,
 } from './board-transport.js';
 export type { BoardHttpRequest, BoardHttpResponse, BoardRequestFn, CurlRequestFnOptions } from './board-transport.js';
+
+// The pilot safety rails (ADR-008): one runner per slot, a closed event
+// vocabulary, and a report on whether the board can even express the six states.
+export { acquireSlot, isProcessAlive, slotLockPath, withSlot } from './slot-lock.js';
+export type { SlotAcquisition, SlotHandle, SlotLockOptions, SlotOwner, SlotRunResult } from './slot-lock.js';
+export {
+  EVENT_KINDS,
+  createEventLog,
+  formatEventLine,
+  isEventKind,
+  lineSink,
+  arraySink,
+  nullEventLog,
+} from './events.js';
+export type { EventKind, EventLog, EventLogOptions, EventSink, EventValue, RunEvent } from './events.js';
 
 // The git seam and the run marker: shared by every delivery adapter.
 export { createGitRunner, unconfiguredGitRunner, gitFailure } from './git-runner.js';
