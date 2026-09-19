@@ -28,8 +28,15 @@
  *    note from a maintainer's, and says so. With an allowlist, only those
  *    usernames may drive control flow.
  * 3. One page per list call: the request seam exposes a status and a body but
- *    no response headers, so `X-Next-Page` pagination cannot be followed. Lists
- *    are therefore capped at 100 items per call (`per_page=100`).
+ *    no response headers, so `X-Next-Page` pagination cannot be followed. Issue
+ *    lists are therefore capped at 100 items per call (`per_page=100`).
+ * 4. `bootstrapStates()` CREATES the states it needs (`canBootstrapStates: true`)
+ *    instead of only printing a to-do list, because a project's labels are
+ *    writable through the API and a runner that dies with GitLab's "no such
+ *    label" teaches the operator nothing. It reads the label list by walking
+ *    pages until one comes back short (note 3 applies to any list endpoint) and
+ *    creates what is missing, with one shared colour; a label that already
+ *    exists is reported `exists` and never rewritten.
  */
 
 import {
@@ -45,6 +52,8 @@ import {
   unconfiguredRequestFn,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -67,6 +76,19 @@ const DEFAULT_LABEL_PREFIX = 'takumi-';
 
 /** GitLab's own page limit; also the ceiling of what this adapter can see (see header note 3). */
 const PAGE_SIZE = 100;
+
+/**
+ * The colour every state label this adapter creates gets.
+ *
+ * GitLab REFUSES a label without a colour, but takumi never reads a colour back
+ * (the delivery state comes from the label NAME alone), so one shared colour is
+ * enough — a six-colour palette would imply a meaning the adapter does not have.
+ * A label that already exists with a different colour is reported `exists` and
+ * left untouched: the colour is decoration, and rewriting a label takumi did not
+ * create is a change the report never promised. That drift belongs in a future
+ * `BoardBootstrapAction` field, not smuggled into `name`.
+ */
+const STATE_LABEL_COLOR = '#1f6feb';
 
 /** Environment variable holding the personal/project access token. */
 const TOKEN_ENV = 'GITLAB_TOKEN';
@@ -142,6 +164,17 @@ interface GitLabNotePayload {
   body?: string | null;
   author?: { username?: string | null } | null;
   created_at?: string | null;
+}
+
+/**
+ * The subset of GitLab's label JSON this adapter reads.
+ *
+ * `color` is deliberately ABSENT: the adapter only ever asks whether a label
+ * exists, and reading a colour would invite "correcting" a human's label (see
+ * {@link STATE_LABEL_COLOR}).
+ */
+interface GitLabLabelPayload {
+  name?: string | null;
 }
 
 /** Construction options for {@link GitLabBoardProvider}. */
@@ -268,6 +301,10 @@ export class GitLabBoardProvider implements TaskBoardProvider {
       machineReadableState: true,
       // GitLab label updates are not conditional; see the class doc note 1.
       atomicClaim: false,
+      // Labels are free text the API can create, so this adapter can bootstrap
+      // its own vocabulary instead of asking a human to click six labels first
+      // (see the class doc note 4).
+      canBootstrapStates: true,
       // GitLab has merge requests and pipelines, so the delivery side is real.
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
@@ -526,6 +563,75 @@ export class GitLabBoardProvider implements TaskBoardProvider {
     );
   }
 
+  /**
+   * Report — and, since GitLab allows it, CREATE — the state labels this adapter
+   * needs. `canBootstrapStates: true` is a promise this method keeps.
+   *
+   * WHY it exists: the first minute of a real deployment. Until every
+   * `takumi-*` state label exists, `transition()` cannot express what it did, and
+   * a runner that failed with GitLab's own "no such label" told the operator
+   * nothing actionable. Here the missing label IS the answer, and the label is
+   * simply made.
+   *
+   * Order of operations: read the project's labels ONCE (walking every page, see
+   * `fetchLabelNames`), then create what is missing. A dry run stops after the
+   * read, so it cannot change anything — which is exactly the promise the report
+   * makes when it says `would-create`.
+   *
+   * NOT capability-gated, on purpose: the port requires a REPORT from every
+   * adapter, so this never throws for a state it cannot create — it reports
+   * `not-creatable` with the step that would fix it. A failed REQUEST is a
+   * different thing and stays loud (a classified `BoardError`), because a
+   * bootstrap that cannot read the board must not claim the labels are missing.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts: { dryRun?: boolean } = {},
+  ): Promise<BoardBootstrapReport> {
+    const dryRun = opts.dryRun === true;
+    const supported = this.capabilities().states;
+    const present = await this.fetchLabelNames();
+    const actions: BoardBootstrapAction[] = [];
+    let applied = false;
+
+    for (const state of desired) {
+      const name = this.labelFor(state);
+      if (!supported.includes(state)) {
+        actions.push({
+          state,
+          name,
+          outcome: 'not-creatable',
+          instruction:
+            `this adapter cannot express ${JSON.stringify(state)} as a label (capabilities().states is ` +
+            `${supported.join(', ')}); add it to STATE_LABEL_SUFFIX in boards/gitlab/src/index.ts, then re-run ` +
+            '`takumi board --check`',
+        });
+        continue;
+      }
+      if (present.has(name)) {
+        actions.push({ state, name, outcome: 'exists' });
+        continue;
+      }
+      if (dryRun) {
+        actions.push({ state, name, outcome: 'would-create' });
+        continue;
+      }
+      await this.createLabel(name);
+      // Track it locally too, so a `desired` list that names one state twice
+      // cannot create the same label twice in one call.
+      present.add(name);
+      applied = true;
+      actions.push({ state, name, outcome: 'created' });
+    }
+
+    return {
+      provider: PROVIDER_ID,
+      applied,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((state) => !supported.includes(state)),
+    };
+  }
+
   // --- URL building -------------------------------------------------------
 
   private get issuesPath(): string {
@@ -560,6 +666,16 @@ export class GitLabBoardProvider implements TaskBoardProvider {
 
   private noteUrl(id: string, noteId: string): string {
     return `${this.issueUrl(id)}/notes/${encodeURIComponent(noteId)}`;
+  }
+
+  /** The project's label collection (state bootstrapping reads and writes HERE). */
+  private get labelsPath(): string {
+    return `${this.apiBase}/projects/${this.projectId}/labels`;
+  }
+
+  /** One page of the label list. `page` is explicit: the walk needs to ask for page 2. */
+  private labelsUrl(page: number): string {
+    return `${this.labelsPath}?per_page=${PAGE_SIZE}&page=${page}`;
   }
 
   // --- I/O ----------------------------------------------------------------
@@ -604,6 +720,40 @@ export class GitLabBoardProvider implements TaskBoardProvider {
       { method: 'PUT', url: this.issueUrl(id), body: { add_labels: target, remove_labels: remove.join(',') } },
       `updateLabels ${id}`,
       id,
+    );
+  }
+
+  /**
+   * Every label NAME on the project, walking pages until one comes back short.
+   *
+   * The end of the list is a page SHORTER than `per_page`, because GitLab reports
+   * the counts in response HEADERS and the request seam exposes a status and a
+   * body only (class doc note 3). A project whose label count is an exact
+   * multiple of 100 therefore pays one extra, empty request — the cheapest honest
+   * way to be sure no existing label was missed (and so no duplicate create is
+   * attempted, which GitLab answers with a 409).
+   */
+  private async fetchLabelNames(): Promise<Set<string>> {
+    const names = new Set<string>();
+    for (let page = 1; ; page += 1) {
+      const batch = asArray(
+        await this.send<GitLabLabelPayload[]>(
+          { method: 'GET', url: this.labelsUrl(page) },
+          `listLabels page=${page}`,
+        ),
+      );
+      for (const label of batch) {
+        if (typeof label.name === 'string' && label.name.length > 0) names.add(label.name);
+      }
+      if (batch.length < PAGE_SIZE) return names;
+    }
+  }
+
+  /** Create one state label. GitLab requires a colour; see {@link STATE_LABEL_COLOR}. */
+  private async createLabel(name: string): Promise<void> {
+    await this.sendVoid(
+      { method: 'POST', url: this.labelsPath, body: { name, color: STATE_LABEL_COLOR } },
+      `createLabel ${name}`,
     );
   }
 

@@ -42,6 +42,27 @@ const TRUSTED = 'takumi-bot';
 
 const PROJECT_ID = encodeURIComponent(PROJECT);
 const ISSUES = `${API}/projects/${PROJECT_ID}/issues`;
+const LABELS = `${API}/projects/${PROJECT_ID}/labels`;
+
+/**
+ * Every state label the default vocabulary writes, in `BOARD_WORK_ITEM_STATES`
+ * order — declared as LITERALS on purpose: a list derived from the adapter's own
+ * constant could not notice that constant changing.
+ */
+const STATE_LABELS = [
+  'takumi-ready',
+  'takumi-claimed',
+  'takumi-pr-open',
+  'takumi-fix-needed',
+  'takumi-merged',
+  'takumi-blocked',
+];
+
+/** A predicate for the error taxonomy: an adapter failure is classified, never a bare Error. */
+function boardError(kind: string, re?: RegExp) {
+  return (e: unknown): boolean =>
+    e instanceof BoardError && e.kind === kind && (re === undefined || re.test(e.message));
+}
 
 /** A provider wired to the in-process board, with the trust allowlist configured. */
 function board(
@@ -118,6 +139,12 @@ test('GitLabBoardProvider: passes the shared task-board contract suite (injected
   assert.ok(
     fake.calls().every((call) => call.includes(API)),
     'no request may address anything but the injected apiBase',
+  );
+  // The suite now bootstraps the state vocabulary itself, and this project had no
+  // label at all: the report must say the six were CREATED, not merely hoped for.
+  assert.ok(
+    out.notes.some((note) => note.startsWith('bootstrapStates: PASS (canCreate=true created=6 exists=0 notCreatable=0')),
+    out.notes.join('\n'),
   );
 });
 
@@ -465,6 +492,7 @@ test('capabilities(): GitLab declares its real limits instead of an idealised bo
   assert.equal(caps.machineReadableState, true);
   assert.equal(caps.atomicClaim, false, 'GitLab cannot update labels conditionally');
   assert.equal(caps.trustedAuthorFilter, false, 'no allowlist was configured');
+  assert.equal(caps.canBootstrapStates, true, 'GitLab labels are creatable through the API, so the adapter says it can');
   assert.deepEqual(caps.delivery, { canOpenPullRequest: true, canRunChecks: true, canMerge: true });
   assert.equal(provider.metadata().id, 'gitlab');
 
@@ -560,6 +588,144 @@ test('the state-label vocabulary is explicit: intake, precedence and custom pref
   custom.clear();
   await customProvider.listWork({ labels: ['team a', 'ready'] });
   assert.deepEqual(custom.calls(), [`GET ${API}/projects/team%2Fapp/issues?state=opened&per_page=100&labels=team%20a,ready`]);
+});
+
+// --- state bootstrapping ----------------------------------------------------
+
+test('bootstrapStates: a dry run changes nothing, the real call creates every missing label, a second call is a no-op', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  fake.seedIssue({ iid: 1 });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+  fake.clear();
+
+  // --- dry run: ONE read, a promise per missing label, no write ---
+  const dry = await provider.bootstrapStates([...BOARD_WORK_ITEM_STATES], { dryRun: true });
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`], 'a dry run must only read');
+  assert.equal(dry.provider, 'gitlab', 'the report names the provider the suite checked');
+  assert.equal(dry.applied, false);
+  assert.deepEqual(dry.unsupported, []);
+  assert.deepEqual(
+    dry.actions,
+    [...BOARD_WORK_ITEM_STATES].map((state, index) => ({ state, name: STATE_LABELS[index], outcome: 'would-create' })),
+  );
+  assert.deepEqual(fake.labelsOnBoard(), [], 'the dry run must not have created anything');
+
+  // --- the real call creates exactly the labels the dry run promised ---
+  fake.clear();
+  const applied = await provider.bootstrapStates([...BOARD_WORK_ITEM_STATES]);
+  assert.equal(applied.applied, true);
+  assert.deepEqual(
+    applied.actions,
+    [...BOARD_WORK_ITEM_STATES].map((state, index) => ({ state, name: STATE_LABELS[index], outcome: 'created' })),
+  );
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`, ...STATE_LABELS.map(() => `POST ${LABELS}`)]);
+  // GitLab 400s on a label without a colour, so the create carries one; the name
+  // is the one THIS instance writes (`<prefix><suffix>`), and nothing else rides along.
+  assert.deepEqual(
+    fake.bodies().slice(1),
+    STATE_LABELS.map((name) => ({ name, color: '#1f6feb' })),
+  );
+  assert.deepEqual(fake.labelsOnBoard().map((label) => label.name), STATE_LABELS);
+  // The labels are not only created but USABLE: the state they encode is now readable.
+  assert.equal(await stateOf(provider, '1'), 'ready');
+
+  // --- idempotence: reading is enough now ---
+  fake.clear();
+  const again = await provider.bootstrapStates([...BOARD_WORK_ITEM_STATES]);
+  assert.equal(again.applied, false, 'a second bootstrap changes nothing');
+  assert.deepEqual(
+    again.actions,
+    [...BOARD_WORK_ITEM_STATES].map((state, index) => ({ state, name: STATE_LABELS[index], outcome: 'exists' })),
+  );
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`], 'a second call must not write');
+});
+
+test('bootstrapStates: a custom prefix is honoured, and colour drift is reported `exists`, never rewritten', async () => {
+  const fake = new FakeGitLab({ project: 'team/app', username: TRUSTED });
+  // A human made this label by hand, in their own colour: a bootstrap is not a
+  // licence to repaint somebody else's label.
+  fake.seedLabel('ship-claimed', '#ff0000');
+  fake.seedLabel('unrelated');
+  const provider = new GitLabBoardProvider({ project: 'team/app', labelPrefix: 'ship-', apiBase: API, request: fake.request });
+  fake.clear();
+
+  const report = await provider.bootstrapStates(['ready', 'claimed']);
+  assert.deepEqual(report.actions, [
+    { state: 'ready', name: 'ship-ready', outcome: 'created' },
+    { state: 'claimed', name: 'ship-claimed', outcome: 'exists' },
+  ]);
+  assert.deepEqual(fake.calls(), [
+    `GET ${API}/projects/team%2Fapp/labels?per_page=100&page=1`,
+    `POST ${API}/projects/team%2Fapp/labels`,
+  ]);
+  assert.deepEqual(fake.bodies()[1], { name: 'ship-ready', color: '#1f6feb' });
+  assert.deepEqual(fake.labelsOnBoard(), [
+    { name: 'ship-claimed', color: '#ff0000' },
+    { name: 'unrelated', color: '#ededed' },
+    { name: 'ship-ready', color: '#1f6feb' },
+  ]);
+});
+
+test('bootstrapStates: every label page is read, so a label on page 2 is found (a re-create would be a 409)', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  // 100 unrelated labels fill page one EXACTLY. The seam exposes no response
+  // headers, so a page shorter than `per_page` is the only end-of-list signal —
+  // and this proves the walk reaches page 2 before deciding what is missing.
+  for (let index = 0; index < 100; index += 1) fake.seedLabel(`filler-${String(index).padStart(3, '0')}`);
+  for (const name of STATE_LABELS) fake.seedLabel(name);
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+  fake.clear();
+
+  const report = await provider.bootstrapStates([...BOARD_WORK_ITEM_STATES]);
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`, `GET ${LABELS}?per_page=100&page=2`]);
+  assert.equal(report.applied, false, 'everything was already there');
+  assert.ok(report.actions.every((action) => action.outcome === 'exists'));
+});
+
+/** A provider that declares only part of the vocabulary: the fail-closed report path. */
+class PartialVocabularyGitLabBoard extends GitLabBoardProvider {
+  override capabilities(): BoardCapabilities {
+    const caps = super.capabilities();
+    return { ...caps, states: caps.states.filter((state) => state !== 'merged') };
+  }
+}
+
+test('bootstrapStates: a state this adapter cannot express is reported with an instruction, never created', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  const provider = new PartialVocabularyGitLabBoard({ project: PROJECT, apiBase: API, request: fake.request });
+
+  const report = await provider.bootstrapStates(['ready', 'merged']);
+  assert.deepEqual(report.unsupported, ['merged'], 'the complement of capabilities().states is named');
+  assert.deepEqual(report.actions[0], { state: 'ready', name: 'takumi-ready', outcome: 'created' });
+  const merged = report.actions[1];
+  assert.equal(merged?.state, 'merged');
+  assert.equal(merged?.outcome, 'not-creatable');
+  assert.match(merged?.instruction ?? '', /cannot express "merged" as a label/);
+  assert.match(merged?.instruction ?? '', /takumi board --check/, 'an instruction must say what to do next');
+  // Only the expressible state was written.
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`, `POST ${LABELS}`]);
+  assert.deepEqual(fake.labelsOnBoard().map((label) => label.name), ['takumi-ready']);
+});
+
+test('bootstrapStates: a refused label create is classified, never reported as success', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+
+  fake.failWhen((req) => req.method === 'POST' && req.url.endsWith('/labels'), 403);
+  await assert.rejects(
+    () => provider.bootstrapStates(['ready']),
+    boardError('auth', /createLabel takumi-ready failed with HTTP 403/),
+  );
+  assert.deepEqual(fake.labelsOnBoard(), [], 'a failed bootstrap must not look like it worked');
+
+  // A 409 (somebody created the label between our read and our write) is a
+  // precondition: retrying it changes nothing, so it must not be retriable.
+  fake.clearFaults();
+  fake.failWhen((req) => req.method === 'POST' && req.url.endsWith('/labels'), 409, '{"message":"Label already exists"}');
+  await assert.rejects(
+    () => provider.bootstrapStates(['ready']),
+    (e: unknown) => boardError('precondition', /already exists/)(e) && (e as BoardError).retriable === false,
+  );
 });
 
 test('writeState: a record naming another item is refused before any request', async () => {

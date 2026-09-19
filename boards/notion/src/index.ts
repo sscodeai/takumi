@@ -4,6 +4,7 @@ import {
   BoardError,
   assertTransition,
   BoardUnsupportedError,
+  BOARD_WORK_ITEM_STATES,
   createCurlRequestFn,
   parseBoardStateRecord,
   renderBoardStateRecord,
@@ -12,6 +13,8 @@ import {
   unconfiguredRequestFn,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -57,6 +60,13 @@ function runMarker(runId: string): string {
  *   - a comment carries `created_by` (a user id) only: Notion exposes no
  *     role/association, so `trustedAuthorFilter` is false. The adapter says so
  *     rather than pretending it can tell a maintainer from a passer-by.
+ *   - the column's OPTIONS are reported but never created
+ *     (`canBootstrapStates: false`): adding one means PATCHing the property with
+ *     the WHOLE options array, which rewrites a human's curated list and races
+ *     with anyone editing that property in the Notion UI. `bootstrapStates()`
+ *     therefore answers `not-creatable` with the exact UI step — the first
+ *     minute of a deployment must produce instructions, not a "no such option"
+ *     error, and not a silent concurrent write either.
  *
  * The run state record keeps the SAME versioned grammar as every other adapter
  * (renderBoardStateRecord / parseBoardStateRecord); only its storage differs —
@@ -126,6 +136,24 @@ interface NotionComment {
   rich_text?: NotionRich[];
 }
 
+/**
+ * The subset of Notion's DATABASE JSON this adapter reads.
+ *
+ * Only the column property's OPTIONS matter here: `bootstrapStates()` asks which
+ * option names exist, and whether the property exists at all (`undefined` means
+ * it does not, which is a different instruction for the operator).
+ */
+interface NotionDatabaseProperty {
+  type?: string;
+  select?: { options?: Array<{ name?: string }> } | null;
+  status?: { options?: Array<{ name?: string }> } | null;
+}
+
+interface NotionDatabase {
+  id?: string;
+  properties?: Record<string, NotionDatabaseProperty>;
+}
+
 export class NotionBoardProvider implements TaskBoardProvider {
   private readonly databaseId: string;
   private readonly apiBase: string;
@@ -174,6 +202,10 @@ export class NotionBoardProvider implements TaskBoardProvider {
       trustedAuthorFilter: false,
       machineReadableState: true,
       atomicClaim: false,
+      // Honest and deliberate: the column options are NOT creatable from here
+      // without rewriting the whole options array behind a human's back (see the
+      // class doc). `bootstrapStates()` reports what is missing, with the UI step.
+      canBootstrapStates: false,
       delivery: { canOpenPullRequest: false, canRunChecks: false, canMerge: false },
     };
   }
@@ -310,8 +342,79 @@ export class NotionBoardProvider implements TaskBoardProvider {
     );
   }
 
-  /** The other delivery operations are not in the port yet (M2); the flags in
+  /**
+   * The other delivery operations are not in the port yet (M2); the flags in
    * `capabilities().delivery` are what a caller must consult before asking. */
+
+  /**
+   * Report how this database stands against the states the adapter needs.
+   * READ-ONLY, because `canBootstrapStates` is false: the report is the answer.
+   *
+   * WHY nothing is created here: an option lives in the column property, and
+   * `PATCH /v1/databases/:id` replaces the WHOLE options array. A write would
+   * therefore rewrite options a human curated, and it races with anyone editing
+   * that property in the Notion UI — the loser is silently overwritten, with no
+   * version/precondition to detect it. Notion's own UI makes the change visible
+   * to the person who owns the database, so the instruction is both safer and
+   * more honest than a write that pretends to be safe.
+   *
+   * A missing OPTION and a missing PROPERTY need different instructions, so the
+   * database read decides which one this board needs. Neither is an error: this
+   * never throws for something the operator can fix, and it never reports
+   * `created`/`would-create` — the capability flag above forbids pretending.
+   *
+   * `opts.dryRun` changes nothing here by construction: the call reads one
+   * database and writes nothing, so a dry run and a real call are the same
+   * report. It is accepted (and ignored) because the port defines it, and the
+   * suite calls both.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    _opts: { dryRun?: boolean } = {},
+  ): Promise<BoardBootstrapReport> {
+    const database = await requestBoardJson<NotionDatabase>(
+      this.request,
+      { method: 'GET', url: `${this.apiBase}/databases/${this.databaseId}` },
+      'bootstrapStates',
+    );
+    const property = database.properties?.[this.columnProperty];
+    const options = new Set(columnOptionNames(property));
+    // The database retrieve is the authoritative source for the property's type;
+    // learn it the same way a page read does (see readColumn) so a later patch
+    // sends `status` when the board uses a status column.
+    if (property?.type === 'select' || property?.type === 'status') this.columnType = property.type;
+
+    const isColumn = property?.type === 'select' || property?.type === 'status';
+    const actions: BoardBootstrapAction[] = desired.map((state) => {
+      // The option name comes from THIS instance's own state map — never a second
+      // copy of the vocabulary that could drift from what `transition()` writes.
+      const name = this.stateMap[state];
+      if (options.has(name)) return { state, name, outcome: 'exists' };
+      return {
+        state,
+        name,
+        outcome: 'not-creatable',
+        instruction: isColumn
+          ? `add an option named ${JSON.stringify(name)} to the ${this.columnProperty} property of this database ` +
+            `(Notion UI: database settings -> property -> Edit options), then re-run \`takumi board --check\``
+          : `create a select property named ${JSON.stringify(this.columnProperty)} on this database with an option ` +
+            `named ${JSON.stringify(name)} (Notion UI: database settings -> + -> Property -> Select), then re-run ` +
+            '`takumi board --check`',
+      };
+    });
+
+    const supported = this.capabilities().states;
+    return {
+      // Read from metadata() rather than a second literal: the suite checks this
+      // field against `metadata().id`, so one of them has to be the source.
+      provider: this.metadata().id,
+      // Nothing was created, and nothing ever is: a read-only report is not an
+      // application of anything.
+      applied: false,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((state) => !supported.includes(state)),
+    };
+  }
 
   private async fetchPage(id: string): Promise<NotionPage> {
     return requestBoardJson<NotionPage>(this.request, { method: 'GET', url: `${this.apiBase}/pages/${id}` }, `getWork ${id}`);
@@ -398,8 +501,26 @@ export function plainText(rich: NotionRich[] | undefined): string {
   return (rich ?? []).map((entry) => entry.plain_text ?? '').join('');
 }
 
+/**
+ * The option names a column property carries.
+ *
+ * Empty for a property that is missing or is not a select/status property: the
+ * caller reports that case as `not-creatable`, so "no options" and "no property"
+ * must never be confused with "the option is already there". This is the only
+ * place the two Notion option shapes (`select` / `status`) are read, so a change
+ * to the API lands in one spot.
+ */
+function columnOptionNames(property: NotionDatabaseProperty | undefined): string[] {
+  const options = property?.select?.options ?? property?.status?.options ?? [];
+  return options.flatMap((option) =>
+    typeof option.name === 'string' && option.name.length > 0 ? [option.name] : [],
+  );
+}
+
 /** `or` requires at least two conditions in Notion; a single one is sent bare. */
 function buildColumnFilter(property: string, options: string[]): Record<string, unknown> | undefined {
+  // No options means no filter at all; the caller must not send an empty `or`,
+  // which Notion rejects. The signal is the missing value, not an empty object.
   if (options.length === 0) return undefined;
   const conditions = options.map((name) => ({ property, select: { equals: name } }));
   return conditions.length === 1 ? conditions[0] : { or: conditions };

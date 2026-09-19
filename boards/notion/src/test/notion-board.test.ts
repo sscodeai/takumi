@@ -7,7 +7,13 @@ import {
   renderBoardStateRecord,
   runTaskBoardProviderContractSuite,
 } from '@takumi/core';
-import type { BoardHttpRequest, BoardHttpResponse, BoardRequestFn, BoardStateRecord } from '@takumi/core';
+import type {
+  BoardHttpRequest,
+  BoardHttpResponse,
+  BoardRequestFn,
+  BoardStateRecord,
+  BoardWorkItemState,
+} from '@takumi/core';
 import { NotionBoardProvider, createNotionTransport, normalizeDatabaseId, plainText } from '../index.js';
 
 /**
@@ -55,8 +61,32 @@ function makePage(id: string, columnName: string, extra: Record<string, unknown>
   };
 }
 
-function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean } = {}) {
+/**
+ * The database the adapter reads: its column property carries the option names
+ * `bootstrapStates` reports on. `options` defaults to the six delivery states, so
+ * a suite run sees a fully configured board; a test passes its own list to model a
+ * board that is missing one.
+ */
+function databasePayload(columnOptions: string[], columnType: 'select' | 'status' = 'select') {
+  return {
+    object: 'database',
+    id: DB_ID,
+    properties: {
+      Name: { type: 'title', title: {} },
+      Status: {
+        type: columnType,
+        [columnType]: { options: columnOptions.map((name) => ({ name })) },
+      },
+      'Takumi State': { type: 'rich_text', rich_text: {} },
+    },
+  };
+}
+
+const ALL_STATES: BoardWorkItemState[] = ['ready', 'claimed', 'pr_open', 'fix_needed', 'merged', 'blocked'];
+
+function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean; columnOptions?: string[] } = {}) {
   const requests: BoardHttpRequest[] = [];
+  const columnOptions = opts.columnOptions ?? ALL_STATES;
   const comments: Array<{ id: string; block_id: string; text: string; author: string }> = [];
   let commentSeq = 0;
   let clock = Date.parse('2026-09-15T00:00:00.000Z');
@@ -66,6 +96,9 @@ function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean } 
     const path = req.url.replace('https://api.notion.com/v1', '');
     const body = (req.body ?? {}) as Record<string, unknown>;
 
+    if (req.method === 'GET' && path === `/databases/${DB_ID}`) {
+      return json(databasePayload(columnOptions, opts.statusColumnType === true ? 'status' : 'select'));
+    }
     if (req.method === 'POST' && path === `/databases/${DB_ID}/query`) {
       const wanted = optionsFromFilter(body['filter']);
       const results = pages.filter((p) => {
@@ -175,6 +208,54 @@ function provider(sim: ReturnType<typeof notionSimulator>, extra: Record<string,
 }
 
 const RUN = 'c0ffee01';
+
+test('bootstrapStates: a READ-ONLY report — a missing option gets the exact UI step', async () => {
+  const sim = notionSimulator([], { columnOptions: ['ready', 'claimed'] });
+  const board = provider(sim);
+
+  const report = await board.bootstrapStates(ALL_STATES);
+  assert.equal(report.applied, false, 'this adapter creates nothing, so it never claims to have applied');
+  assert.equal(report.provider, 'notion');
+  assert.deepEqual(report.actions.map((a) => a.outcome), [
+    'exists',
+    'exists',
+    'not-creatable',
+    'not-creatable',
+    'not-creatable',
+    'not-creatable',
+  ]);
+  const missing = report.actions.filter((a) => a.outcome === 'not-creatable');
+  for (const action of missing) {
+    // The whole value of the report: a human is told the option name and the step.
+    assert.match(action.instruction ?? '', /add an option named/);
+    assert.match(action.instruction ?? '', /Notion UI/);
+    assert.ok((action.instruction ?? '').includes(JSON.stringify(action.name)));
+  }
+  assert.equal(
+    sim.requests.some((r) => r.method !== 'GET'),
+    false,
+    'a report-only bootstrap must not write anything',
+  );
+});
+
+test('bootstrapStates: a missing PROPERTY gets a different instruction than a missing option', async () => {
+  const sim = notionSimulator([]);
+  const board = provider(sim, { columnProperty: 'Not A Column' });
+  const report = await board.bootstrapStates(['ready']);
+  assert.equal(report.actions[0]?.outcome, 'not-creatable');
+  assert.match(report.actions[0]?.instruction ?? '', /create a select property/);
+});
+
+test('bootstrapStates: an unknown delivery state is reported, and a dry run equals a real call', async () => {
+  const sim = notionSimulator([]);
+  const board = provider(sim);
+  const dry = await board.bootstrapStates(ALL_STATES, { dryRun: true });
+  const real = await board.bootstrapStates(ALL_STATES);
+  // Nothing is written, so the two reports are the same report: state is in the
+  // database, not in this call.
+  assert.deepEqual(dry, real);
+  assert.deepEqual(dry.actions.map((a) => a.name), ['ready', 'claimed', 'pr_open', 'fix_needed', 'merged', 'blocked']);
+});
 
 test('NotionBoardProvider: shared task-board contract suite', async () => {
   const sim = notionSimulator([makePage('page-1', 'ready')]);
