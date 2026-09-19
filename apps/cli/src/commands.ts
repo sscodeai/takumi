@@ -74,6 +74,25 @@ export interface ProjectConfig {
   artifacts: string;
   /** Audit trail dir (default `.takumi/audit`). */
   audit?: string;
+  /**
+   * The unattended runner (ADR-009). Present only in a project that runs a pilot:
+   * everything here is a deployment decision, so none of it has a default that could
+   * silently start working on the wrong repository.
+   */
+  pilot?: {
+    repo: string;
+    worktreeRoot: string;
+    slotDir: string;
+    baseBranch: string;
+    remote?: string;
+    board: string;
+    boardOptions?: Record<string, string>;
+    delivery: string;
+    deliveryOptions?: Record<string, string>;
+    agent: { command: string; args?: string[]; timeoutSeconds?: number; env?: Record<string, string> };
+    policy: { reviewMode: 'checks-only' | 'label'; approvalLabel?: string; maxReviewRounds?: number; retainWorktreesHours?: number; agentRetries?: number; agentRetryDelaySeconds?: number };
+    eventsFile?: string;
+  };
 }
 
 export function loadConfig(cwd: string): ProjectConfig {
