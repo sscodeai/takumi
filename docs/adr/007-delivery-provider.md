@@ -120,7 +120,9 @@ remote) is a natural next adapter, not a reason to weaken the port.
 - Gains: the three rules are executable and tested; a board without a review
   surface composes with a host that has one; and the merge of an unreviewed commit
   requires defeating both our check and the host's.
-- Deliberately still open: a `deliveries/git` (bare remote, no PR), a
+- Deliberately still open: a `deliveries/git` (bare remote, no PR). **CORRECTION (2026-09-19):
+  this believed "no port change" was needed. It was wrong — RESOLVED by ADR-015** (see the dated
+  correction note below for what it cost, and what the ordering rule is).
   conflict-resolution policy (today a conflicting base merge is aborted and handed
   to the review session), and multi-host fan-out (one change delivered to several
   hosts).
@@ -135,7 +137,14 @@ remote) is a natural next adapter, not a reason to weaken the port.
   either inventing a fake pull request (which would make the events lie) or generalizing the
   reference the port passes around. The honest shape is a `DeliveryRef` (branch + head +
   optional review surface), with PR-specific events and the checks phase gated on
-  `capabilities().canOpenPullRequest` / `canRunChecks` — a port change, small but real, and
+  `capabilities().canOpenPullRequest` / `canRunChecks` — a port change that ADR-015 describes.
+
+  **RESOLVED (2026-09-19, ADR-015)**: the suite now gates every pull-request-shaped assertion on
+  `canOpenPullRequest` and FAILS a provider whose report disagrees with its own declaration, so a
+  bare-remote delivery passes the same gate as the forge adapters while proving it claims nothing
+  it does not have. The lesson is in the ledger's class list: when a contract suite blocks a port
+  change, the suite is the first file to touch — not the last. Both attempts that started from the
+  loop were reverted; the one that started from the suite landed.
   the reason this is a separate slice rather than an afternoon of adapter code.
 
   **[Measured, same day]** Making `DeliveryOutcome.pr` optional was tried and reverted, and the
