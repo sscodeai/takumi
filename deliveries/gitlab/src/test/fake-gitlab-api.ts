@@ -283,8 +283,22 @@ export class FakeGitLabApi {
     if (segments[0] !== 'projects' || segments[1] !== this.options.project) return null;
 
     if (segments[2] === 'commits' && segments[4] === 'statuses' && req.method === 'GET') {
-      const statuses = this.statusesForSha(segments[3] ?? '');
-      return statuses === null ? null : json(200, statuses);
+      const sha = segments[3] ?? '';
+      if (!this.commitKnown(sha)) return json(404, { message: '404 Not Found' });
+      const statuses = this.statusesForSha(sha) ?? [];
+      // MEASURED on gitlab.com: a commit the host KNOWS and that has no statuses at all answers
+      // 404, not an empty array. This double answered `200 []`, which is exactly why the
+      // adapter's fallback stayed wrong through every offline run: the double never produced
+      // the response the host does.
+      return statuses.length === 0 ? json(404, { message: '404 Not Found' }) : json(200, statuses);
+    }
+    // `/repository/commits/:sha` — how the adapter asks whether a 404 from the statuses read
+    // means "nothing published" or "unknown commit".
+    if (segments[2] === 'repository' && segments[3] === 'commits' && segments.length === 5 && req.method === 'GET') {
+      const sha = segments[4] ?? '';
+      return this.commitKnown(sha)
+        ? json(200, { id: sha, short_id: sha.slice(0, 8) })
+        : json(404, { message: '404 Not Found' });
     }
     if (segments[2] !== 'merge_requests') return null;
 
@@ -377,6 +391,11 @@ export class FakeGitLabApi {
     mergeRequest.state = 'merged';
     this.mergePuts.push({ iid: mergeRequest.iid, body: { ...body } });
     return json(200, this.render(mergeRequest));
+  }
+
+  /** Does this instance know the commit (a merge request points at it)? */
+  private commitKnown(sha: string): boolean {
+    return this.statusesForSha(sha) !== null;
   }
 
   private statusesForSha(sha: string): unknown[] | null {

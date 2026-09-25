@@ -777,3 +777,32 @@ test('GitLabDeliveryProvider: a blank project is a construction error', () => {
   assert.throws(() => createGitLabDeliveryProvider({ project: '  ' }), /project\D+is required/);
   assert.throws(() => createGitLabDeliveryProvider({ project: PROJECT, apiBase: '  ' }), /must not be empty/);
 });
+
+test('GitLabDeliveryProvider: a commit with no statuses is NOT an unknown commit', async () => {
+  // The real behaviour, measured on gitlab.com: no pipelines, and the head commit exists but
+  // has no statuses, so the statuses endpoint answers 404. Reading that as "not_found" blocked
+  // a real delivery and left a mergeable merge request unmerged.
+  const h = harness();
+  const iid = h.api.seedMergeRequest({ sha: AHEAD, pipelines: [] });
+  const checks = await h.provider.checks(refOf(String(iid)));
+  assert.deepEqual(checks, [], 'no statuses published is "no checks reported", not a failure');
+  assert.ok(
+    h.api.calls().some((call) => call.includes(`/repository/commits/${AHEAD}`)),
+    'the ambiguity must be resolved by asking the host about the commit itself',
+  );
+});
+
+test('GitLabDeliveryProvider: a 404 for a commit the host does NOT know stays a not_found', async () => {
+  // The other half of the same distinction: a commit the host cannot see is a real problem and
+  // must never be swallowed as "a quiet project".
+  const h = harness();
+  const iid = h.api.seedMergeRequest({ sha: 'unknown'.padEnd(40, '0'), pipelines: [] });
+  await assert.rejects(
+    () => h.provider.checks(refOf(String(iid))),
+    (e: unknown) => {
+      assert.ok(e instanceof DeliveryError);
+      assert.equal(e.kind, 'not_found');
+      return true;
+    },
+  );
+});
