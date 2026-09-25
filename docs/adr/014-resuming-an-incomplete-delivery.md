@@ -1,4 +1,4 @@
-# ADR-014 (PROPOSED): Resuming an Incomplete Delivery
+# ADR-014: Resuming an Incomplete Delivery
 
 - **Date**: 2026-09-19
 - **Status**: **Accepted and implemented** (2026-09-19) for the part described under "Decision":

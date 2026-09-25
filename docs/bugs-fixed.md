@@ -37,6 +37,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 
 | 15 | Reading mergeability ONCE treated an asynchronous host's "not computed yet" as a verdict: GitLab answers `mergeable: null` for a moment after a merge request opens, so a finished, reviewed delivery was returned as `retriable` — which left the item in `pr_open`, where the pilot (which selects `ready` work) never looks again. A transient hiccup at merge time stranded the delivery silently | The host was treated as synchronous; and `retriable` was used where the pending-checks path already refuses to use it, so the same "an item left in review is a silent stall" principle had two different behaviours | The unknown is re-read inside a bounded window (5 reads, 3s apart, head re-verified on every attempt, each wait visible as `merge.mergeability_waited`), and a window that ends still ends in "no" — the item is BLOCKED with the way back in its comment, which the claim fix now honours | `0aed164` (`fix(core): an asynchronous "mergeability unknown" is waited for, then blocked visibly`) | the real run: `retriable 2: mergeability is not known yet — an unknown is not a yes`, issue 2 left at `takumi-pr-open` with MR !3 open and nobody to finish it |
 
+| 16 | A delivery that REUSED an existing pull request in round 0 never moved the item to `pr_open` — the loop read that off `delivered.created` — so the merge that followed was refused as an illegal transition (`claimed → merged`) and the item blocked on the state machine instead of on anything real | The post-delivery state was derived from who opened the pull request rather than from what the item IS (delivered and under review); every path that created its own pull request hid it, and the only paths that reuse one are round-0 re-runs and resumes — neither of which existed when the line was written | The rule reads the state itself: after delivering, an item not already in `pr_open` is moved there, and one already there is left alone | `37ead68` (`fix(core): a reused delivery in round 0 never reached pr_open, so it could not merge`) | the resume test in the CLI, on a real repository: `illegal board transition claimed → merged: allowed from claimed: pr_open, blocked` |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -76,6 +78,10 @@ note, and to whoever wonders later whether this class of bug was ever hit.
   where the real API returns `404` does not just fail to catch a bug, it certifies the wrong
   behaviour on every run. When a real host is finally used, every "impossible" branch the
   fixtures never produced is where the bugs are.
+- **A state derived from an event instead of from the thing itself** (#16): "the pull request was
+  created, so the item is under review" is true only while every delivery creates one. The moment
+  a path reuses an existing pull request (a re-run, a resume) the derivation silently disagrees
+  with reality — and the symptom appears somewhere else entirely, as an illegal transition.
 - **A "no" that was a "not yet"** (#15): a transient, misunderstood as a verdict, both is wrong
   and — worse — gets recorded in a terminal-looking place (`retriable` on an item nothing
   re-selects). When a check refuses on an unknown, the refusal has to end somewhere a human or
