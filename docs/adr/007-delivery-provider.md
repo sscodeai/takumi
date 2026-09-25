@@ -137,3 +137,13 @@ remote) is a natural next adapter, not a reason to weaken the port.
   optional review surface), with PR-specific events and the checks phase gated on
   `capabilities().canOpenPullRequest` / `canRunChecks` — a port change, small but real, and
   the reason this is a separate slice rather than an afternoon of adapter code.
+
+  **[Measured, same day]** Making `DeliveryOutcome.pr` optional was tried and reverted, and the
+  experiment is the useful part: the port change itself is one line, but it broke the **shared
+  delivery contract suite** in more than twenty places — every assertion that names a pull
+  request ("the same call twice does not open two", "the merged head is the reviewed one")
+  assumes one exists. That suite is the safety net for three adapters, so it must be taught
+  capability-aware expectations (the way the board suite reports `PASS_WITH_NOT_RUN`) BEFORE a
+  no-PR adapter can inherit it. Doing the port change first would have meant either weakening
+  those assertions or writing an adapter the suite cannot judge — which is why the work stopped
+  at a green tree rather than half-way through a port change.
