@@ -35,6 +35,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 
 | 14 | A run that claimed an item and then died left the item **unrecoverable**: every adapter refused a later claim whenever ANY state record named another run — checked BEFORE the board's own state — so the operator's documented recovery ("move it back to ready") changed nothing and only hand-deleting takumi's note could unstick it | The record was treated as a lock rather than as evidence: five adapters each decided that order for themselves, and every one of them looked defensible alone (the ledger's #11 pattern, this time with a way out missing) | The rule is stated once in core (`decideClaim`): the board's STATE decides whether an item is held, the record only says who worked it last; all six implementations call it, a takeover is reported (`takeoverFrom`) and written into the record, and the shared suite asserts the recovery path for every board — NOT_RUN where a board keeps no records | `7cf6599` (`fix(boards): the board's state decides a claim, not a dead run's record`) | the first real run: `claim refused: issue 1 is already claimed by run fc936000 (state record on the board)` after following the block message's own instruction; the fix was then exercised against gitlab.com |
 
+| 15 | Reading mergeability ONCE treated an asynchronous host's "not computed yet" as a verdict: GitLab answers `mergeable: null` for a moment after a merge request opens, so a finished, reviewed delivery was returned as `retriable` — which left the item in `pr_open`, where the pilot (which selects `ready` work) never looks again. A transient hiccup at merge time stranded the delivery silently | The host was treated as synchronous; and `retriable` was used where the pending-checks path already refuses to use it, so the same "an item left in review is a silent stall" principle had two different behaviours | The unknown is re-read inside a bounded window (5 reads, 3s apart, head re-verified on every attempt, each wait visible as `merge.mergeability_waited`), and a window that ends still ends in "no" — the item is BLOCKED with the way back in its comment, which the claim fix now honours | `0aed164` (`fix(core): an asynchronous "mergeability unknown" is waited for, then blocked visibly`) | the real run: `retriable 2: mergeability is not known yet — an unknown is not a yes`, issue 2 left at `takumi-pr-open` with MR !3 open and nobody to finish it |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -74,6 +76,11 @@ note, and to whoever wonders later whether this class of bug was ever hit.
   where the real API returns `404` does not just fail to catch a bug, it certifies the wrong
   behaviour on every run. When a real host is finally used, every "impossible" branch the
   fixtures never produced is where the bugs are.
+- **A "no" that was a "not yet"** (#15): a transient, misunderstood as a verdict, both is wrong
+  and — worse — gets recorded in a terminal-looking place (`retriable` on an item nothing
+  re-selects). When a check refuses on an unknown, the refusal has to end somewhere a human or
+  the next tick will look; a refusal that parks work where nothing looks is a silent stall with
+  extra steps.
 - **Evidence treated as a lock** (#14): a record that says "run X worked this" was read as "run
   X owns this", so the moment a run died the item could never be taken again — and the automated
   message told the operator to do something that could not work. When a message names a recovery
