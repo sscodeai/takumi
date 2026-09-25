@@ -117,6 +117,18 @@ function effects(h: Harness): { pushes: number; forcePushes: number; prs: number
 
 // --- the shared contract suite ---------------------------------------------
 
+
+/**
+ * This provider OPENS merge requests, so its own tests may rely on the reference being there. The
+ * port keeps `pr` optional — a bare remote has no review surface and must report none — which is
+ * why the shared suite gates on `canOpenPullRequest` and this helper exists for the tests about
+ * THIS provider.
+ */
+function prRefOf(out: { pr?: PullRequestRef }): PullRequestRef {
+  if (out.pr === undefined) throw new Error('this delivery opens merge requests');
+  return out.pr;
+}
+
 test('GitLabDeliveryProvider: shared delivery contract suite', async () => {
   const h = harness();
   const out = await runDeliveryProviderContractSuite(h.provider, {
@@ -208,7 +220,7 @@ test('GitLabDeliveryProvider: the push argv is exactly `push <remote> <branch>`'
   assert.equal(out.push.mode, 'plain');
   assert.deepEqual(h.git.pushes().map((p) => p.argv), [['push', REMOTE, BRANCH]]);
   assert.equal(out.push.head, AHEAD);
-  assert.equal(out.pr.headSha, out.push.head);
+  assert.equal(prRefOf(out).headSha, out.push.head);
   assert.equal(out.push.branch, BRANCH);
   assert.equal(out.created, true);
 });
@@ -231,7 +243,7 @@ test('GitLabDeliveryProvider: an advanced base is absorbed with a plain merge of
   assert.notEqual(mergeCommit, AHEAD);
   assert.equal(out.push.mode, 'plain');
   assert.equal(out.push.head, mergeCommit);
-  assert.equal(out.pr.headSha, mergeCommit);
+  assert.equal(prRefOf(out).headSha, mergeCommit);
   assert.match(out.notes.join(' '), /absorbed the advanced base origin\/main with a plain merge/);
 });
 
@@ -252,8 +264,8 @@ test('GitLabDeliveryProvider: the body carries the run marker, the state record 
   const h = harness();
   const out = await h.provider.deliver(request(), { baseSha: BASE });
   assert.equal(out.created, true);
-  assert.equal(out.pr.number, '1');
-  assert.equal(out.pr.url, `https://gitlab.test/${PROJECT}/-/merge_requests/1`);
+  assert.equal(prRefOf(out).number, '1');
+  assert.equal(prRefOf(out).url, `https://gitlab.test/${PROJECT}/-/merge_requests/1`);
 
   const create = h.api.requestsMatching('/merge_requests').find((req) => req.method === 'POST');
   assert.ok(create !== undefined, 'the merge request must be created with a POST');
@@ -283,8 +295,8 @@ test('GitLabDeliveryProvider: exactly one merge request, reused on every later d
   const first = await h.provider.deliver(request(), { baseSha: BASE });
   const second = await h.provider.deliver(request(), { baseSha: BASE });
   assert.equal(second.created, false);
-  assert.equal(second.pr.number, first.pr.number);
-  assert.ok(second.notes.some((n) => n.includes(`reused the open merge request !${first.pr.number}`)));
+  assert.equal(prRefOf(second).number, prRefOf(first).number);
+  assert.ok(second.notes.some((n) => n.includes(`reused the open merge request !${prRefOf(first).number}`)));
   assert.equal(h.api.requestsMatching('/merge_requests').filter((req) => req.method === 'POST').length, 1);
   assert.equal(h.api.createdCount(), 1);
 
@@ -307,7 +319,7 @@ test('GitLabDeliveryProvider: a frozen-base delivery never merges the base', asy
 test('GitLabDeliveryProvider: status maps the state, the head and the base branch', async () => {
   const h = harness();
   const out = await h.provider.deliver(request(), { baseSha: BASE });
-  assert.deepEqual(await h.provider.status(out.pr), {
+  assert.deepEqual(await h.provider.status(prRefOf(out)), {
     state: 'open',
     mergeable: true,
     headSha: AHEAD,
@@ -497,40 +509,40 @@ test("GitLabDeliveryProvider: reads the payload GitLab actually returns (merge_s
 test('GitLabDeliveryProvider: a moved head refuses the merge and names both shas', async () => {
   const h = harness();
   const out = await h.provider.deliver(request(), { baseSha: BASE });
-  const reviewed = out.pr.headSha;
-  h.api.setSha(Number.parseInt(out.pr.number, 10), MOVED);
+  const reviewed = prRefOf(out).headSha;
+  h.api.setSha(Number.parseInt(prRefOf(out).number, 10), MOVED);
 
   await assert.rejects(
-    () => h.provider.merge(out.pr, { expectedHeadSha: reviewed }),
+    () => h.provider.merge(prRefOf(out), { expectedHeadSha: reviewed }),
     (e: unknown) =>
       e instanceof DeliveryError && e.kind === 'precondition' && e.message.includes(reviewed) && e.message.includes(MOVED),
   );
   assert.equal(h.api.mergedCount(), 0, 'a stale head must not merge anything');
   assert.equal(h.api.mergePutBodies().length, 0, 'no merge call may be sent at all');
-  assert.equal((await h.provider.status(out.pr)).state, 'open');
+  assert.equal((await h.provider.status(prRefOf(out))).state, 'open');
 });
 
 test('GitLabDeliveryProvider: merge sends the reviewed sha to GitLab, so GitLab refuses a moved head too', async () => {
   const h = harness();
   const out = await h.provider.deliver(request(), { baseSha: BASE });
-  const merged = await h.provider.merge(out.pr, { expectedHeadSha: out.pr.headSha, method: 'squash' });
-  assert.deepEqual(merged, { merged: true, method: 'squash', headSha: out.pr.headSha, url: out.pr.url });
+  const merged = await h.provider.merge(prRefOf(out), { expectedHeadSha: prRefOf(out).headSha, method: 'squash' });
+  assert.deepEqual(merged, { merged: true, method: 'squash', headSha: prRefOf(out).headSha, url: prRefOf(out).url });
 
   const bodies = h.api.mergePutBodies();
   assert.equal(bodies.length, 1);
-  assert.equal(bodies[0]?.['sha'], out.pr.headSha, 'the sha parameter IS the server-side anti-swap guard');
+  assert.equal(bodies[0]?.['sha'], prRefOf(out).headSha, 'the sha parameter IS the server-side anti-swap guard');
   assert.equal(bodies[0]?.['should_remove_source_branch'], true);
   assert.equal(bodies[0]?.['squash'], true);
   assert.ok(
-    h.api.calls().some((call) => call.endsWith(`/merge_requests/${out.pr.number}/merge`)),
+    h.api.calls().some((call) => call.endsWith(`/merge_requests/${prRefOf(out).number}/merge`)),
     'the merge call carries the merge-request iid',
   );
-  assert.equal((await h.provider.status(out.pr)).state, 'merged');
+  assert.equal((await h.provider.status(prRefOf(out))).state, 'merged');
 
   // A plain merge asks for no squash.
   const plain = harness();
   const other = await plain.provider.deliver(request(), { baseSha: BASE });
-  await plain.provider.merge(other.pr, { expectedHeadSha: other.pr.headSha });
+  await plain.provider.merge(prRefOf(other), { expectedHeadSha: prRefOf(other).headSha });
   assert.equal(plain.api.mergePutBodies()[0]?.['squash'], false);
 });
 
@@ -539,18 +551,18 @@ test('GitLabDeliveryProvider: 405/406/409 from GitLab are preconditions and neve
   const out = await h.provider.deliver(request(), { baseSha: BASE });
   h.api.failWhen((req) => req.method === 'PUT' && req.url.endsWith('/merge'), 405, '{"message":"405 Method Not Allowed"}');
   await assert.rejects(
-    () => h.provider.merge(out.pr, { expectedHeadSha: out.pr.headSha }),
+    () => h.provider.merge(prRefOf(out), { expectedHeadSha: prRefOf(out).headSha }),
     (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /HTTP 405/.test(e.message),
   );
   assert.equal(h.api.mergedCount(), 0, 'a refused merge is not a merge');
-  assert.equal((await h.provider.status(out.pr)).state, 'open');
+  assert.equal((await h.provider.status(prRefOf(out))).state, 'open');
 
   for (const status of [406, 409]) {
     const fresh = harness();
     const delivered = await fresh.provider.deliver(request(), { baseSha: BASE });
     fresh.api.failWhen((req) => req.method === 'PUT' && req.url.endsWith('/merge'), status);
     await assert.rejects(
-      () => fresh.provider.merge(delivered.pr, { expectedHeadSha: delivered.pr.headSha }),
+      () => fresh.provider.merge(prRefOf(delivered), { expectedHeadSha: prRefOf(delivered).headSha }),
       (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && new RegExp(`HTTP ${status}`).test(e.message),
     );
     assert.equal(fresh.api.mergedCount(), 0);
@@ -560,9 +572,9 @@ test('GitLabDeliveryProvider: 405/406/409 from GitLab are preconditions and neve
 test('GitLabDeliveryProvider: an unmergeable merge request is not merged, and is not even asked', async () => {
   const h = harness();
   const out = await h.provider.deliver(request(), { baseSha: BASE });
-  h.api.setMergeableStatus(Number.parseInt(out.pr.number, 10), 'conflict');
+  h.api.setMergeableStatus(Number.parseInt(prRefOf(out).number, 10), 'conflict');
   await assert.rejects(
-    () => h.provider.merge(out.pr, { expectedHeadSha: out.pr.headSha }),
+    () => h.provider.merge(prRefOf(out), { expectedHeadSha: prRefOf(out).headSha }),
     (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /not mergeable/.test(e.message),
   );
   assert.equal(h.api.mergedCount(), 0);
@@ -573,9 +585,9 @@ test('GitLabDeliveryProvider: a 200 that did not merge the change is not reporte
   const h = harness();
   const out = await h.provider.deliver(request(), { baseSha: BASE });
   // GitLab answers 2xx while a merge is still queued (e.g. behind a pipeline).
-  h.api.setMergePutsState(Number.parseInt(out.pr.number, 10), 'opened');
+  h.api.setMergePutsState(Number.parseInt(prRefOf(out).number, 10), 'opened');
   await assert.rejects(
-    () => h.provider.merge(out.pr, { expectedHeadSha: out.pr.headSha }),
+    () => h.provider.merge(prRefOf(out), { expectedHeadSha: prRefOf(out).headSha }),
     (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /did not happen/.test(e.message),
   );
   assert.equal(h.api.mergedCount(), 0);
@@ -584,9 +596,9 @@ test('GitLabDeliveryProvider: a 200 that did not merge the change is not reporte
 test('GitLabDeliveryProvider: a closed merge request is not merged', async () => {
   const h = harness();
   const out = await h.provider.deliver(request(), { baseSha: BASE });
-  h.api.setState(Number.parseInt(out.pr.number, 10), 'closed');
+  h.api.setState(Number.parseInt(prRefOf(out).number, 10), 'closed');
   await assert.rejects(
-    () => h.provider.merge(out.pr, { expectedHeadSha: out.pr.headSha }),
+    () => h.provider.merge(prRefOf(out), { expectedHeadSha: prRefOf(out).headSha }),
     (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /not open/.test(e.message),
   );
   assert.equal(h.api.mergedCount(), 0);

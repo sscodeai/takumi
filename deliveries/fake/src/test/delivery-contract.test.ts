@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DeliveryError, DeliveryUnsupportedError, runDeliveryProviderContractSuite } from '@takumi/core';
 import type { DeliveryFixture } from '@takumi/core';
 import { FakeDeliveryProvider } from '../index.js';
+import type { PullRequestRef } from '@takumi/core';
 
 // FakeDeliveryProvider runs the SHARED Delivery Contract Suite (ADR-007), the
 // same suite the GitHub/GitLab delivery adapters must pass.
@@ -23,6 +24,17 @@ const fixture: DeliveryFixture = {
 
 function makeProvider(overrides: Partial<ConstructorParameters<typeof FakeDeliveryProvider>[0]> = {}): FakeDeliveryProvider {
   return new FakeDeliveryProvider({ baseSha: BASE, headSha: AHEAD, ...overrides });
+}
+
+
+/**
+ * The fake delivery OPENS pull requests, so its own tests may rely on the reference being there —
+ * every other delivery keeps `pr` optional, which is the point of the port change this file was
+ * updated for (a bare remote has no review surface and reports none).
+ */
+function prRefOf(out: { pr?: PullRequestRef }): PullRequestRef {
+  if (out.pr === undefined) throw new Error('the fake delivery opens pull requests');
+  return out.pr;
 }
 
 test('FakeDeliveryProvider: shared delivery contract suite', async () => {
@@ -66,7 +78,7 @@ test('FakeDeliveryProvider: one pull request per delivery, reused on the second 
   const second = await provider.deliver(req, { baseSha: BASE });
   assert.equal(first.created, true);
   assert.equal(second.created, false);
-  assert.equal(second.pr.number, first.pr.number);
+  assert.equal(prRefOf(second).number, prRefOf(first).number);
   assert.deepEqual(provider.snapshotEffects(), { pushes: 2, forcePushes: 0, prs: 1, merges: 0, baseMerges: 0 });
 });
 
@@ -89,7 +101,7 @@ test('FakeDeliveryProvider: mergeability unknown is not a yes', async () => {
     { baseSha: BASE },
   );
   await assert.rejects(
-    () => provider.merge(out.pr, { expectedHeadSha: out.pr.headSha }),
+    () => provider.merge(prRefOf(out), { expectedHeadSha: prRefOf(out).headSha }),
     (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /not known yet/.test(e.message),
   );
 });
@@ -106,7 +118,7 @@ test('FakeDeliveryProvider: a moved head refuses the merge and merges nothing', 
     { baseSha: BASE },
   );
   await assert.rejects(
-    () => provider.merge(out.pr, { expectedHeadSha: out.pr.headSha }),
+    () => provider.merge(prRefOf(out), { expectedHeadSha: prRefOf(out).headSha }),
     (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /head moved/.test(e.message),
   );
   assert.equal(provider.snapshotEffects().merges, 0);
@@ -139,7 +151,7 @@ test('FakeDeliveryProvider: checks are reported verbatim, pending is never succe
     { worktree: fixture.worktree, branch: fixture.branch, baseBranch: fixture.baseBranch, itemId: '7', runId: 'abcdef12' },
     { baseSha: BASE },
   );
-  const checks = await provider.checks(out.pr);
+  const checks = await provider.checks(prRefOf(out));
   assert.deepEqual(checks.map((c) => c.conclusion), ['success', 'pending', 'neutral']);
   assert.equal(checks.some((c) => c.name === 'tests' && c.conclusion === 'success'), false);
 });
