@@ -453,8 +453,13 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         pr: pr.number,
         message: delivered.created ? `opened PR #${pr.number}` : `reused PR #${pr.number}`,
       });
+      // After delivering, the item is DELIVERED AND UNDER REVIEW — the state must say so.
+      // Reading it off `delivered.created` instead was wrong for a REUSED delivery in round 0: a
+      // resumed delivery (its branch and pull request already exist) would stay in `claimed`, and
+      // `claimed → merged` is not a legal move — so finishing an interrupted delivery blocked on
+      // the state machine rather than on anything real.
       const current = (await board.getWork(plan.itemId)).state;
-      if (current === 'fix_needed' || (round === 0 && delivered.created)) {
+      if (current !== 'pr_open') {
         await transition('pr_open', `PR #${pr.number} ready for review${round === 0 ? '' : ` (round ${round + 1})`}`);
       }
       await writeRecord(round);
