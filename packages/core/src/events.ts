@@ -50,6 +50,11 @@ export const EVENT_KINDS = [
   // Checks and review
   'checks.read',
   'checks.waited',
+  /**
+   * Mergeability was not known yet and is being re-read: a host that computes it
+   * asynchronously (GitLab) answers "unknown" for a moment after a merge request opens.
+   */
+  'merge.mergeability_waited',
   'check.failed',
   // Turning a failure into work, and the honest refusal when a board cannot file
   'issue.filed',

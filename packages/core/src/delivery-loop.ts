@@ -64,6 +64,10 @@ export interface DeliveryLoopPlan {
   checksWaitSeconds?: number;
   /** Poll interval while waiting for checks. Default 15. */
   checksPollSeconds?: number;
+  /** How many times to re-read mergeability before it counts as unknown (default 5). */
+  mergeabilityReads?: number;
+  /** Seconds between mergeability re-reads (default 3). */
+  mergeabilityReadSeconds?: number;
   /**
    * Rewrite the board's progress record at most this often when nothing material
    * changed, in seconds. Default 30. Every write is an API call against a host that
@@ -185,6 +189,11 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
   const waitSeconds = plan.checksWaitSeconds ?? 300;
   let checksWaited = 0;
   const pollSeconds = plan.checksPollSeconds ?? 15;
+  // A fresh merge request can answer "mergeability unknown" for a moment (GitLab computes it
+  // asynchronously), and that moment is not a verdict. Bounded on purpose: the window is a
+  // courtesy to an asynchronous host, not a license to wait forever for a yes.
+  const mergeabilityReads = plan.mergeabilityReads ?? 5;
+  const mergeabilityReadSeconds = plan.mergeabilityReadSeconds ?? 3;
   const sleep = deps.sleep ?? ((seconds: number) => new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000)));
   let rounds = 0;
   let pr: PullRequestRef | undefined;
@@ -579,7 +588,33 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       // --- merge EXACTLY the reviewed head -------------------------------------
       // Re-read first: if the branch moved after the review, the reviewed head is
       // no longer what would land, and merging would be merging unreviewed code.
-      const status = await delivery.status(pr);
+      // GitLab computes mergeability ASYNCHRONOUSLY: a merge request that was just opened
+      // legitimately answers "unknown" for a moment, and reading that as a verdict stranded a
+      // real item in `pr_open` — where no later tick would look at it again, because the pilot
+      // selects `ready` work. So the unknown is given a BOUNDED window to become an answer.
+      //
+      // It is still never read as a yes: once the window is spent the item is handed on as
+      // `retriable` exactly as before, only later, and the message says how long we looked.
+      // The head is re-read on every attempt, because a head that moves is a decision rather
+      // than a transient — it ends the window and falls through to the check below.
+      let status = await delivery.status(pr);
+      for (
+        let attempt = 1;
+        attempt < mergeabilityReads && status.mergeable === null;
+        attempt += 1
+      ) {
+        await sleep(mergeabilityReadSeconds);
+        status = await delivery.status(pr);
+        if (status.headSha !== pr.headSha) break;
+        events.emit({
+          kind: 'merge.mergeability_waited',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          pr: pr.number,
+          message: `mergeability still unknown after ${attempt * mergeabilityReadSeconds}s (attempt ${attempt + 1}/${mergeabilityReads})`,
+          fields: { attempt: attempt + 1, reads: mergeabilityReads },
+        });
+      }
       if (status.headSha !== pr.headSha) {
         const detail = `the head moved after the review (reviewed ${pr.headSha.slice(0, 12)}, now ${status.headSha.slice(0, 12)}); re-review required`;
         await transition('fix_needed', detail);
@@ -590,14 +625,19 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         continue;
       }
       if (status.mergeable === null) {
-        return {
-          outcome: 'retriable',
-          itemId: plan.itemId,
-          pr,
-          rounds,
-          steps,
-          error: 'mergeability is not known yet — an unknown is not a yes',
-        };
+        // BLOCKED, not `retriable`. The window above already gave the host its chance, and
+        // nothing re-selects an item left in `pr_open`: returning `retriable` would strand the
+        // item exactly the way the pending-checks budget refuses to (see the note on that
+        // path). A block is visible — the watchdog reports it, a human sees it — and the
+        // message carries the way back, which the claim rule now actually honours.
+        const detail = `mergeability is still unknown after ${mergeabilityReads} reads over ${(mergeabilityReads - 1) * mergeabilityReadSeconds}s — an unknown is not a yes`;
+        await transition('blocked', detail);
+        await board.comment(
+          plan.itemId,
+          `Could not merge: ${detail}. The branch and merge request are untouched — move the item back to \`ready\` to have a runner finish the delivery.`,
+          { runId: plan.runId },
+        );
+        return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
       }
 
       const merged = await delivery.merge(pr, { expectedHeadSha: pr.headSha, method: 'merge' });

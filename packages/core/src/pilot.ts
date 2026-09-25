@@ -62,6 +62,10 @@ export interface PilotPolicy {
   checksWaitSeconds?: number;
   /** Poll interval while waiting for checks. Default 15. */
   checksPollSeconds?: number;
+  /** Re-reads of mergeability before it counts as unknown (default 5). */
+  mergeabilityReads?: number;
+  /** Seconds between those re-reads (default 3). */
+  mergeabilityReadSeconds?: number;
   /** Suppress an unchanged progress write within this window, in seconds. Default 30. */
   progressIntervalSeconds?: number;
   /** File a work item when the checks stay red after every fix round. Default false. */
@@ -345,6 +349,10 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
         ...(policy.maxReviewRounds === undefined ? {} : { maxReviewRounds: policy.maxReviewRounds }),
         ...(policy.checksWaitSeconds === undefined ? {} : { checksWaitSeconds: policy.checksWaitSeconds }),
         ...(policy.checksPollSeconds === undefined ? {} : { checksPollSeconds: policy.checksPollSeconds }),
+        ...(policy.mergeabilityReads === undefined ? {} : { mergeabilityReads: policy.mergeabilityReads }),
+        ...(policy.mergeabilityReadSeconds === undefined
+          ? {}
+          : { mergeabilityReadSeconds: policy.mergeabilityReadSeconds }),
         ...(policy.progressIntervalSeconds === undefined ? {} : { progressIntervalSeconds: policy.progressIntervalSeconds }),
         ...(policy.fileIssueOnExhaustedChecks === undefined ? {} : { fileIssueOnExhaustedChecks: policy.fileIssueOnExhaustedChecks }),
       },

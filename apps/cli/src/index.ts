@@ -238,6 +238,10 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
       ...(p.policy.staleClaimSeconds === undefined ? {} : { staleClaimSeconds: p.policy.staleClaimSeconds }),
       ...(p.policy.checksWaitSeconds === undefined ? {} : { checksWaitSeconds: p.policy.checksWaitSeconds }),
       ...(p.policy.checksPollSeconds === undefined ? {} : { checksPollSeconds: p.policy.checksPollSeconds }),
+      ...(p.policy.mergeabilityReads === undefined ? {} : { mergeabilityReads: p.policy.mergeabilityReads }),
+      ...(p.policy.mergeabilityReadSeconds === undefined
+        ? {}
+        : { mergeabilityReadSeconds: p.policy.mergeabilityReadSeconds }),
       ...(p.policy.progressIntervalSeconds === undefined ? {} : { progressIntervalSeconds: p.policy.progressIntervalSeconds }),
       ...(p.policy.fileIssueOnExhaustedChecks === undefined ? {} : { fileIssueOnExhaustedChecks: p.policy.fileIssueOnExhaustedChecks }),
       ...(p.policy.scopeQuery === undefined ? {} : { scopeQuery: p.policy.scopeQuery }),
