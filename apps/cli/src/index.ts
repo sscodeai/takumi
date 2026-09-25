@@ -225,6 +225,10 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
     agent: p.agent,
     policy: {
       reviewMode: p.policy.reviewMode,
+      // The rules travel with the mode: a `rules` mode whose rules never arrived would
+      // silently review with the defaults, which is the "config with no reader" defect in
+      // a new costume.
+      ...(p.policy.reviewRules === undefined ? {} : { reviewRules: p.policy.reviewRules }),
       ...(p.policy.approvalLabel === undefined ? {} : { approvalLabel: p.policy.approvalLabel }),
       ...(p.policy.maxReviewRounds === undefined ? {} : { maxReviewRounds: p.policy.maxReviewRounds }),
       ...(p.policy.retainWorktreesHours === undefined ? {} : { retainWorktreesHours: p.policy.retainWorktreesHours }),

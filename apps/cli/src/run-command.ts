@@ -22,6 +22,8 @@ import {
   acquireSlot,
   bumpMetrics,
   createEventLog,
+  createGitRunner,
+  createRuleReviewer,
   createTaskWorktree,
   lineSink,
   readMetricsFile,
@@ -31,6 +33,9 @@ import {
   runPilotTick,
   type BoardWorkItem,
   type EventLog,
+  type GitRunner,
+  type ReviewContext,
+  type ReviewOutcome,
   type PilotPolicy,
   type PilotTickResult,
   type TaskBoardProvider,
@@ -74,6 +79,10 @@ export interface RunOnceDeps {
   pilot: PilotConfig;
   /** Injected for tests: the agent runner (so no child process is needed). */
   runAgent?: AgentRunner;
+  /** Injected for tests: overrides the reviewer the policy would build. */
+  review?: (ctx: ReviewContext) => Promise<ReviewOutcome>;
+  /** Injected for tests: the git the reviewer reads with. */
+  git?: GitRunner;
   /** Injected for tests. */
   log?: EventLog;
   /** Where to report progress (default: stdout). */
@@ -152,6 +161,12 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
       });
     },
     agent: async (ctx) => runner(ctx, deps.pilot.agent),
+    // `reviewMode: rules` without a reviewer would be a policy that promises a gate and
+    // delivers a rubber stamp, so the two are wired together here — and an injected
+    // reviewer (tests) still wins.
+    ...(deps.review ?? (deps.pilot.policy.reviewMode === 'rules'
+      ? { review: createRuleReviewer({ git: deps.git ?? createGitRunner(), rules: deps.pilot.policy.reviewRules }) }
+      : {})),
     policy: deps.pilot.policy,
     slotDir: deps.pilot.slotDir,
   });

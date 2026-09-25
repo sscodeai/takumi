@@ -7,6 +7,15 @@ import { join } from 'node:path';
 
 import { FakeBoardProvider } from '@takumi/board-fake';
 import { FakeDeliveryProvider } from '@takumi/delivery-fake';
+import type {
+  CheckSummary,
+  DeliveryOutcome,
+  DeliveryProvider,
+  DeliveryRequest,
+  MergeOutcome,
+  PullRequestRef,
+  PullRequestStatus,
+} from '@takumi/core';
 import { runAgentCommand, runOnce } from '../run-command.js';
 import type { PilotConfig } from '../run-command.js';
 import { runPilotCommand } from '../index.js';
@@ -288,6 +297,174 @@ test('runPilotCommand: the pilot section of takumi.yaml is wired through, metric
     assert.equal(existsSync(metricsFile), true, 'the metrics file named in takumi.yaml must be written');
     const metrics = JSON.parse(readFileSync(metricsFile, 'utf8')) as { ticks: number };
     assert.equal(metrics.ticks, 1);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+/**
+ * A delivery that reports the head REALLY on the branch.
+ *
+ * The fake delivery hands back a configured sha, which is fine for the loop's own tests and
+ * useless for the reviewer: the reviewer reads the delivered CHANGE, so a canned head makes
+ * it fail closed (correctly, and untestably). This double is the smallest thing that lets a
+ * CLI test exercise the rules against a real commit.
+ */
+class RealHeadDelivery implements DeliveryProvider {
+  merged = false;
+  /** The head this delivery last reported — the only one a merge may name. */
+  lastHead = '';
+  private opened = false;
+  metadata() {
+    return { id: 'real-head', name: 'Real Head Delivery', version: '0.1.0' };
+  }
+  capabilities() {
+    return { canPushBranch: true, canOpenPullRequest: true, canRunChecks: true, canMerge: true };
+  }
+  async deliver(req: DeliveryRequest, base: { baseSha: string }): Promise<DeliveryOutcome> {
+    // The worktree the AGENT committed in — not the repository the worktree was cut from,
+    // which is the same assumption every real delivery adapter makes (req.worktree).
+    const cwd = req.worktree;
+    const dirty = git(['status', '--porcelain'], cwd).trim();
+    if (dirty.length > 0) throw new Error(`dirty worktree: ${dirty}`);
+    const head = git(['rev-parse', 'HEAD'], cwd).trim();
+    if (head === base.baseSha) throw new Error('no commit on the branch');
+    this.lastHead = head;
+    const created = !this.opened;
+    this.opened = true;
+    return {
+      created,
+      pr: { number: '1', url: 'https://host.example/pull/1', headSha: head, baseSha: base.baseSha },
+      push: { mode: 'plain', branch: req.branch, head },
+      notes: ['a plain push of the branch the worktree is on'],
+    };
+  }
+  async status(ref: PullRequestRef): Promise<PullRequestStatus> {
+    return { state: 'open', mergeable: true, headSha: ref.headSha, baseSha: ref.baseSha };
+  }
+  async checks(): Promise<CheckSummary[]> {
+    return [];
+  }
+  async merge(_ref: PullRequestRef, opts: { expectedHeadSha: string }): Promise<MergeOutcome> {
+    assert.equal(opts.expectedHeadSha, this.lastHead, 'only the reviewed head may merge');
+    this.merged = true;
+    return { merged: true, method: 'merge', headSha: opts.expectedHeadSha, url: 'https://host.example/pull/1' };
+  }
+}
+
+test('runOnce: reviewMode rules refuses a delivery whose tests were weakened (the CLI wires the reviewer)', async () => {
+  const repo = makeRepo();
+  try {
+    const worktreeRoot = join(repo.root, 'worktrees');
+    // A test file in the repository, so there is something to weaken.
+    writeFileSync(
+      join(repo.work, 'test_calc.py'),
+      'import unittest\n\nclass CalcTest(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n        self.assertEqual(add(0, 0), 0)\n',
+    );
+    writeFileSync(join(repo.work, 'calc.py'), 'def add(a, b):\n    return a + b\n');
+    git(['add', '.'], repo.work);
+    git(['commit', '-m', 'chore: add a test to weaken'], repo.work);
+    git(['push', 'origin', 'main'], repo.work);
+
+    // The agent's bad fix: delete an assertion so the pipeline looks green.
+    const agentScript = join(repo.root, 'weaken.mjs');
+    writeFileSync(
+      agentScript,
+      [
+        'import { execFileSync } from "node:child_process";',
+        'import { writeFileSync } from "node:fs";',
+        'writeFileSync("test_calc.py", "import unittest\\n\\nclass CalcTest(unittest.TestCase):\\n    def test_add(self):\\n        self.assertEqual(add(1, 2), 3)\\n");',
+        'const g = (a) => execFileSync("git", a, { encoding: "utf8" });',
+        'g(["add", "."]);',
+        'g(["-c", "user.name=Agent", "-c", "user.email=agent@example.invalid", "commit", "-m", "fix: make the test pass"]);',
+        '',
+      ].join('\n'),
+    );
+
+    const board = new FakeBoardProvider({ items: [{ id: 'ITEM-1', state: 'ready', title: 'Fix the failing test', labels: [] }] });
+    const delivery = new RealHeadDelivery();
+    const pilot: PilotConfig = {
+      repo: repo.work,
+      worktreeRoot,
+      slotDir: join(repo.root, 'slots'),
+      baseBranch: 'main',
+      agent: { command: process.execPath, args: [agentScript], timeoutSeconds: 60 },
+      // THE MODE UNDER TEST: no reviewer is injected here — the CLI builds it from this
+      // policy, which is exactly the wiring that could silently be missing.
+      policy: { reviewMode: 'rules', maxReviewRounds: 1, retainWorktreesHours: 0 },
+    };
+
+    const lines: string[] = [];
+    const { tick, exitCode } = await runOnce({ board, delivery, pilot, out: (line) => lines.push(line) });
+
+    assert.equal(tick.outcome, 'blocked', `a weakened test must block, got: ${lines.join('\n')}`);
+    assert.equal(exitCode, 1, 'a blocked tick is the one outcome a human must look at');
+    assert.equal(delivery.merged, false, 'nothing may merge');
+    assert.equal((await board.getWork('ITEM-1')).state, 'blocked');
+    assert.match(lines.join('\n'), /test-weakening\/assertions-removed/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('runOnce: reviewMode rules lets honest work through, and a review mode that asks for rules without a repo fails closed', async () => {
+  const repo = makeRepo();
+  try {
+    const worktreeRoot = join(repo.root, 'worktrees');
+    writeFileSync(join(repo.work, 'test_calc.py'), 'import unittest\n\nclass CalcTest(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n');
+    writeFileSync(join(repo.work, 'calc.py'), 'def add(a, b):\n    return a + b\n');
+    git(['add', '.'], repo.work);
+    git(['commit', '-m', 'chore: fixture'], repo.work);
+    git(['push', 'origin', 'main'], repo.work);
+
+    const agentScript = join(repo.root, 'honest.mjs');
+    writeFileSync(
+      agentScript,
+      [
+        'import { execFileSync } from "node:child_process";',
+        'import { writeFileSync } from "node:fs";',
+        'writeFileSync("test_calc.py", "import unittest\\n\\nclass CalcTest(unittest.TestCase):\\n    def test_add(self):\\n        self.assertEqual(add(1, 2), 3)\\n\\n    def test_sub(self):\\n        self.assertEqual(sub(3, 4), -1)\\n");',
+        'writeFileSync("calc.py", "def add(a, b):\\n    return a + b\\n\\n\\ndef sub(a, b):\\n    return a - b\\n");',
+        'const g = (a) => execFileSync("git", a, { encoding: "utf8" });',
+        'g(["add", "."]);',
+        'g(["-c", "user.name=Agent", "-c", "user.email=agent@example.invalid", "commit", "-m", "feat: add sub() with a test"]);',
+        '',
+      ].join('\n'),
+    );
+
+    const board = new FakeBoardProvider({ items: [{ id: 'ITEM-1', state: 'ready', title: 'Add sub()', labels: [] }] });
+    const delivery = new RealHeadDelivery();
+    const pilot: PilotConfig = {
+      repo: repo.work,
+      worktreeRoot,
+      slotDir: join(repo.root, 'slots'),
+      baseBranch: 'main',
+      agent: { command: process.execPath, args: [agentScript], timeoutSeconds: 60 },
+      policy: { reviewMode: 'rules', maxReviewRounds: 1, retainWorktreesHours: 0 },
+    };
+
+    const lines: string[] = [];
+    const { tick } = await runOnce({ board, delivery, pilot, out: (line) => lines.push(line) });
+    assert.equal(tick.outcome, 'delivered', lines.join('\n'));
+    assert.equal(delivery.merged, true, 'honest work still merges under the rules reviewer');
+
+    // And the fail-closed direction, on the same repository: a reviewer that cannot read the
+    // change set must not deliver. A git that refuses everything stands in for a real
+    // outage (a shallow clone, a vanished object, a permission it does not have).
+    const broken = {
+      run: async () => ({ exitCode: 128, stdout: '', stderr: 'fatal: simulated outage' }),
+    };
+    const lines2: string[] = [];
+    const second = await runOnce({
+      board: new FakeBoardProvider({ items: [{ id: 'ITEM-2', state: 'ready', title: 'Another item', labels: [] }] }),
+      delivery: new RealHeadDelivery(),
+      pilot,
+      git: broken,
+      out: (line) => lines2.push(line),
+    });
+    assert.notEqual(second.tick.outcome, 'delivered', 'an unreadable change set must never deliver');
+    assert.equal(second.tick.outcome, 'retriable', 'and it waits for the next tick instead of pretending');
+    assert.match(lines2.join('\n'), /could not read the change set/);
   } finally {
     repo.cleanup();
   }
