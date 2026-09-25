@@ -265,7 +265,8 @@ Takumi is currently a Developer Preview.
 - [x] A `deliveries/git` adapter for a bare remote with no review surface (ADR-015: the push is
   read back from the remote, the base moves forward to exactly the reviewed head, and nothing
   claims a pull request or a pipeline that does not exist)
-- [ ] A `runtimes/openhands` adapter, if per-task usage and artifacts prove worth it (the CLI seam already works — see `docs/openhands-spike-report.md`)
+- [x] A `runtimes/openhands` adapter (ADR-016): events from the `--json` stream, per-task tokens
+  and cost from OpenHands' own conversation accounting, the verbatim transcript as an artifact
 - [ ] Claude runtime adapter
 - [ ] Excel, Word, and Playwright tool plugins
 - [ ] Jira and GitHub tool plugins (the board layer already covers issues)
