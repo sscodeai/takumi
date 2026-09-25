@@ -33,6 +33,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 
 | 13 | The GitLab delivery adapter read the commit-statuses endpoint's 404 as `not_found`, while gitlab.com answers **404 for a commit that exists and has no statuses** — so on a project with no CI/CD a real, mergeable merge request was blocked and left unmerged | The offline double answered `200 []` where the host answers 404, so the fallback branch had never once been exercised against the response a real instance sends; the adapter had no way to tell "nothing published" from "unknown commit" | The two facts are separated: on a 404 from `/commits/:sha/statuses`, the adapter asks the host about the commit (`/repository/commits/:sha`) — commit exists ⇒ an empty check list ("no checks reported"), commit unknown ⇒ the original `not_found` stands. The double now answers 404 like the host, and both directions are tested | `40ee497` (`fix(deliveries/gitlab): a commit with no statuses is not an unknown commit`) | first real run against gitlab.com: `blocked 1: list the commit statuses of fe6ff94… failed with HTTP 404`, with MR !1 open and mergeable on the instance |
 
+| 14 | A run that claimed an item and then died left the item **unrecoverable**: every adapter refused a later claim whenever ANY state record named another run — checked BEFORE the board's own state — so the operator's documented recovery ("move it back to ready") changed nothing and only hand-deleting takumi's note could unstick it | The record was treated as a lock rather than as evidence: five adapters each decided that order for themselves, and every one of them looked defensible alone (the ledger's #11 pattern, this time with a way out missing) | The rule is stated once in core (`decideClaim`): the board's STATE decides whether an item is held, the record only says who worked it last; all six implementations call it, a takeover is reported (`takeoverFrom`) and written into the record, and the shared suite asserts the recovery path for every board — NOT_RUN where a board keeps no records | `7cf6599` (`fix(boards): the board's state decides a claim, not a dead run's record`) | the first real run: `claim refused: issue 1 is already claimed by run fc936000 (state record on the board)` after following the block message's own instruction; the fix was then exercised against gitlab.com |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -72,3 +74,9 @@ note, and to whoever wonders later whether this class of bug was ever hit.
   where the real API returns `404` does not just fail to catch a bug, it certifies the wrong
   behaviour on every run. When a real host is finally used, every "impossible" branch the
   fixtures never produced is where the bugs are.
+- **Evidence treated as a lock** (#14): a record that says "run X worked this" was read as "run
+  X owns this", so the moment a run died the item could never be taken again — and the automated
+  message told the operator to do something that could not work. When a message names a recovery
+  path, that path is part of the contract and belongs in the shared suite; and a guard should be
+  re-derived from the authority that owns the fact (here: the board's state), never from a
+  byproduct of a previous attempt.
