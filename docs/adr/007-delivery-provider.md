@@ -123,4 +123,17 @@ remote) is a natural next adapter, not a reason to weaken the port.
 - Deliberately still open: a `deliveries/git` (bare remote, no PR), a
   conflict-resolution policy (today a conflicting base merge is aborted and handed
   to the review session), and multi-host fan-out (one change delivered to several
-  hosts) — none of which need a port change.
+  hosts).
+
+  **[Correction, 2026-09-19] `deliveries/git` DOES need a port change**, and the sentence
+  that claimed otherwise has been removed. Reading the code before building it showed why:
+  the loop already tolerates a missing pull request on every FAILURE path (`pr === undefined`
+  guards on the blocked and filing branches, including "No pull request was opened."), but
+  its happy path does not — `pr = delivered.pr` is unconditional, the delivered/review events
+  name `pr.number`, `checks(pr)` is called with it, and `merge(pr, { expectedHeadSha })` takes
+  a `PullRequestRef`. So a bare-remote provider cannot be written behind today's port without
+  either inventing a fake pull request (which would make the events lie) or generalizing the
+  reference the port passes around. The honest shape is a `DeliveryRef` (branch + head +
+  optional review surface), with PR-specific events and the checks phase gated on
+  `capabilities().canOpenPullRequest` / `canRunChecks` — a port change, small but real, and
+  the reason this is a separate slice rather than an afternoon of adapter code.
