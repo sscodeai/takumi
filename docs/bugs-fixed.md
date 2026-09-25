@@ -29,6 +29,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 
 | 11 | The same `pilot.policy.scopeQuery` behaved differently on each board: a whitespace-only scope was DROPPED on GitLab/Notion (returning the whole board while looking scoped), REFUSED on Jira, and a double quote in the term was silently STRIPPED on GitHub | Each adapter had decided for itself what an unrepresentable scope means, and each decision looked defensible alone; the rule was never stated once | `assertScopeQuery` in core states the rule (carry the scope faithfully or refuse it) and every adapter calls it; the contract suite now asserts, per adapter, that a blank scope fails `precondition` and that a quoted term is either refused or narrowed faithfully — never widened | `a18b7f5` (`fix(boards): one scope rule in core, enforced on every adapter`) | the shared suite's `scopeValidation: PASS` note, plus `boards/{gitlab,notion}/src/test/*` where the tests that encoded the old behaviour now assert the refusal |
 
+| 12 | The shipped `examples/openhands-agent.sh` was committed mode 100644, so `pilot.agent.command` — which starts the file directly — failed with `spawn ... EACCES`; the OpenHands integration could never have run from the documentation | The example was written by a tool that creates files 644 and committed without a mode check, and no test starts the shipped file: the suite builds its own agent commands | The executable bit is now committed (git tracks it, so a plain `chmod` would leave the defect for the next clone), and the first real pilot run against gitlab.com is what found it | `bf24a9a` (`fix(examples): the OpenHands agent command was not executable`) | the real run: `retriable 1: ... spawn ... EACCES` → `blocked` with "no runner can resume a held claim", plus the state record and `takumi-blocked` label landing on the real issue |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -61,3 +63,6 @@ note, and to whoever wonders later whether this class of bug was ever hit.
   rule left to each adapter drifts — and the drift is invisible until the same
   configuration meets two different boards. Put the rule in the shared layer and assert it
   per adapter in the contract suite.
+- **The shipped artifact nobody starts** (#12): an example, script or config that the tests
+  never execute is documentation that can be wrong forever. A file mode, a shebang, a flag —
+  none of them are exercised by a unit test that builds its own version of the same thing.
