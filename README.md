@@ -262,7 +262,9 @@ Takumi is currently a Developer Preview.
 - [x] DeliveryProvider port: branch, plain push, one pull request, checks, merge of the reviewed head
 - [x] Delivery adapters for GitHub and GitLab
 - [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
-- [ ] A `deliveries/git` adapter for a bare remote with no review surface
+- [x] A `deliveries/git` adapter for a bare remote with no review surface (ADR-015: the push is
+  read back from the remote, the base moves forward to exactly the reviewed head, and nothing
+  claims a pull request or a pipeline that does not exist)
 - [ ] A `runtimes/openhands` adapter, if per-task usage and artifacts prove worth it (the CLI seam already works — see `docs/openhands-spike-report.md`)
 - [ ] Claude runtime adapter
 - [ ] Excel, Word, and Playwright tool plugins
