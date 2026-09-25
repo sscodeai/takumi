@@ -31,6 +31,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 
 | 12 | The shipped `examples/openhands-agent.sh` was committed mode 100644, so `pilot.agent.command` — which starts the file directly — failed with `spawn ... EACCES`; the OpenHands integration could never have run from the documentation | The example was written by a tool that creates files 644 and committed without a mode check, and no test starts the shipped file: the suite builds its own agent commands | The executable bit is now committed (git tracks it, so a plain `chmod` would leave the defect for the next clone), and the first real pilot run against gitlab.com is what found it | `bf24a9a` (`fix(examples): the OpenHands agent command was not executable`) | the real run: `retriable 1: ... spawn ... EACCES` → `blocked` with "no runner can resume a held claim", plus the state record and `takumi-blocked` label landing on the real issue |
 
+| 13 | The GitLab delivery adapter read the commit-statuses endpoint's 404 as `not_found`, while gitlab.com answers **404 for a commit that exists and has no statuses** — so on a project with no CI/CD a real, mergeable merge request was blocked and left unmerged | The offline double answered `200 []` where the host answers 404, so the fallback branch had never once been exercised against the response a real instance sends; the adapter had no way to tell "nothing published" from "unknown commit" | The two facts are separated: on a 404 from `/commits/:sha/statuses`, the adapter asks the host about the commit (`/repository/commits/:sha`) — commit exists ⇒ an empty check list ("no checks reported"), commit unknown ⇒ the original `not_found` stands. The double now answers 404 like the host, and both directions are tested | `40ee497` (`fix(deliveries/gitlab): a commit with no statuses is not an unknown commit`) | first real run against gitlab.com: `blocked 1: list the commit statuses of fe6ff94… failed with HTTP 404`, with MR !1 open and mergeable on the instance |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -66,3 +68,7 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 - **The shipped artifact nobody starts** (#12): an example, script or config that the tests
   never execute is documentation that can be wrong forever. A file mode, a shebang, a flag —
   none of them are exercised by a unit test that builds its own version of the same thing.
+- **The double that answers more kindly than the host** (#13): a fixture returning `200 []`
+  where the real API returns `404` does not just fail to catch a bug, it certifies the wrong
+  behaviour on every run. When a real host is finally used, every "impossible" branch the
+  fixtures never produced is where the bugs are.
