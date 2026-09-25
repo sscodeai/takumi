@@ -576,3 +576,83 @@ test('runOnce: a bare git remote is a REAL delivery — push, read back, fast-fo
     repo.cleanup();
   }
 });
+
+test('runOnce: an agent run through a RUNTIME reports what it cost, in the trail', async () => {
+  const repo = makeRepo();
+  try {
+    const root = repo.root;
+    const worktreeRoot = join(root, 'worktrees');
+    const eventsFile = join(root, 'events.jsonl');
+    const home = join(root, 'openhands-home');
+    mkdirSync(home, { recursive: true });
+
+    // A stand-in for the OpenHands CLI that COMMITS (as the prompt instructs), prints a captured
+    // event stream, and leaves its accounting where OpenHands leaves it.
+    const stub = join(root, 'runtime-stub.mjs');
+    writeFileSync(
+      stub,
+      [
+        'import { execFileSync } from "node:child_process";',
+        'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+        'import { join } from "node:path";',
+        'const argv = process.argv.slice(2);',
+        'const prompt = argv[argv.indexOf("-t") + 1] ?? "";',
+        'writeFileSync("prompt.txt", prompt);',
+        'mkdirSync("delivered", { recursive: true });',
+        'writeFileSync(join("delivered", "note.txt"), "done\\n");',
+        'const g = (a) => execFileSync("git", a, { encoding: "utf8" });',
+        'g(["add", "."]);',
+        'g(["-c", "user.name=Agent", "-c", "user.email=a@example.invalid", "commit", "-m", "feat: runtime work"]);',
+        'const home = process.env.OPENHANDS_HOME;',
+        'const id = "abc123def456abc123def456abc12345";',
+        'mkdirSync(join(home, "conversations", id), { recursive: true });',
+        'writeFileSync(join(home, "conversations", id, "base_state.json"), JSON.stringify({ id, execution_status: "finished", stats: { usage_to_metrics: { agent: { model_name: "stub-model", accumulated_cost: 0.0, accumulated_token_usage: { prompt_tokens: 4200, completion_tokens: 300, cache_read_tokens: 1000, reasoning_tokens: 5 } } } } }));',
+        'process.stdout.write("Initializing agent...\\n");',
+        'process.stdout.write(JSON.stringify({ id: "e1", kind: "MessageEvent", source: "user", llm_message: { content: [{ type: "text", text: prompt }] } }) + "\\n");',
+        'process.stdout.write("Agent finished\\n");',
+        'process.stdout.write("CONVERSATION SUMMARY\\nConversation ID:\\n" + id + "\\n");',
+        '',
+      ].join('\n'),
+    );
+
+    const board = new FakeBoardProvider({ items: [{ id: 'ITEM-1', state: 'ready', title: 'Costed work', body: "Do it", labels: [] }] });
+    const delivery = new RealHeadDelivery();
+    const pilot: PilotConfig = {
+      repo: repo.work,
+      worktreeRoot,
+      slotDir: join(root, 'slots'),
+      baseBranch: 'main',
+      eventsFile,
+      agent: {
+        runtime: 'openhands',
+        command: process.execPath,
+        args: [stub],
+        timeoutSeconds: 60,
+        env: { OPENHANDS_HOME: home },
+        runtimeOptions: { home },
+      },
+      policy: { reviewMode: 'rules', maxReviewRounds: 1, retainWorktreesHours: 0 },
+    };
+
+    const lines: string[] = [];
+    const { tick } = await runOnce({ board, delivery, pilot, out: (line) => lines.push(line) });
+    assert.equal(tick.outcome, 'delivered', lines.join('\n'));
+
+    // The payoff: the tick's own trail says what the agent cost.
+    const events = readFileSync(eventsFile, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { kind: string; message?: string; fields?: Record<string, unknown> });
+    const usage = events.find((e) => e.kind === 'runtime.usage');
+    assert.ok(usage !== undefined, `a runtime run must report its usage: ${events.map((e) => e.kind).join(',')}`);
+    assert.equal(usage.fields?.['runtime'], 'openhands');
+    assert.equal(usage.fields?.['promptTokens'], 4200);
+    assert.equal(usage.fields?.['completionTokens'], 300);
+    assert.equal(usage.fields?.['totalTokens'], 4500);
+    assert.equal(usage.fields?.['model'], 'stub-model');
+    assert.match(String(usage.message), /4500 tokens/);
+    assert.ok(Number(usage.fields?.['artifacts'] ?? 0) > 0, 'the artifacts the runtime collected are counted');
+  } finally {
+    repo.cleanup();
+  }
+});

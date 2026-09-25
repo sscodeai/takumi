@@ -64,10 +64,14 @@ OpenHands to a runtime: per-task tokens, cost and artifacts from its `--json` ev
 - Per-task cost is now answerable for OpenHands tasks **from the tool's own books**. It is honest
   where it is empty, which is the useful part: a `0` cost is labelled as "no pricing published",
   not as "free".
-- **Still open, and named**: the PILOT does not yet consume the runtime, so a tick's trail still
-  reports no tokens. `pilot.agent.runtime: openhands` (the tick runs the adapter, then emits a
-  usage event from `getUsage`) is the next slice — the adapter is what makes it possible, and the
-  numbers above are what it will carry.
+- **Wired the same day**: `pilot.agent.runtime: openhands` runs the agent through this adapter and
+  the tick emits `runtime.usage` with the tokens, the model, the duration, the cost as recorded and
+  the artifact count. A tick now says what its work COST, not only that it happened. An unknown
+  runtime name is an `unsupported` error rather than a silent fall back to `command`: a tick that
+  quietly used a different agent than the one configured would be lying about its result. The
+  runtime prompt carries the same contract the command wrapper states — do the work, verify it,
+  COMMIT it, leave the tree clean — because a real agent that was not told ran and left the work
+  uncommitted, and takumi refused it (correctly).
 - The adapter does not commit: an agent that edits files without committing is correct behaviour
   for a RUNTIME (it is a session), and the pilot's contract — a commit, a clean tree — is enforced
   where it belongs, at the delivery boundary.

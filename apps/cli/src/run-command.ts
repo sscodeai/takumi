@@ -44,6 +44,15 @@ import {
 } from '@takumi/core';
 
 export interface PilotAgentConfig {
+  /**
+   * Run the agent through a RUNTIME instead of a raw command (ADR-016). `openhands` runs the
+   * OpenHands CLI through `@takumi/runtime-openhands`, which is what makes a tick able to report
+   * what its agent COST: the runtime port has `getUsage`, a subprocess has nothing.
+   *
+   * A value that is not a known runtime is an error, never a silent fall back to `command`: a tick
+   * that quietly used a different agent than the one configured would be lying about its results.
+   */
+  runtime?: string;
   /** The executable to run (e.g. `pi`, `claude`, a repo script). */
   command: string;
   /** Its arguments. `{item}` and `{branch}` are substituted from the run. */
@@ -52,6 +61,11 @@ export interface PilotAgentConfig {
   timeoutSeconds?: number;
   /** Extra environment for the child. */
   env?: Record<string, string>;
+  /** Runtime-specific options (only read when `runtime` is set). */
+  runtimeOptions?: {
+    /** Where the runtime keeps its conversations (OpenHands' own state dir). */
+    home?: string;
+  };
 }
 
 export interface PilotConfig {
@@ -176,6 +190,11 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
       // clean) is what the resumed branch already satisfies, and if it does not, the delivery
       // refuses exactly as it would for a fresh run.
       if (resumed) return;
+      if (deps.pilot.agent.runtime !== undefined) {
+        // The agent as a RUNTIME (ADR-016): the same work, with what it cost reported afterwards.
+        const events = await eventLogFor(deps.pilot.eventsFile);
+        return runAgentRuntime(ctx, deps.pilot.agent, events);
+      }
       return runner(ctx, deps.pilot.agent);
     },
     // `reviewMode: rules` without a reviewer would be a policy that promises a gate and
@@ -216,6 +235,80 @@ function report(out: (line: string) => void, tick: PilotTickResult): void {
   out(`${tick.outcome}${where}: ${tick.detail}`);
   if (tick.pr !== undefined) out(`  pull request: ${tick.pr.url}`);
   for (const step of tick.steps ?? []) out(`  ${step.step.padEnd(12)} ${step.detail}`);
+}
+
+/**
+ * Run the agent through a runtime adapter, and emit what it cost.
+ *
+ * WHY THIS EXISTS: a subprocess can do the work but cannot answer what the work cost. The runtime
+ * port carries `getUsage`/`getArtifacts`/`getStatus`, so when the agent runs through a runtime the
+ * tick can report tokens and cost in the same trail as everything else — instead of leaving you to
+ * read the harness's own logs.
+ *
+ * The prompt carries the SAME contract the command wrapper states (see examples/openhands-agent.sh):
+ * do the work here, verify it, COMMIT it, leave the tree clean. Found by running a real agent that
+ * did not commit — takumi refused it, correctly, and the instruction was missing from the prompt.
+ */
+export async function runAgentRuntime(ctx: AgentContext, config: PilotAgentConfig, events: EventLog): Promise<void> {
+  const { OpenHandsRuntimeAdapter } = await import('@takumi/runtime-openhands');
+  const { runTaskAndCollect } = await import('@takumi/core');
+  const runtime = config.runtime ?? '';
+  if (runtime !== 'openhands') {
+    throw new ProviderError('unsupported', `unknown agent runtime '${runtime}' (known: openhands)`);
+  }
+
+  const adapter = new OpenHandsRuntimeAdapter({
+    command: config.command,
+    extraArgs: config.args,
+    ...(config.runtimeOptions?.home === undefined ? {} : { home: config.runtimeOptions.home }),
+    env: config.env ?? {},
+    ...(config.timeoutSeconds === undefined ? {} : { timeoutSeconds: config.timeoutSeconds }),
+  });
+
+  const taskId = `${ctx.item.id}-${ctx.runId}-r${ctx.round}`;
+  const prompt = [
+    `Work item ${ctx.item.id}: ${ctx.item.title}`,
+    '',
+    ctx.item.body ?? '',
+    '',
+    'Rules for this worktree, which takumi enforces after you exit:',
+    ' 1. Do the work here, in this repository, and nothing else.',
+    ' 2. Verify it: run the tests, and make them pass.',
+    ' 3. COMMIT your work when it is done (git add, then git commit). takumi never commits for you,',
+    '    and it refuses a worktree with uncommitted changes.',
+    ' 4. Leave the worktree clean: no stray files, and never rewrite existing commits.',
+  ].join('\n');
+
+  const result = await runTaskAndCollect(adapter, { id: taskId, prompt, cwd: ctx.worktree });
+  if (result.status !== 'completed') {
+    throw new ProviderError('transport', `the ${runtime} runtime reported ${result.status} for item ${ctx.item.id}`);
+  }
+
+  // The usage is the reason the runtime exists; when it is unavailable the runtime says so in
+  // `extra`, and the trail carries that instead of a zero that would read as "free".
+  const usage = await adapter.getUsage(taskId);
+  const artifacts = await adapter.getArtifacts(taskId);
+  const unavailable = (usage.extra ?? {})['usageUnavailable'];
+  events.emit({
+    kind: 'runtime.usage',
+    runId: ctx.runId,
+    itemId: ctx.item.id,
+    fields: {
+      runtime,
+      model: usage.model ?? '',
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      totalTokens: usage.totalTokens,
+      costUsd: usage.costUsd,
+      durationMs: usage.durationMs,
+      cacheReadTokens: Number((usage.extra ?? {})['cacheReadTokens'] ?? 0),
+      artifacts: artifacts.length,
+    },
+    message:
+      unavailable === undefined
+        ? `round ${ctx.round + 1}: ${runtime} used ${usage.totalTokens} tokens (${usage.promptTokens} in, ${usage.completionTokens} out) in ${Math.round(usage.durationMs / 1000)}s, cost as recorded $${usage.costUsd}`
+        : `round ${ctx.round + 1}: ${runtime} finished; usage NOT AVAILABLE (${String(unavailable)})`,
+  });
 }
 
 /**

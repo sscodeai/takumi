@@ -56,6 +56,12 @@ export const EVENT_KINDS = [
    */
   'merge.mergeability_waited',
   /**
+   * What an agent task cost, from the runtime that ran it (ADR-016). Emitted only when the agent
+   * ran through a runtime: a bare subprocess cannot answer, and a zero invented for it would read
+   * as "this was free".
+   */
+  'runtime.usage',
+  /**
    * A tick took an item that already had a delivery in flight (same branch, same pull request)
    * instead of starting fresh work on it.
    */
