@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { FakeBoardProvider } from '@takumi/board-fake';
+import { GitDeliveryProvider } from '@takumi/delivery-git';
 import { FakeDeliveryProvider } from '@takumi/delivery-fake';
 import type {
   CheckSummary,
@@ -520,6 +521,57 @@ test('runOnce: an unfinished delivery is RESUMED, not redone (same branch, no ag
     const heads = git(['ls-remote', '--heads', 'origin'], repo.work);
     assert.match(heads, /refs\/heads\/takumi\/ITEM-1-deadrun/);
     assert.doesNotMatch(heads, /takumi\/ITEM-1-(?!deadrun)/, 'a resume must not create a second branch');
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('runOnce: a bare git remote is a REAL delivery — push, read back, fast-forward, no PR claimed', async () => {
+  const repo = makeRepo();
+  try {
+    const worktreeRoot = join(repo.root, 'worktrees');
+    const agentScript = join(repo.root, 'add-file.mjs');
+    writeFileSync(
+      agentScript,
+      [
+        'import { execFileSync } from "node:child_process";',
+        'import { writeFileSync } from "node:fs";',
+        'writeFileSync("delivered.txt", "work the agent did\\n");',
+        'const g = (a) => execFileSync("git", a, { encoding: "utf8" });',
+        'g(["add", "."]);',
+        'g(["-c", "user.name=Agent", "-c", "user.email=agent@example.invalid", "commit", "-m", "feat: the delivered work"]);',
+        '',
+      ].join('\n'),
+    );
+
+    const board = new FakeBoardProvider({ items: [{ id: 'ITEM-1', state: 'ready', title: 'Deliver to a bare remote', labels: [] }] });
+    const delivery = new GitDeliveryProvider({ repo: repo.work, baseBranch: 'main' });
+    const pilot: PilotConfig = {
+      repo: repo.work,
+      worktreeRoot,
+      slotDir: join(repo.root, 'slots'),
+      baseBranch: 'main',
+      agent: { command: process.execPath, args: [agentScript], timeoutSeconds: 60 },
+      policy: { reviewMode: 'rules', maxReviewRounds: 1, retainWorktreesHours: 0 },
+    };
+
+    const lines: string[] = [];
+    const { tick } = await runOnce({ board, delivery, pilot, out: (line) => lines.push(line) });
+    assert.equal(tick.outcome, 'delivered', lines.join('\n'));
+    assert.equal((await board.getWork('ITEM-1')).state, 'merged');
+    // The base branch ON THE REMOTE holds the agent's commit: the delivery is real, and the merge
+    // was a fast-forward of the base to exactly that commit. Read from the remote, not from a
+    // self-report: fetch and look at the file the agent wrote.
+    git(['fetch', 'origin', 'main'], repo.work);
+    const remoteMain = git(['rev-parse', 'origin/main'], repo.work).trim();
+    assert.match(
+      git(['show', `${remoteMain}:delivered.txt`], repo.work),
+      /work the agent did/,
+      'the agent\'s work must be ON the remote base branch after a fast-forward merge',
+    );
+    const trail = lines.join('\n');
+    assert.doesNotMatch(trail, /PR #/, 'a bare remote has no review surface, so no pull request may appear');
+    assert.match(trail, /none reported|no checks reported/, 'nothing may claim a green pipeline either');
   } finally {
     repo.cleanup();
   }

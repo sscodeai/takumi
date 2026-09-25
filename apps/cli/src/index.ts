@@ -288,6 +288,21 @@ async function createProviders(
     const { createGitHubDeliveryProvider } = await import('@takumi/delivery-github');
     return { board, delivery: createGitHubDeliveryProvider({ repo: deliveryOptions['repo'] ?? '', ...(deliveryOptions['apiBase'] === undefined ? {} : { apiBase: deliveryOptions['apiBase'] }) }) };
   }
+  if (deliveryId === 'git') {
+    // A bare remote: the branch is pushed and READ BACK, and integration is a fast-forward of the
+    // base branch. It needs a checkout of the same remote (for the calls that outlive one
+    // worktree) and the base branch a merge would move — both from the delivery options.
+    const { createGitDeliveryProvider } = await import('@takumi/delivery-git');
+    return {
+      board,
+      delivery: createGitDeliveryProvider({
+        repo: deliveryOptions['repo'] ?? '',
+        baseBranch: deliveryOptions['baseBranch'] ?? 'main',
+        ...(deliveryOptions['remote'] === undefined ? {} : { remote: deliveryOptions['remote'] }),
+      }),
+    };
+  }
+
   if (deliveryId === 'gitlab') {
     const { createGitLabDeliveryProvider } = await import('@takumi/delivery-gitlab');
     return { board, delivery: createGitLabDeliveryProvider({ project: deliveryOptions['project'] ?? '', ...(deliveryOptions['apiBase'] === undefined ? {} : { apiBase: deliveryOptions['apiBase'] }) }) };

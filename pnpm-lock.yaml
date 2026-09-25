@@ -38,6 +38,9 @@ importers:
       '@takumi/delivery-fake':
         specifier: workspace:*
         version: link:../../deliveries/fake
+      '@takumi/delivery-git':
+        specifier: workspace:*
+        version: link:../../deliveries/git
       '@takumi/delivery-github':
         specifier: workspace:*
         version: link:../../deliveries/github
@@ -159,6 +162,19 @@ importers:
         version: 5.9.3
 
   deliveries/fake:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  deliveries/git:
     dependencies:
       '@takumi/core':
         specifier: workspace:*
