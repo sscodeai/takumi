@@ -88,10 +88,25 @@ export interface ReviewContext {
   /** The exact head the review must cover — the only head that may later merge. */
   headSha: string;
   changedFiles: string[];
+  /**
+   * The worktree and the frozen base, so a reviewer can read the change itself.
+   *
+   * `changedFiles` alone is a list of names: enough to say "the CI config changed", not
+   * enough to say "this test lost three assertions". A reviewer that has to reconstruct the
+   * base from somewhere else is a reviewer with a second source of truth, so the loop hands
+   * over the two things it already knows.
+   */
+  worktree: string;
+  baseSha: string;
 }
 
 export type ReviewOutcome =
-  | { verdict: 'clean' }
+  /**
+   * `clean` unlocks the merge. A NOTE is allowed on a clean verdict because an observation
+   * is not a defect: "only the tests changed" belongs on the record, and forcing it into
+   * `findings` would spend a fix round on work that may be exactly what the item asked for.
+   */
+  | { verdict: 'clean'; note?: string }
   | { verdict: 'findings'; note?: string }
   /**
    * The change is ready but a HUMAN has not approved it yet (orbi's human review).
@@ -509,7 +524,14 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         hooks.changedFiles === undefined
           ? []
           : await hooks.changedFiles({ worktree: plan.worktree, baseSha: plan.baseSha });
-      const review = await hooks.review({ round, pr, headSha: pr.headSha, changedFiles });
+      const review = await hooks.review({
+        round,
+        pr,
+        headSha: pr.headSha,
+        changedFiles,
+        worktree: plan.worktree,
+        baseSha: plan.baseSha,
+      });
       if (review.verdict === 'awaiting-human') {
         events.emit({
           kind: 'review.awaiting_human',
@@ -536,11 +558,13 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         pr: pr.number,
         message:
           review.verdict === 'clean'
-            ? `round ${round + 1}: clean at ${pr.headSha.slice(0, 12)}`
+            ? // A note on a clean verdict is an observation ("only the tests changed"), and
+              // dropping it here would lose the one place a human would have seen it.
+              `round ${round + 1}: clean at ${pr.headSha.slice(0, 12)}${review.note === undefined ? '' : ` — note: ${review.note}`}`
             : `round ${round + 1}: findings${review.note === undefined ? '' : ` — ${review.note}`}`,
         fields: { round, head: pr.headSha },
       });
-      record('review', `round ${round + 1}: ${review.verdict}${review.verdict === 'findings' && review.note ? ` — ${review.note}` : ''}`);
+      record('review', `round ${round + 1}: ${review.verdict}${review.note ? ` — ${review.note}` : ''}`);
 
       if (review.verdict === 'findings') {
         if (round + 1 >= maxRounds) {

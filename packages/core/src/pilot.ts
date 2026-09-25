@@ -19,6 +19,7 @@
  */
 
 import { assertBoardCapability } from './task-board.js';
+import type { ReviewRules } from './review-rules.js';
 import type { BoardWorkItem, TaskBoardProvider } from './task-board.js';
 import type { DeliveryProvider, PullRequestRef } from './delivery.js';
 import {
@@ -35,11 +36,20 @@ import type { WorktreeHandle } from './worktree.js';
 
 export interface PilotPolicy {
   /**
-   * `checks-only` merges as soon as the checks are green; `label` waits for the
-   * approval label a human adds. The difference is who is trusted to judge, so it is
-   * a policy decision, never a default buried in code.
+   * Who is trusted to judge a delivery:
+   *
+   * - `checks-only` — the CI pipeline. Merges as soon as the checks are green, which is
+   *   only as good as the checks: a repository with NO pipeline merges unverified, and a
+   *   pipeline can be satisfied by weakening the tests it runs.
+   * - `label` — a human, who adds the approval label.
+   * - `rules` — the deterministic reviewer (ADR-013), which reads the real change set and
+   *   refuses a delivery whose tests were weakened or whose protected paths moved. It is
+   *   the mode that makes "unattended" defensible, and it still lets CI be CI: failing
+   *   checks are handled before the review ever runs.
    */
-  reviewMode: 'checks-only' | 'label';
+  reviewMode: 'checks-only' | 'label' | 'rules';
+  /** What the `rules` reviewer runs. Absent means its defaults. */
+  reviewRules?: ReviewRules;
   /** The label that means "a human approved this" — required for `reviewMode: 'label'`. */
   approvalLabel?: string;
   maxReviewRounds?: number;
