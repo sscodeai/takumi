@@ -574,7 +574,14 @@ test('readState: control flow only ever follows a TRUSTED author', async () => {
   assert.equal((await unguarded.readState('7'))?.runId, 'cafebabe');
   const refused = await unguarded.claim('7', 'my-run');
   assert.equal(refused.claimed, false);
-  assert.match(refused.reason ?? '', /already claimed by run cafebabe/);
+  // The refusal still happens, but it now comes from the CLAIM RACE verdict rather than from
+  // the record read, and that is the improvement: the board's state says `ready`, so a record —
+  // whose provenance this provider cannot judge — must not work as a lock (that is how an item
+  // became unrecoverable after a dead run; see `decideClaim`). The claim is refused because the
+  // board's newest record is not ours, which is the truth, and the refusal is still fail-closed:
+  // nothing is delivered.
+  assert.match(refused.reason ?? '', /lost the claim race on issue 7/);
+  assert.match(refused.reason ?? '', /cafebabe/);
 });
 
 test('readState: a corrupt block is loud in a trusted note and ignored in an untrusted one', async () => {
@@ -651,7 +658,10 @@ test('claim: a lost race and a repeated claim are both refused with a reason', a
   assert.equal((await calmProvider.claim('7', 'c0ffee01')).claimed, true);
   const again = await calmProvider.claim('7', 'c0ffee01');
   assert.equal(again.claimed, false);
-  assert.match(again.reason ?? '', /already claimed by run c0ffee01/);
+  // The same run asking twice is now named for what it is (a repeat of ITS OWN claim) instead of
+  // being reported as somebody else's claim — the message comes from `decideClaim` in core, so
+  // every board says the same thing.
+  assert.match(again.reason ?? '', /not repeatable for the same run c0ffee01/);
   assert.equal(calm.labelsOf(7).filter((label) => label === 'takumi-claimed').length, 1);
 
   // An item that is not ready is not ours to take.

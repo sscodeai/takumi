@@ -91,6 +91,7 @@ export {
   BoardUnsupportedError,
   validateBoardCapabilities,
   assertBoardCapability,
+  decideClaim,
   assertScopeQuery,
   runTaskBoardProviderContractSuite,
 } from './task-board.js';

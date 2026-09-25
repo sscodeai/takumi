@@ -1,5 +1,6 @@
 import {
   assertBoardCapability,
+  decideClaim,
   assertScopeQuery,
   BOARD_WORK_ITEM_STATES,
   BoardError,
@@ -196,15 +197,31 @@ export class FakeBoardProvider implements TaskBoardProvider {
 
   async claim(id: string, runId: string): Promise<ClaimResult> {
     const entry = this.must(id);
-    if (entry.claim !== undefined) {
-      return { item: id, runId, claimed: false, reason: `already claimed by ${entry.claim}` };
+    // The reference implementation runs the SAME rule as the real adapters (`decideClaim`),
+    // and records the claim in the state record the way a real board does — the contract suite
+    // compares the two, so a fake that kept its claim in a private field would be measuring a
+    // different contract from the one the adapters are held to.
+    const decision = decideClaim({ state: entry.item.state, record: await this.readState(id), runId });
+    if (!decision.claimed) {
+      return { item: id, runId, claimed: false, reason: decision.reason };
     }
-    if (entry.item.state !== 'ready') {
-      return { item: id, runId, claimed: false, reason: `item is in state ${entry.item.state}, not ready` };
-    }
-    entry.claim = runId;
     this.applyState(entry, 'claimed');
-    return { item: id, runId, claimed: true };
+    await this.writeState(id, {
+      schema: 1,
+      runId,
+      item: id,
+      reviewRound: 0,
+      updatedAt: new Date().toISOString(),
+      ...(decision.takeoverFrom === undefined
+        ? {}
+        : { note: `took over from run ${decision.takeoverFrom} (its record named itself while the board said ready)` }),
+    });
+    return {
+      item: id,
+      runId,
+      claimed: true,
+      ...(decision.takeoverFrom === undefined ? {} : { takeoverFrom: decision.takeoverFrom }),
+    };
   }
 
   async transition(id: string, to: BoardWorkItemState, _evidence: BoardTransitionEvidence): Promise<void> {

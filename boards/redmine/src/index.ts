@@ -55,6 +55,7 @@
  */
 
 import {
+  decideClaim,
   assertBoardCapability,
   renderCreateMarker,
   assertBoardHttpOk,
@@ -621,13 +622,13 @@ export class RedmineBoardProvider implements TaskBoardProvider {
     assertBoardCapability(this, 'machineReadableState');
 
     const issue = await this.fetchIssue(id);
+    // The rule lives in core (decideClaim): the board's STATE says whether the item is
+    // held, the record only says who worked it last. Reading the record as a lock is how an
+    // item becomes unrecoverable after the run that claimed it dies.
     const existing = this.recordOf(issue);
-    if (existing !== null && existing.runId !== runId) {
-      return { item: id, runId, claimed: false, reason: `already claimed by ${existing.runId}` };
-    }
-    const current = this.stateOf(issue);
-    if (current !== 'ready') {
-      return { item: id, runId, claimed: false, reason: `item is in state ${current}, not ready` };
+    const decision = decideClaim({ state: this.stateOf(issue), record: existing, runId });
+    if (!decision.claimed) {
+      return { item: id, runId, claimed: false, reason: decision.reason };
     }
 
     const record: BoardStateRecord = {
@@ -636,6 +637,9 @@ export class RedmineBoardProvider implements TaskBoardProvider {
       item: id,
       reviewRound: 0,
       updatedAt: new Date().toISOString(),
+      ...(decision.takeoverFrom === undefined
+        ? {}
+        : { note: `took over from run ${decision.takeoverFrom} (its record named itself while the board said ready)` }),
     };
     await this.putIssue(
       id,
@@ -656,7 +660,7 @@ export class RedmineBoardProvider implements TaskBoardProvider {
         reason: `lost a concurrent claim to ${confirmed === null ? 'a run that left no record' : confirmed.runId}`,
       };
     }
-    return { item: id, runId, claimed: true };
+    return { item: id, runId, claimed: true, ...(decision.takeoverFrom === undefined ? {} : { takeoverFrom: decision.takeoverFrom }) };
   }
 
   /**
