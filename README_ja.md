@@ -172,6 +172,7 @@ takumi/
 | Pilot metrics (ADR-010): JSON カウンタ + Prometheus textfile、progress 書き込みの throttle | Done |
 | Filing work (ADR-011): 全 board の `createWork`（marker で冪等）、赤い CI が自分で item を立てる | Done |
 | Scoping a tick (ADR-012): 各 board 自身の検索による `query` スコープ、検索できない board では fail-closed | Done |
+| Deterministic reviewer (ADR-013): `reviewMode: rules` — テスト弱体化と protected path を block、fail-closed | Done |
 | Agent Eval with 保留検証テスト and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |

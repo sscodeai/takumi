@@ -145,7 +145,7 @@ takumi/
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
 ├── examples/              # end-to-end delivery examples, including Japanese SI
-└── docs/                  # ADRs (006-012: boards, delivery, rails, pilot, metrics, filing, scope), notes
+└── docs/                  # ADRs (006-013: boards, delivery, rails, pilot, metrics, filing, scope, review), notes
 ```
 
 ## Core Ideas
@@ -181,6 +181,7 @@ takumi/
 | Filing work (ADR-011): `createWork` on every board, idempotent by marker; a red pipeline files its own item | Done |
 | Scoping a tick (ADR-012): `query` scope through each board's own search, fail-closed where it cannot search | Done |
 | OpenHands as an agent (spike report): proven through the existing pilot seam, zero new abstraction | Done |
+| Deterministic reviewer (ADR-013): `reviewMode: rules` — test-weakening and protected paths blocked, fail-closed review | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
