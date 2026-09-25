@@ -135,6 +135,10 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     }
   }
 
+  // Set while preparing a worktree: this tick is finishing an existing delivery, so the work is
+  // already on its branch and the agent must not run again.
+  let resumed = false;
+
   const tick = await runPilotTick({
     board: deps.board,
     delivery: deps.delivery,
@@ -147,8 +151,9 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
       const { resolveRef } = await import('@takumi/core');
       return resolveRef(deps.pilot.repo, deps.pilot.remote === undefined ? deps.pilot.baseBranch : `${deps.pilot.remote}/${deps.pilot.baseBranch}`);
     },
-    prepareWorktree: async (item, runId) => {
+    prepareWorktree: async (item, runId, resume) => {
       const { worktreeBranchName } = await import('@takumi/core');
+      resumed = resume !== undefined;
       return createTaskWorktree({
         repo: deps.pilot.repo,
         root: deps.pilot.worktreeRoot,
@@ -157,10 +162,22 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
         branch: worktreeBranchName(item.id, runId),
         baseBranch: deps.pilot.baseBranch,
         baseSha: await resolveBaseFor(deps.pilot),
+        // A resumed delivery checks out the branch it is finishing, and its frozen base becomes
+        // the merge base with it: the diff the review reads is what the delivery adds, whatever
+        // the base branch has done since.
+        ...(resume === undefined ? {} : { resumeBranch: resume.branch }),
         ...(deps.pilot.remote === undefined ? {} : { remote: deps.pilot.remote }),
       });
     },
-    agent: async (ctx) => runner(ctx, deps.pilot.agent),
+    agent: async (ctx) => {
+      // A resumed tick finishes a delivery whose work is ALREADY committed on the branch, so
+      // running the agent again would duplicate it — a second branch and a second pull request
+      // for work that was reviewed once. The loop's contract (a commit exists, the worktree is
+      // clean) is what the resumed branch already satisfies, and if it does not, the delivery
+      // refuses exactly as it would for a fresh run.
+      if (resumed) return;
+      return runner(ctx, deps.pilot.agent);
+    },
     // `reviewMode: rules` without a reviewer would be a policy that promises a gate and
     // delivers a rubber stamp, so the two are wired together here — and an injected
     // reviewer (tests) still wins.

@@ -668,7 +668,9 @@ test('claim: a lost race and a repeated claim are both refused with a reason', a
   const { provider: taken } = board({ iid: 5, labels: ['takumi-pr-open'] });
   const notReady = await taken.claim('5', 'run-9');
   assert.equal(notReady.claimed, false);
-  assert.match(notReady.reason ?? '', /in state pr_open, not ready/);
+  // The message now says what is missing rather than just what is not: an in-flight item with no
+  // delivery record has nothing to resume, and a runner cannot start work of its own on it.
+  assert.match(notReady.reason ?? '', /in state pr_open with no delivery record/);
 });
 
 test('transition: an illegal move is rejected before any write reaches the board', async () => {

@@ -21,6 +21,7 @@
 import { assertBoardCapability } from './task-board.js';
 import type { ReviewRules } from './review-rules.js';
 import type { BoardWorkItem, TaskBoardProvider } from './task-board.js';
+import type { BoardStateRecord } from './board-state-record.js';
 import type { DeliveryProvider, PullRequestRef } from './delivery.js';
 import {
   runDeliveryLoop,
@@ -108,7 +109,15 @@ export interface PilotTickDeps {
   /** The branch tip to freeze as the base for this tick (read from the repo). */
   resolveBaseSha: () => Promise<string>;
   /** Create the task worktree for one item (injected: a test needs no git). */
-  prepareWorktree: (item: BoardWorkItem, runId: string) => Promise<WorktreeHandle>;
+  /**
+   * Prepare the worktree this tick works in. `resume` asks for an EXISTING branch to be checked
+   * out (a delivery this tick is finishing) instead of a new one cut from the frozen base.
+   */
+  prepareWorktree: (
+    item: BoardWorkItem,
+    runId: string,
+    resume?: { branch: string },
+  ) => Promise<WorktreeHandle>;
   /** Remove a worktree at the end of a tick (injected for the same reason). */
   releaseWorktree?: (handle: WorktreeHandle, outcome: string) => Promise<void>;
   /** Run the agent in the worktree. Must COMMIT its work: the loop never commits. */
@@ -240,29 +249,64 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
     // reason to quietly process the whole board.
     assertBoardCapability(deps.board, 'canTextSearch');
   }
-  const ready = await deps.board.listWork({
-    states: ['ready'],
-    ...(policy.scopeQuery === undefined ? {} : { query: policy.scopeQuery }),
-  });
-  if (ready.length === 0) {
+  const scope = policy.scopeQuery === undefined ? {} : { query: policy.scopeQuery };
+  const ready = await deps.board.listWork({ states: ['ready'], ...scope });
+
+  /**
+   * Items whose delivery an earlier run left unfinished: the branch and the pull request exist,
+   * the review simply never completed.
+   *
+   * The board is the queue, and it holds two kinds of work. Selecting only the fresh kind is how
+   * a transient host hiccup — a network blip during a push, a mergeability answer that had not
+   * been computed yet — became a delivery nobody ever finished: the sweep reported it and only a
+   * human could act, and a human resetting the item re-ran the agent and pushed a SECOND branch
+   * for work that was already reviewed.
+   *
+   * A record that names a delivery AND the branch it happened on is the evidence this needs, so a
+   * record without the branch cannot be resumed — it is skipped rather than guessed at. The
+   * review hook still decides whether such an item may merge, so an item parked for a person is
+   * re-read and left waiting, never pushed through.
+   */
+  const findResumable = async (): Promise<Array<{ item: BoardWorkItem; resumeBranch?: string }>> => {
+    if (!deps.board.capabilities().machineReadableState) return [];
+    const out: Array<{ item: BoardWorkItem; resumeBranch?: string }> = [];
+    // Bounded: one record read per candidate, and one tick only ever needs one item.
+    for (const entry of (await deps.board.listWork({ states: ['pr_open', 'fix_needed'], ...scope })).slice(0, 10)) {
+      let record: BoardStateRecord | null = null;
+      try {
+        record = await deps.board.readState(entry.id);
+      } catch {
+        continue;
+      }
+      if (record === null || record.deliveryRef === undefined || record.branch === undefined) continue;
+      out.push({ item: entry, resumeBranch: record.branch });
+    }
+    return out;
+  };
+
+  const candidates: Array<{ item: BoardWorkItem; resumeBranch?: string }> = ready.map((entry) => ({ item: entry }));
+  if (candidates.length === 0) candidates.push(...(await findResumable()));
+  if (candidates.length === 0) {
     events.emit({ kind: 'pilot.idle', runId: 'pilot000', message: 'no ready work' });
     return { outcome: 'idle', detail: 'no ready work' };
   }
 
   // --- 2. the first item nobody else is on ------------------------------------
   let item: BoardWorkItem | undefined;
+  let resumeBranch: string | undefined;
   let runId = '';
   let handle: Awaited<ReturnType<typeof acquireSlot>> | undefined;
-  for (const candidate of ready) {
+  for (const candidate of candidates) {
     const runCandidate = pilotRunId(now());
     const acquisition = acquireSlot({
       dir: deps.slotDir,
-      key: candidate.id,
-      owner: { runId: runCandidate, itemId: candidate.id },
+      key: candidate.item.id,
+      owner: { runId: runCandidate, itemId: candidate.item.id },
       ...(deps.staleAfterSeconds === undefined ? {} : { staleAfterSeconds: deps.staleAfterSeconds }),
     });
     if (acquisition.acquired && acquisition.handle !== undefined) {
-      item = candidate;
+      item = candidate.item;
+      resumeBranch = candidate.resumeBranch;
       runId = runCandidate;
       handle = acquisition;
       break;
@@ -270,12 +314,12 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
     events.emit({
       kind: 'pilot.item_skipped',
       runId: runCandidate,
-      itemId: candidate.id,
+      itemId: candidate.item.id,
       message: acquisition.reason ?? 'held by another runner',
     });
   }
   if (item === undefined || handle?.handle === undefined) {
-    return { outcome: 'busy', detail: `all ${ready.length} ready item(s) are held by other runners` };
+    return { outcome: 'busy', detail: `all ${candidates.length} item(s) are held by other runners` };
   }
   const slot = handle.handle;
   slot.startHeartbeat();
@@ -290,7 +334,19 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
   try {
     // --- 3. the worktree the agent will work in --------------------------------
     const baseSha = await deps.resolveBaseSha();
-    const worktree = await deps.prepareWorktree(item, runId);
+    if (resumeBranch !== undefined) {
+      events.emit({
+        kind: 'pilot.resumed',
+        runId,
+        itemId: item.id,
+        message: `finishing the delivery already on ${resumeBranch} instead of starting new work`,
+      });
+    }
+    const worktree = await deps.prepareWorktree(
+      item,
+      runId,
+      resumeBranch === undefined ? undefined : { branch: resumeBranch },
+    );
     events.emit({
       kind: 'worktree.created',
       runId,

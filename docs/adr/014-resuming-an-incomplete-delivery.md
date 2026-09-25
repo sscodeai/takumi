@@ -1,8 +1,11 @@
 # ADR-014 (PROPOSED): Resuming an Incomplete Delivery
 
 - **Date**: 2026-09-19
-- **Status**: **Proposed** — not implemented. Written down because the design is the hard part and
-  the evidence for it is a real run, not a hypothesis.
+- **Status**: **Accepted and implemented** (2026-09-19) for the part described under "Decision":
+  the record's branch, the two-kind selection, the worktree checked out on the resumed branch and
+  the agent skipped. **Still open**: the PR-less delivery seam (a bare remote has no reference to
+  resume against) and the milestone-scope question — both belong to `deliveries/git`, which is why
+  this ADR is not closed by this slice.
 - **Related**: ADR-007 (delivery port), ADR-009 (the pilot), the ledger's #14 and #15
 
 ## Context

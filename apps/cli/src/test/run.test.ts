@@ -314,7 +314,8 @@ class RealHeadDelivery implements DeliveryProvider {
   merged = false;
   /** The head this delivery last reported — the only one a merge may name. */
   lastHead = '';
-  private opened = false;
+  /** Public so a test can say "the pull request is already open" — i.e. resuming, not opening. */
+  opened = false;
   metadata() {
     return { id: 'real-head', name: 'Real Head Delivery', version: '0.1.0' };
   }
@@ -465,6 +466,60 @@ test('runOnce: reviewMode rules lets honest work through, and a review mode that
     assert.notEqual(second.tick.outcome, 'delivered', 'an unreadable change set must never deliver');
     assert.equal(second.tick.outcome, 'retriable', 'and it waits for the next tick instead of pretending');
     assert.match(lines2.join('\n'), /could not read the change set/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('runOnce: an unfinished delivery is RESUMED, not redone (same branch, no agent run)', async () => {
+  const repo = makeRepo();
+  try {
+    const worktreeRoot = join(repo.root, 'worktrees');
+    // An earlier run did the work, pushed it, opened a pull request, and died before merging:
+    // exactly the state a network blip during a push used to leave behind.
+    git(['checkout', '-b', 'takumi/ITEM-1-deadrun'], repo.work);
+    writeFileSync(join(repo.work, 'feature.txt'), 'work an earlier run already did\n');
+    git(['add', '.'], repo.work);
+    git(['commit', '-m', 'feat: the work an earlier run did'], repo.work);
+    git(['push', '-u', 'origin', 'takumi/ITEM-1-deadrun'], repo.work);
+    git(['checkout', 'main'], repo.work);
+
+    const board = new FakeBoardProvider({
+      items: [{ id: 'ITEM-1', state: 'pr_open', title: 'Finish it', labels: ['takumi-pr-open'] }],
+    });
+    await board.writeState('ITEM-1', {
+      schema: 1,
+      runId: 'dead-run',
+      item: 'ITEM-1',
+      reviewRound: 0,
+      updatedAt: '2026-09-16T00:00:00.000Z',
+      deliveryRef: '#3',
+      branch: 'takumi/ITEM-1-deadrun',
+    });
+
+    const delivery = new RealHeadDelivery();
+    delivery.opened = true; // the pull request is already open: this tick finishes it
+
+    const pilot: PilotConfig = {
+      repo: repo.work,
+      worktreeRoot,
+      slotDir: join(repo.root, 'slots'),
+      baseBranch: 'main',
+      // An agent that CANNOT run: if the tick still delivers, the agent demonstrably did not run,
+      // which is the whole point of a resume — the work is already on the branch.
+      agent: { command: '/nonexistent-agent-command', timeoutSeconds: 30 },
+      policy: { reviewMode: 'rules', maxReviewRounds: 1, retainWorktreesHours: 0 },
+    };
+
+    const lines: string[] = [];
+    const { tick } = await runOnce({ board, delivery, pilot, out: (line) => lines.push(line) });
+    assert.equal(tick.outcome, 'delivered', lines.join('\n'));
+    assert.equal(delivery.merged, true, 'a resumed delivery must finish: its work was already reviewed');
+    assert.equal((await board.getWork('ITEM-1')).state, 'merged');
+    // The decisive assertion: NO second branch was pushed for work that was already done.
+    const heads = git(['ls-remote', '--heads', 'origin'], repo.work);
+    assert.match(heads, /refs\/heads\/takumi\/ITEM-1-deadrun/);
+    assert.doesNotMatch(heads, /takumi\/ITEM-1-(?!deadrun)/, 'a resume must not create a second branch');
   } finally {
     repo.cleanup();
   }

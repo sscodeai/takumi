@@ -449,7 +449,12 @@ export function assertBoardCapability(
  *      matter what a previous run's state record says.
  *   2. The record is EVIDENCE ABOUT A RUN, not a lock. It answers "who worked this last" and
  *      "what did they do", and it drives the tracing a human reads.
- *   3. A refused claim must say why (a silent refusal is not a contract).
+ *   3. `pr_open` and `fix_needed` are IN FLIGHT, not held: a delivery exists, its review never
+ *      finished, and FINISHING IT IS WORK TOO — so such an item is claimable when its record
+ *      names another run (that run is not working any more, and the slot lock is what proves
+ *      it). A terminal state (`merged`, `blocked`) never is: those want a human decision, and
+ *      `claimed` means somebody is working it right now.
+ *   4. A refused claim must say why (a silent refusal is not a contract).
  *
  * Reading (2) as a lock is how an item becomes UNRECOVERABLE, and it happened on the first real
  * run against a real instance: a run claimed the item, died of a transport failure, and blocked
@@ -468,6 +473,22 @@ export function decideClaim(opts: {
     return {
       claimed: false,
       reason: `claim is not repeatable for the same run ${runId} (read the state record to resume)`,
+    };
+  }
+  if (state === 'pr_open' || state === 'fix_needed') {
+    // Rule 3: in-flight work, claimable to be FINISHED. Without this, a delivery interrupted
+    // after the push (a network blip, an answer the host had not computed yet) was unfinishable
+    // by any runner: the sweep reported it and only a human could act, and a human resetting the
+    // item re-ran the agent and pushed a second branch for work that was already reviewed.
+    if (record !== null && record.runId !== runId) {
+      return { claimed: true, takeoverFrom: record.runId };
+    }
+    return {
+      claimed: false,
+      reason:
+        record === null
+          ? `item is in state ${state} with no delivery record, so there is nothing to resume`
+          : `item is in state ${state} and its record names this run already — claim is not repeatable`,
     };
   }
   if (state !== 'ready') {

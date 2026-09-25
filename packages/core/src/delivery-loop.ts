@@ -197,6 +197,9 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
   const sleep = deps.sleep ?? ((seconds: number) => new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000)));
   let rounds = 0;
   let pr: PullRequestRef | undefined;
+  // The branch this run delivers on: the plan's branch until the delivery confirms it, and the
+  // delivered branch afterwards (a resumed run adopts the branch it is finishing).
+  let deliveredBranch: string | undefined;
 
   // The exclusion rail, before anything is claimed: every board here is
   // non-atomic, so a second runner must be turned away before it can believe it
@@ -265,6 +268,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       updatedAt: new Date(clock()).toISOString(),
       baseBranch: plan.baseBranch,
       ...(pr === undefined ? {} : { deliveryRef: `#${pr.number}` }),
+      branch: deliveredBranch ?? plan.branch,
     };
     await board.writeState(plan.itemId, record_);
   };
@@ -424,6 +428,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         { baseSha: plan.baseSha },
       );
       pr = delivered.pr;
+      deliveredBranch = delivered.push.branch;
       record(
         'deliver',
         `round ${round + 1}: ${delivered.created ? 'opened' : 'reused'} PR #${pr.number} ` +

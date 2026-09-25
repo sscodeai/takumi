@@ -33,6 +33,14 @@ export interface WorktreeRequest {
   baseBranch: string;
   /** The frozen base sha, checked out as the starting point. */
   baseSha: string;
+  /**
+   * Resume a branch that already exists on the remote, instead of creating one.
+   *
+   * The worktree is checked out ON that branch (its work is what the delivery already pushed),
+   * and the frozen base becomes the merge base with it. Set by a tick that is finishing a
+   * delivery an earlier run started; never set for fresh work.
+   */
+  resumeBranch?: string;
   /** Remote the base is fetched from (default `origin`). */
   remote?: string;
 }
@@ -91,6 +99,24 @@ export async function createTaskWorktree(
   const remote = request.remote ?? 'origin';
   const path = join(request.root, worktreeDirName(request.itemId, request.runId));
   mkdirSync(request.root, { recursive: true });
+
+  if (request.resumeBranch !== undefined) {
+    // RESUMING a delivery that is already on the host: the branch exists on the remote (an
+    // earlier run pushed it) and holds the work the review must cover. It is fetched into a
+    // local branch of the same name and CHECKED OUT — never re-created from the base, which
+    // would redo work that was already reviewed — and the frozen base becomes the MERGE BASE of
+    // the two, so the review's diff is exactly what the delivery adds no matter what the base
+    // branch has done since.
+    await requireGit(
+      git,
+      ['fetch', '--force', remote, `${request.resumeBranch}:refs/heads/${request.resumeBranch}`],
+      request.repo,
+      'transport',
+    );
+    await requireGit(git, ['worktree', 'add', '--force', path, request.resumeBranch], request.repo, 'precondition');
+    const mergeBase = await requireGit(git, ['merge-base', request.baseSha, request.resumeBranch], request.repo, 'precondition');
+    return { path, branch: request.resumeBranch, baseSha: mergeBase.trim() };
+  }
 
   await requireGit(git, ['fetch', remote, request.baseBranch], request.repo, 'transport');
   await requireGit(git, ['worktree', 'add', '--force', '-b', request.branch, path, request.baseSha], request.repo, 'precondition');

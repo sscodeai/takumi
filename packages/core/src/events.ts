@@ -55,6 +55,11 @@ export const EVENT_KINDS = [
    * asynchronously (GitLab) answers "unknown" for a moment after a merge request opens.
    */
   'merge.mergeability_waited',
+  /**
+   * A tick took an item that already had a delivery in flight (same branch, same pull request)
+   * instead of starting fresh work on it.
+   */
+  'pilot.resumed',
   'check.failed',
   // Turning a failure into work, and the honest refusal when a board cannot file
   'issue.filed',

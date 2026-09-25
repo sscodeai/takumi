@@ -770,3 +770,50 @@ test('runPilotTick: the same item merges when the tests are kept honest', async 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('runPilotTick: with nothing ready, a tick finishes a delivery an earlier run left open', async () => {
+  // The board holds one item, and it is NOT ready: its delivery reached pr_open and the run that
+  // did that is gone. Selecting only `ready` work is how such an item stayed unfinished forever —
+  // the sweep reported it and only a human could act, and a human resetting it re-ran the agent
+  // and pushed a second branch for work that was already reviewed.
+  const h = harness([{ id: 'ITEM-9', state: 'pr_open' }]);
+  h.board.records.set('ITEM-9', {
+    schema: 1,
+    runId: 'run-that-died',
+    item: 'ITEM-9',
+    reviewRound: 0,
+    updatedAt: '2026-09-16T00:00:00.000Z',
+    deliveryRef: '#3',
+    branch: 'takumi/9-a1b2c3',
+  });
+  const hints: Array<{ branch: string } | undefined> = [];
+  const result = await runPilotTick({
+    ...h.deps,
+    prepareWorktree: async (item, runId, resume) => {
+      hints.push(resume);
+      return h.deps.prepareWorktree(item, runId);
+    },
+  });
+
+  assert.equal(result.outcome, 'delivered', 'the resumed delivery must run to its end');
+  assert.equal(result.itemId, 'ITEM-9');
+  assert.deepEqual(hints, [{ branch: 'takumi/9-a1b2c3' }], 'the tick must ask for the branch the record names');
+  assert.equal(h.delivery.prCount, 1, 'the delivery step still runs (it reuses the open pull request)');
+});
+
+test('runPilotTick: an in-flight item whose record names no branch is left alone, not guessed at', async () => {
+  // Without the branch there is nothing to resume: a tick must not invent one, because a wrong
+  // branch means a wrong delivery. This is the "skip rather than guess" half of the rule.
+  const h = harness([{ id: 'ITEM-9', state: 'pr_open' }]);
+  h.board.records.set('ITEM-9', {
+    schema: 1,
+    runId: 'run-that-died',
+    item: 'ITEM-9',
+    reviewRound: 0,
+    updatedAt: '2026-09-16T00:00:00.000Z',
+    deliveryRef: '#3',
+  });
+  const result = await runPilotTick(h.deps);
+  assert.equal(result.outcome, 'idle');
+  assert.equal(h.delivery.prCount, 0);
+});
