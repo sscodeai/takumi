@@ -58,13 +58,18 @@ export type ReviewSeverity = 'block' | 'human' | 'note';
  * asserts the engine's actual rule ids match the documented set — so adding a rule without bumping
  * the identity fails the build instead of silently changing what a past approval meant.
  */
-export const REVIEW_RULESET_ID = 'rules@1';
+export const REVIEW_RULESET_ID = 'rules@2';
 
 export interface ReviewFinding {
   /** Stable rule id, so a board comment and a test can name the same thing. */
   rule: string;
   severity: ReviewSeverity;
   path?: string;
+  /**
+   * Line in the HEAD content, when the rule can point at one. A finding a person can locate is a
+   * finding they can act on (and it is what a diff-anchored comment would need).
+   */
+  line?: number;
   detail: string;
 }
 
@@ -204,6 +209,47 @@ function countMarkers(text: string, markers: readonly string[]): number {
  * for the agent, and there are findings this file never produces because they are not
  * defects at all — that distinction is the difference between a reviewer and a nuisance.
  */
+/**
+ * Credential shapes precise enough to BLOCK on: a known prefix of a real token format, or a private
+ * key header. Deliberately narrow — a pattern that also matches ordinary code would block honest
+ * deliveries, and a gate that cries wolf gets switched off, which is worse than no gate.
+ */
+const DEFAULT_SECRET_PATTERNS: readonly RegExp[] = [
+  /glpat-[A-Za-z0-9_-]{20,}/, // GitLab personal/project access token
+  /\bgh[pousr]_[A-Za-z0-9]{30,}/, // GitHub tokens
+  /\bsk-[A-Za-z0-9]{20,}/, // OpenAI-style API key
+  /\bAKIA[0-9A-Z]{16}\b/, // AWS access key id
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/, // Slack token
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/, // private key material
+  /\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, // JWT
+];
+
+/** 1-based line number of an offset. */
+function lineOf(content: string, index: number): number {
+  let line = 1;
+  for (let i = 0; i < index && i < content.length; i += 1) if (content[i] === '\n') line += 1;
+  return line;
+}
+
+/**
+ * A long run that LOOKS like a secret but is not provably one.
+ *
+ * The test is a mix of cases and digits plus length, which excludes the false positive that
+ * matters: a plain hex digest (a lockfile entry, a git sha) has no upper/lower/digit MIX, so it is
+ * never reported. This is a heuristic, so it goes to a HUMAN, never to a block.
+ */
+function highEntropyRun(content: string): { value: string; line: number } | null {
+  const re = /[A-Za-z0-9+/=_-]{32,}/g;
+  for (let match = re.exec(content); match !== null; match = re.exec(content)) {
+    const value = match[0];
+    if (!/[A-Z]/.test(value) || !/[a-z]/.test(value) || !/[0-9]/.test(value)) continue;
+    const distinct = new Set(value).size;
+    if (distinct < 16) continue;
+    return { value, line: lineOf(content, match.index) };
+  }
+  return null;
+}
+
 export function runReviewRules(input: ReviewInput, rules: ReviewRules = {}): ReviewFinding[] {
   const findings: ReviewFinding[] = [];
   const testPatterns = compile([...DEFAULT_TEST_PATTERNS, ...(rules.testPathPatterns ?? [])]);
@@ -278,6 +324,41 @@ export function runReviewRules(input: ReviewInput, rules: ReviewRules = {}): Rev
         path: change.path,
         detail: `this path is protected (CI configuration, dependency manifest, container build or takumi's own configuration): a machine must not wave it through, and an agent must not "fix" a legitimate change by reverting it — a human decides`,
         });
+    }
+  }
+
+  // --- credentials committed in the change (ADR-019) --------------------------
+  // The rules above catch an agent WEAKENING its own tests. Nothing caught an agent committing a
+  // credential, which is the other way a delivery can be worse than no delivery at all: a committed
+  // secret is a leaked secret, and removing it in the next commit does not un-leak it.
+  for (const change of input.changes) {
+    const head = change.headContent ?? '';
+    if (head.length === 0) continue;
+    const base = change.baseContent ?? '';
+    for (const pattern of DEFAULT_SECRET_PATTERNS) {
+      const match = pattern.exec(head);
+      if (match === null) continue;
+      // A secret already at the BASE is not this change's doing. Reporting it every round would
+      // bury the one that is — and the reviewer's subject is the change.
+      if (base.includes(match[0])) continue;
+      findings.push({
+        rule: 'secret/committed',
+        severity: 'block',
+        path: change.path,
+        line: lineOf(head, match.index),
+        detail: `a credential appears in this change (…${match[0].slice(-6)}): remove it AND ROTATE IT — a committed secret is leaked the moment it is pushed`,
+      });
+      break; // one finding per file is enough to stop the delivery
+    }
+    const suspicious = highEntropyRun(head);
+    if (suspicious !== null && !base.includes(suspicious.value)) {
+      findings.push({
+        rule: 'secret/suspected',
+        severity: 'human',
+        path: change.path,
+        line: suspicious.line,
+        detail: `a long high-entropy string (…${suspicious.value.slice(-6)}) looks like a credential; a person decides — if it is one, it must be rotated, not just removed`,
+      });
     }
   }
 

@@ -216,3 +216,56 @@ test('isTestPath: the plumbing and the rules agree on what a test file is', () =
   assert.equal(isTestPath('docs/testing.md'), false, 'a document about tests is not a test');
   assert.equal(isTestPath('src/testdata/input.json'), false);
 });
+
+// --- credentials in the change (ADR-019) -------------------------------------------
+
+// Assembled at runtime on purpose: a token-shaped literal in the tree is itself a
+// finding for vendor secret scanners, while the rules under test still see the same
+// string. Do not fold these back into one literal.
+const SECRET_TOKENS = {
+  glpat: 'glpat-' + 'AbCdEf0123456789xyzQ',
+  privateKey: '-----BEGIN ' + 'RSA PRIVATE KEY-----',
+  mixedEntropy: 'Zx8Qm2Lp7Rt4Vw9Yb3Nc6Kd1Hf5Jg0SaT',
+  hexSha: '4f2a1c9e77b04c8fa1d5e6b7c8d9e0f1a2b3c4d',
+};
+
+function changesFor(path: string, base: string | null, head: string | null) {
+  return { baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), changes: [{ path, status: base === null ? ('added' as const) : ('modified' as const), baseContent: base, headContent: head }] };
+}
+
+test('review rules: a committed credential BLOCKS, and says to rotate it', () => {
+  const findings = runReviewRules(changesFor('config.py', 'x = 1\n', `x = 1\n\ntoken = "${SECRET_TOKENS.glpat}"\n`));
+  const secret = findings.find((f) => f.rule === 'secret/committed');
+  assert.ok(secret !== undefined, `a token in the change must be found: ${JSON.stringify(findings)}`);
+  assert.equal(secret.severity, 'block');
+  assert.equal(secret.path, 'config.py');
+  assert.equal(secret.line, 3, 'the finding points at the line, so a person can act on it');
+  assert.match(secret.detail, /ROTATE/);
+  assert.ok(hasBlockingFinding(findings), 'it must gate the delivery, not just be reported');
+});
+
+test('review rules: a private key header blocks too', () => {
+  const findings = runReviewRules(changesFor('id_rsa', null, `${SECRET_TOKENS.privateKey}\nMIIEow...\n`));
+  assert.equal(findings.filter((f) => f.rule === 'secret/committed').length, 1);
+});
+
+test('review rules: a secret that was ALREADY at the base is not this change\'s doing', () => {
+  const body = `token = "${SECRET_TOKENS.glpat}"\n`;
+  const findings = runReviewRules(changesFor('config.py', body, `${body}x = 1\n`));
+  assert.equal(findings.filter((f) => f.rule === 'secret/committed').length, 0, 'reporting it every round would bury the one that is new');
+});
+
+test('review rules: a hex digest is NOT a secret (the false positive that matters)', () => {
+  const findings = runReviewRules(changesFor('lock.json', '{\n}\n', `{\n  "sha": "${SECRET_TOKENS.hexSha}"\n}\n`));
+  assert.equal(findings.filter((f) => f.rule.startsWith('secret/')).length, 0, `a lockfile hash must not trip the gate: ${JSON.stringify(findings)}`);
+});
+
+test('review rules: an unprovable high-entropy string goes to a HUMAN, never to a block', () => {
+  const findings = runReviewRules(changesFor('settings.py', null, `KEY = "${SECRET_TOKENS.mixedEntropy}"\n`));
+  const suspected = findings.find((f) => f.rule === 'secret/suspected');
+  assert.ok(suspected !== undefined, `a mixed-entropy run must be surfaced: ${JSON.stringify(findings)}`);
+  assert.equal(suspected.severity, 'human', 'a heuristic never blocks: a person decides');
+  assert.equal(suspected.line, 1);
+  assert.equal(hasBlockingFinding(findings), false);
+  assert.equal(hasHumanFinding(findings), true);
+});
