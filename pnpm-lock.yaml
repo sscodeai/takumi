@@ -47,6 +47,9 @@ importers:
       '@takumi/delivery-gitlab':
         specifier: workspace:*
         version: link:../../deliveries/gitlab
+      '@takumi/reviewer-semgrep':
+        specifier: workspace:*
+        version: link:../../reviewers/semgrep
       '@takumi/runtime-cli':
         specifier: workspace:*
         version: link:../../runtimes/cli
@@ -221,6 +224,19 @@ importers:
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  reviewers/semgrep:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.0.0

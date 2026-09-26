@@ -29,7 +29,8 @@
     "@takumi/runtime-fake": "workspace:*",
     "yaml": "^2.9.0",
     "@takumi/delivery-git": "workspace:*",
-    "@takumi/runtime-openhands": "workspace:*"
+    "@takumi/runtime-openhands": "workspace:*",
+    "@takumi/reviewer-semgrep": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

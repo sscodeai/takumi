@@ -30,6 +30,7 @@ import {
   writeMetricsFile,
   pruneTaskWorktrees,
   ProviderError,
+  REVIEWER_DETERMINISTIC_RULES,
   runPilotTick,
   type BoardWorkItem,
   type EventLog,
@@ -42,6 +43,7 @@ import {
   type DeliveryProvider,
   type WorktreeHandle,
 } from '@takumi/core';
+import { createSemgrepReviewer } from '@takumi/reviewer-semgrep';
 
 export interface PilotAgentConfig {
   /**
@@ -79,12 +81,67 @@ export interface PilotConfig {
   remote?: string;
   agent: PilotAgentConfig;
   policy: PilotPolicy;
+  /**
+   * Which reviewer judges a `rules` delivery (ADR-021). The DEFAULT is the built-in deterministic
+   * engine; `semgrep` adds the pinned sidecar, and its identity travels into the review evidence so
+   * a record names the judge that actually ran.
+   */
+  reviewer?: 'rules' | 'semgrep';
+  semgrep?: {
+    configPath: string;
+    expectedVersion?: string;
+    binary?: string;
+    composeDeterministic?: boolean;
+    severityMap?: Record<string, 'block' | 'human' | 'note'>;
+    maxFindings?: number;
+    timeoutSeconds?: number;
+  };
   /** Where the event trail is appended (JSON lines). Omit for stderr only. */
   eventsFile?: string;
   /** Counters: JSON here, and a Prometheus textfile next to it if asked. */
   metricsFile?: string;
   /** The Prometheus textfile (default: `<metricsFile>.prom`). */
   metricsTextfile?: string;
+}
+
+/**
+ * Which reviewer judges a `rules` delivery, and the identity the evidence must record (ADR-021).
+ *
+ * ONE place decides both, because the two must agree: the loop writes the identity into the review
+ * digest, and a digest that names a judge which did not run is evidence for something that never
+ * happened. `checks-only` and `label` supply no reviewer at all — a policy with no gate must not
+ * grow one silently.
+ */
+function reviewerFor(
+  pilot: PilotConfig,
+  git: GitRunner,
+): { review?: (ctx: ReviewContext) => Promise<ReviewOutcome>; reviewerId?: string } {
+  if (pilot.policy.reviewMode !== 'rules') return {};
+  if (pilot.reviewer === 'semgrep') {
+    const semgrep = pilot.semgrep;
+    if (semgrep === undefined) {
+      throw new ProviderError(
+        'precondition',
+        "`reviewer: semgrep` needs a `semgrep` section with at least a configPath: a gate that was asked for and not configured is a rubber stamp",
+      );
+    }
+    const reviewer = createSemgrepReviewer({
+      configPath: semgrep.configPath,
+      git,
+      ...(semgrep.expectedVersion === undefined ? {} : { expectedVersion: semgrep.expectedVersion }),
+      ...(semgrep.binary === undefined ? {} : { binary: semgrep.binary }),
+      ...(semgrep.composeDeterministic === undefined ? {} : { composeDeterministic: semgrep.composeDeterministic }),
+      ...(semgrep.severityMap === undefined ? {} : { severityMap: semgrep.severityMap }),
+      ...(semgrep.maxFindings === undefined ? {} : { maxFindings: semgrep.maxFindings }),
+      ...(semgrep.timeoutSeconds === undefined ? {} : { timeoutMs: semgrep.timeoutSeconds * 1000 }),
+      ...(pilot.policy.reviewRules === undefined ? {} : { rules: pilot.policy.reviewRules }),
+    });
+    return { review: reviewer.review, reviewerId: reviewer.id };
+  }
+  return {
+    review: createRuleReviewer({ git, rules: pilot.policy.reviewRules }),
+    reviewerId: REVIEWER_DETERMINISTIC_RULES,
+  };
 }
 
 export interface RunOnceDeps {
@@ -95,6 +152,8 @@ export interface RunOnceDeps {
   runAgent?: AgentRunner;
   /** Injected for tests: overrides the reviewer the policy would build. */
   review?: (ctx: ReviewContext) => Promise<ReviewOutcome>;
+  /** Injected for tests: overrides the identity recorded for an injected reviewer. */
+  reviewerId?: string;
   /** Injected for tests: the git the reviewer reads with. */
   git?: GitRunner;
   /** Injected for tests. */
@@ -199,10 +258,14 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     },
     // `reviewMode: rules` without a reviewer would be a policy that promises a gate and
     // delivers a rubber stamp, so the two are wired together here — and an injected
-    // reviewer (tests) still wins.
-    ...(deps.review ?? (deps.pilot.policy.reviewMode === 'rules'
-      ? { review: createRuleReviewer({ git: deps.git ?? createGitRunner(), rules: deps.pilot.policy.reviewRules }) }
-      : {})),
+    // reviewer (tests) still wins, with an injectable identity so a test can assert that the
+    // evidence names what ran.
+    ...(deps.review === undefined
+      ? reviewerFor(deps.pilot, deps.git ?? createGitRunner())
+      : {
+          review: deps.review,
+          ...(deps.reviewerId === undefined ? {} : { reviewerId: deps.reviewerId }),
+        }),
     policy: deps.pilot.policy,
     slotDir: deps.pilot.slotDir,
   });
