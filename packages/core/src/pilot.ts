@@ -394,6 +394,11 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
       plan: {
         worktree: worktree.path,
         branch: worktree.branch,
+      // The review policy travels WITH the plan (ADR-018): the loop binds its review evidence to
+      // it, so a policy edited after a review makes that evidence stale by construction.
+      reviewMode: policy.reviewMode,
+      ...(policy.approvalLabel === undefined ? {} : { approvalLabel: policy.approvalLabel }),
+      ...(policy.reviewRules === undefined ? {} : { reviewRules: policy.reviewRules }),
         baseBranch: deps.baseBranch,
         ...(deps.remote === undefined ? {} : { remote: deps.remote }),
         itemId: item.id,

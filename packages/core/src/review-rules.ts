@@ -53,6 +53,13 @@ export interface ReviewInput {
  */
 export type ReviewSeverity = 'block' | 'human' | 'note';
 
+/**
+ * Identity of the built-in rule set (ADR-018). A review digest binds to THIS string, and a test
+ * asserts the engine's actual rule ids match the documented set — so adding a rule without bumping
+ * the identity fails the build instead of silently changing what a past approval meant.
+ */
+export const REVIEW_RULESET_ID = 'rules@1';
+
 export interface ReviewFinding {
   /** Stable rule id, so a board comment and a test can name the same thing. */
   rule: string;

@@ -40,6 +40,32 @@ export interface BoardStateRecord {
    * simply cannot be resumed (never guessed).
    */
   branch?: string;
+  /**
+   * The inputs the clean review on record actually covered (ADR-018). Absent means "unknown
+   * provenance": a delivery that exists but cannot show what was reviewed may NOT merge.
+   */
+  reviewed?: {
+    digest: string;
+    head: string;
+    base: string;
+    policy: string;
+    ruleset: string;
+    reviewer: string;
+    /** ISO-8601, for humans reading the board. Not part of the digest. */
+    at: string;
+  };
+  /**
+   * A human's approval, bound to the digest it approved. `by` is null when the board gave no
+   * identity: a label says somebody approved, not who — and an unknown actor is not written as a
+   * known one.
+   */
+  approval?: {
+    by: string | null;
+    at: string;
+    digest: string;
+    ref: string;
+    note?: string;
+  };
   reviewRound: number;
   updatedAt: string;
   note?: string;
@@ -129,6 +155,11 @@ export function validateBoardStateRecord(value: Record<string, unknown>): BoardS
   if (typeof value['deliveryRef'] === 'string') record.deliveryRef = value['deliveryRef'];
   if (typeof value['branch'] === 'string') record.branch = value['branch'];
   if (typeof value['note'] === 'string') record.note = value['note'];
+  // A `reviewed` block that cannot be read is NOT "no review on record" — it is a record we cannot
+  // trust, and the difference decides whether a delivery may merge. So it throws, like any other
+  // present-but-corrupt block, instead of being quietly dropped.
+  if (value['reviewed'] !== undefined) record.reviewed = parseReviewed(value['reviewed']);
+  if (value['approval'] !== undefined) record.approval = parseApproval(value['approval']);
   return record;
 }
 
@@ -138,6 +169,49 @@ export function validateBoardStateRecord(value: Record<string, unknown>): BoardS
  * `BoardCapabilities.trustedAuthorFilter`): this function cannot tell who wrote
  * what, it only parses.
  */
+/**
+ * A `reviewed` block, or a `BoardStateRecordError`: a block we cannot read is not the same as no
+ * block, and the difference decides whether a delivery may merge.
+ */
+function parseReviewed(value: unknown): NonNullable<BoardStateRecord['reviewed']> {
+  const block = asRecord(value, 'reviewed');
+  const digest = block['digest'];
+  const head = block['head'];
+  if (typeof digest !== 'string' || typeof head !== 'string') {
+    throw new BoardStateRecordError('the reviewed block is missing its digest or head');
+  }
+  return {
+    digest,
+    head,
+    base: typeof block['base'] === 'string' ? block['base'] : '',
+    policy: typeof block['policy'] === 'string' ? block['policy'] : '',
+    ruleset: typeof block['ruleset'] === 'string' ? block['ruleset'] : '',
+    reviewer: typeof block['reviewer'] === 'string' ? block['reviewer'] : '',
+    at: typeof block['at'] === 'string' ? block['at'] : '',
+  };
+}
+
+function parseApproval(value: unknown): NonNullable<BoardStateRecord['approval']> {
+  const block = asRecord(value, 'approval');
+  const digest = block['digest'];
+  if (typeof digest !== 'string') throw new BoardStateRecordError('the approval block is missing its digest');
+  return {
+    // null is a real value here: the label said somebody approved, not who.
+    by: typeof block['by'] === 'string' ? block['by'] : null,
+    at: typeof block['at'] === 'string' ? block['at'] : '',
+    digest,
+    ref: typeof block['ref'] === 'string' ? block['ref'] : '',
+    ...(typeof block['note'] === 'string' ? { note: block['note'] } : {}),
+  };
+}
+
+function asRecord(value: unknown, what: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new BoardStateRecordError(`the ${what} block is not an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
 export function newestBoardStateRecord(texts: readonly string[]): BoardStateRecord | null {
   let newest: BoardStateRecord | null = null;
   for (const text of texts) {

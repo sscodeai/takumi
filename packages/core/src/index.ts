@@ -40,6 +40,14 @@ export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
 export {
+  REVIEWER_DETERMINISTIC_RULES,
+  policyHash,
+  reviewDigest,
+  rulesetHash,
+  shortDigest,
+  type ReviewInputs,
+} from './review-digest.js';
+export {
   MirroringBoard,
   mirrorMarker,
   readMirrorIdMap,

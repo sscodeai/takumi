@@ -771,7 +771,7 @@ test('runPilotTick: the same item merges when the tests are kept honest', async 
   }
 });
 
-test('runPilotTick: with nothing ready, a tick finishes a delivery an earlier run left open', async () => {
+test('runPilotTick: with nothing ready, a tick resumes an earlier delivery — and refuses to merge it without a digest', async () => {
   // The board holds one item, and it is NOT ready: its delivery reached pr_open and the run that
   // did that is gone. Selecting only `ready` work is how such an item stayed unfinished forever —
   // the sweep reported it and only a human could act, and a human resetting it re-ran the agent
@@ -795,10 +795,15 @@ test('runPilotTick: with nothing ready, a tick finishes a delivery an earlier ru
     },
   });
 
-  assert.equal(result.outcome, 'delivered', 'the resumed delivery must run to its end');
+  // The resume MECHANISM runs — same branch, same pull request, no second one — and then the merge
+  // is refused, because this record was written before review digests existed and therefore says
+  // nothing about what was reviewed (ADR-018: unknown provenance is not "probably fine").
   assert.equal(result.itemId, 'ITEM-9');
   assert.deepEqual(hints, [{ branch: 'takumi/9-a1b2c3' }], 'the tick must ask for the branch the record names');
   assert.equal(h.delivery.prCount, 1, 'the delivery step still runs (it reuses the open pull request)');
+  assert.equal(result.outcome, 'blocked', 'an unknown review digest must not merge');
+  assert.match(result.detail, /carries no review digest/);
+  assert.equal(h.delivery.merged, false);
 });
 
 test('runPilotTick: an in-flight item whose record names no branch is left alone, not guessed at', async () => {

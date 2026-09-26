@@ -514,9 +514,14 @@ test('runOnce: an unfinished delivery is RESUMED, not redone (same branch, no ag
 
     const lines: string[] = [];
     const { tick } = await runOnce({ board, delivery, pilot, out: (line) => lines.push(line) });
-    assert.equal(tick.outcome, 'delivered', lines.join('\n'));
-    assert.equal(delivery.merged, true, 'a resumed delivery must finish: its work was already reviewed');
-    assert.equal((await board.getWork('ITEM-1')).state, 'merged');
+    // The resume MECHANISM is what this test proves, and it still holds. The MERGE is now refused:
+    // the record was seeded without a review digest, and unknown provenance is not evidence
+    // (ADR-018). Both facts are asserted — resuming works, and it does not merge what it cannot
+    // show was reviewed.
+    assert.equal(tick.outcome, 'blocked', lines.join('\n'));
+    assert.match(tick.detail, /carries no review digest/);
+    assert.equal(delivery.merged, false);
+    assert.equal((await board.getWork('ITEM-1')).state, 'blocked');
     // The decisive assertion: NO second branch was pushed for work that was already done.
     const heads = git(['ls-remote', '--heads', 'origin'], repo.work);
     assert.match(heads, /refs\/heads\/takumi\/ITEM-1-deadrun/);

@@ -125,6 +125,11 @@ class LoopBoard implements TaskBoardProvider {
   async readState(id: string): Promise<BoardStateRecord | null> {
     return this.records.get(id) ?? null;
   }
+  /** Seed what the board already had before the run: a resumed delivery, with its digest. */
+  seedRecord(id: string, record: BoardStateRecord): void {
+    this.records.set(id, record);
+  }
+
   async writeState(id: string, record: BoardStateRecord): Promise<void> {
     this.records.set(id, record);
     this.seen.push(`record:round${record.reviewRound}`);
@@ -687,13 +692,13 @@ test('runDeliveryLoop: a retriable failure after the claim blocks the item (it w
 
 test('runDeliveryLoop: a transport failure BEFORE the claim leaves the item untouched', async () => {
   const h = harness();
+  // Patch the INSTANCE, never spread it: a spread class has no prototype methods, and the loop
+  // legitimately calls several of them (`readState` reads the prior record before claiming).
+  h.board.claim = async () => {
+    throw new ProviderError('transport', 'the board is unreachable');
+  };
   const result = await runDeliveryLoop({
-    board: {
-      ...h.board,
-      claim: async () => {
-        throw new ProviderError('transport', 'the board is unreachable');
-      },
-    } as unknown as TaskBoardProvider,
+    board: h.board,
     delivery: h.delivery,
     plan,
     hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
@@ -722,9 +727,12 @@ test('runDeliveryLoop: the progress record is throttled while the loop waits', a
   assert.equal(result.outcome, 'merged');
   const writes = h.board.seen.filter((s) => s.startsWith('record:'));
   assert.equal(polls, 5, 'one read that found pending, then four polls until it settled');
+  // Two progress writes — the throttle holds for PROGRESS — plus ONE forced write, the review
+  // digest: progress may be coalesced, the evidence a merge is allowed to trust may not be
+  // (ADR-018). If this count grows again, the question to ask is which of the two is lying.
   assert.equal(
     writes.length,
-    2,
+    3,
     `six checks() calls must not mean six board writes (saw ${writes.length}: ${writes.join(', ')})`,
   );
   assert.match(result.steps.map((s) => s.detail).join('\n'), /throttled \(unchanged/);
@@ -885,4 +893,74 @@ test('runDeliveryLoop: mergeability that stays unknown blocks the item, visibly'
     /move the item back to `ready`/,
     'the blocked item must carry the way back in the trail, not just a refusal',
   );
+});
+
+// --- ADR-018: a review is evidence about ONE set of inputs --------------------------
+
+test('runDeliveryLoop: a delivery whose recorded review no longer matches is REFUSED, by name', async () => {
+  const h = harness();
+  // What a previous tick left on the board: a delivery, and a review digest computed under a
+  // DIFFERENT policy — the case being an operator who edited `reviewMode` between the ticks.
+  h.board.seedRecord(plan.itemId, {
+    schema: 1,
+    runId: 'previous-run',
+    item: plan.itemId,
+    reviewRound: 0,
+    updatedAt: '2026-09-15T00:00:00.000Z',
+    deliveryRef: '#7',
+    branch: plan.branch,
+    reviewed: {
+      digest: 'f'.repeat(64),
+      head: 'a'.repeat(40),
+      base: plan.baseSha,
+      policy: '0'.repeat(64),
+      ruleset: '0'.repeat(64),
+      reviewer: 'reviewer:rules@1',
+      at: '2026-09-15T00:00:00.000Z',
+    },
+  });
+
+  const seen: string[] = [];
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan,
+    now: () => Date.parse('2026-09-15T02:00:00.000Z'),
+    sleep: async () => {},
+    events: createEventLog({ sink: { write: (e) => seen.push(e.kind) }, retain: false }),
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'blocked', 'a review that does not describe this run may not merge');
+  assert.match(String(result.error), /different inputs/);
+  assert.ok(seen.includes('review.stale'), `the refusal must be a named fact: ${seen.join(',')}`);
+  assert.equal(h.delivery.merged, false, 'nothing may be merged on a stale review');
+  assert.equal(h.board.items.get(plan.itemId)?.state, 'blocked', 'and the item says so');
+});
+
+test('runDeliveryLoop: a delivery with NO review digest on record is unknown provenance, and refused', async () => {
+  const h = harness();
+  // Written before digests existed, or by another tool: "unknown" is not "probably fine".
+  h.board.seedRecord(plan.itemId, {
+    schema: 1,
+    runId: 'ancient-run',
+    item: plan.itemId,
+    reviewRound: 0,
+    updatedAt: '2026-09-15T00:00:00.000Z',
+    deliveryRef: '#3',
+    branch: plan.branch,
+  });
+
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan,
+    now: () => Date.parse('2026-09-15T02:00:00.000Z'),
+    sleep: async () => {},
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'blocked');
+  assert.match(String(result.error), /carries no review digest/);
+  assert.equal(h.delivery.merged, false);
 });
