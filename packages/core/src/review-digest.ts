@@ -19,7 +19,16 @@ import { createHash } from 'node:crypto';
 import { REVIEW_RULESET_ID } from './review-rules.js';
 
 /** The reviewer that produced a verdict: a deterministic engine, so its identity is a version. */
-export const REVIEWER_DETERMINISTIC_RULES = 'reviewer:rules@1';
+/**
+ * The deterministic reviewer's identity, DERIVED from the rule set it runs.
+ *
+ * This was a second hand-maintained constant (`'reviewer:rules@1'`), and the `rules@2` bump left it
+ * claiming a version the reviewer no longer was: a live state record read
+ * `reviewer: "reviewer:rules@1"` right beside `ruleset: "<hash of rules@2>"`. The digest's job is to
+ * bind an approval to what did the reviewing, so the reviewer's name has to come from the thing that
+ * defines it — two labels for one fact drift, and the drift is invisible until a human compares them.
+ */
+export const REVIEWER_DETERMINISTIC_RULES = `reviewer:${REVIEW_RULESET_ID}`;
 
 /** The inputs a review covers. Everything here is a fact about the run, never a timestamp. */
 export interface ReviewInputs {

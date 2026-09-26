@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   REVIEWER_DETERMINISTIC_RULES,
+  REVIEW_RULESET_ID,
   policyHash,
   reviewDigest,
   rulesetHash,
@@ -36,6 +37,13 @@ test('review digest: the same inputs give the same digest, and every input chang
     assert.notEqual(reviewDigest({ ...inputs, [key]: value }), digest, `${key} must be part of the digest`);
   }
   assert.equal(shortDigest(digest), digest.slice(0, 12));
+});
+
+test('the deterministic reviewer is NAMED after the rule set it runs, not maintained beside it', () => {
+  // The live e2e record after the rules@2 bump: `reviewer: "reviewer:rules@1"` beside
+  // `ruleset: "<hash of rules@2>"`. The digest binds an approval to what reviewed it, so the name
+  // has to be derived — equality here is the guard against a future hand-edit.
+  assert.equal(REVIEWER_DETERMINISTIC_RULES, `reviewer:${REVIEW_RULESET_ID}`);
 });
 
 test('review digest: the policy hash covers the merge-deciding knobs and nothing else', () => {
