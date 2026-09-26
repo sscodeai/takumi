@@ -41,6 +41,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 
 | 17 | A RESUMED tick's event trail announced `agent.started` / `agent.finished` for an agent that never ran: the branch history held no commit that tick could have made, so the log — the artefact whose purpose is to be the record — described a run that did not exist | The loop emitted those two events unconditionally around the agent hook, and the CLI's hook returns immediately when the run is finishing an existing delivery (ADR-014). The hook knew; the loop did not; so the narration described a STEP instead of a FACT | The plan carries `resumed`; a resumed round 0 runs no agent and reports `agent.skipped`, naming where the work already is. A LATER round of the same run still runs the agent — the fix round after findings is work that does not exist yet | `1ba710b` (`fix(core): a resumed run must not report an agent it did not run`) | `packages/core/src/test/delivery-loop.test.ts` — "a resumed round 0 runs NO agent, and the trail says so instead of claiming one"; "a FIX round inside a resumed run DOES run the agent" |
 
+| 18 | A live state record read `"ruleset": "<hash of rules@2>"` beside `"reviewer": "reviewer:rules@1"` — the digest's own fields disagreeing about which reviewer produced the review, in the one field a person reads to answer "who saw this?" | `REVIEWER_DETERMINISTIC_RULES` was a second hand-maintained constant, and the `rules@2` bump (which added the committed-credential rule) only touched `REVIEW_RULESET_ID`; two labels for one fact drift, and nothing compares them | The reviewer's name is DERIVED (`reviewer:${REVIEW_RULESET_ID}`), the test asserts the derivation rather than the string, and the two fixtures that carried a copy of the old literal now say `reviewer:fixture` so a future bump cannot leave a stale copy inside the contract suite | `5407f05` (`fix(core): the deterministic reviewer is named after the rule set it runs`) | `packages/core/src/test/review-digest.test.ts` — "the deterministic reviewer is NAMED after the rule set it runs, not maintained beside it" |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -100,3 +102,7 @@ note, and to whoever wonders later whether this class of bug was ever hit.
   shape of the code rather than the shape of the run — and it was found by reading the branch history
   against the log, not by any test. Anything that narrates a stage needs the stage's own condition
   passed to it, or a design in which skipping is impossible.
+- **A version label maintained beside the thing it labels** (#18): a hand-written `@1` next to a
+  generated hash of `@2` is not a small inconsistency — it is the record lying to the one reader who
+  has no way to check. When a field names a version of something, derive it from that something, or
+  the next change to the thing will not reach the name.
