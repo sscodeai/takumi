@@ -39,6 +39,14 @@ export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
+export {
+  MirroringBoard,
+  mirrorMarker,
+  readMirrorIdMap,
+  writeMirrorIdMap,
+  type BoardMirror,
+  type MirrorIdMap,
+} from './board-mirror.js';
 
 // The deterministic reviewer (ADR-013): rules over the real change set, pure and testable.
 export type {
