@@ -232,6 +232,19 @@ importers:
         specifier: ^5.6.0
         version: 5.9.3
 
+  reporters/reviewdog:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
   reviewers/semgrep:
     dependencies:
       '@takumi/core':
