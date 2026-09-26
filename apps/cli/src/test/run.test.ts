@@ -520,14 +520,12 @@ test('runOnce: an unfinished delivery is RESUMED, not redone (same branch, no ag
 
     const lines: string[] = [];
     const { tick } = await runOnce({ board, delivery, pilot, out: (line) => lines.push(line) });
-    // The resume MECHANISM is what this test proves, and it still holds. The MERGE is now refused:
-    // the record was seeded without a review digest, and unknown provenance is not evidence
-    // (ADR-018). Both facts are asserted — resuming works, and it does not merge what it cannot
-    // show was reviewed.
-    assert.equal(tick.outcome, 'blocked', lines.join('\n'));
-    assert.match(tick.detail, /carries no review digest/);
-    assert.equal(delivery.merged, false);
-    assert.equal((await board.getWork('ITEM-1')).state, 'blocked');
+    // The resume finishes the delivery: the review THIS tick performs under the policy in force is
+    // the evidence the merge leans on (ADR-018 binds a digest to the HUMAN gate, not to the machine
+    // review), and the run reuses the branch and the pull request instead of redoing the work.
+    assert.equal(tick.outcome, 'delivered', lines.join('\n'));
+    assert.equal(delivery.merged, true, 'a resumed delivery is finished, not stranded');
+    assert.equal((await board.getWork('ITEM-1')).state, 'merged');
     // The resume REUSED that worktree instead of trying to check the branch out twice.
     assert.match(git(['worktree', 'list', '--porcelain'], repo.work), /leftover-worktree/);
     assert.doesNotMatch(lines.join('\n'), /refusing to fetch into branch/);

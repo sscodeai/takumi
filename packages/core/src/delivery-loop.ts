@@ -216,14 +216,21 @@ function rulesetOptions(reviewRules: unknown): { protectedPaths?: readonly strin
 export function staleReviewReason(
   onRecord: BoardStateRecord | null,
   current: BoardStateRecord['reviewed'],
+  opts: { requiresApproval: boolean },
 ): string | null {
   if (current === undefined) {
     return 'this run has no review digest, which means the merge was reached without a clean review';
   }
   // Nothing was delivered before this run: there is no prior evidence to distrust.
   if (onRecord === null || onRecord.deliveryRef === undefined) return null;
+  // Every merge is justified by the review THIS run performed, under the policy in force now — the
+  // loop always reviews before it merges. So a digest on record is not grounds for refusal by
+  // itself: an earlier tick may simply have ended in `fix_needed`, which writes no digest, and
+  // refusing it would break the ordinary fix round. What the digest binds is the HUMAN's approval,
+  // which is given in an earlier run and can name a head or a policy that no longer exists.
+  if (!opts.requiresApproval) return null;
   if (onRecord.reviewed === undefined) {
-    return 'the delivery on record carries no review digest, so what was reviewed is unknown (it predates digests, or was written elsewhere)';
+    return 'this delivery needs a human approval, and there is no record of what was presented for it (the record predates digests, or was written elsewhere): re-review, then approve that version';
   }
   if (onRecord.reviewed.digest === current.digest) return null;
   const what: string[] = [];
@@ -330,6 +337,36 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
 
   let lastProgressAt = 0;
   let lastProgressSignature = '';
+  /**
+   * The inputs a review covers. Computed in ONE place so that the version a human is asked to
+   * approve and the version a later tick merges are compared with the same arithmetic — two
+   * computations of "what was reviewed" is how a check passes while being wrong.
+   */
+  const reviewInputsFor = (head: string): NonNullable<BoardStateRecord['reviewed']> => {
+    const policyDigest = policyHash({
+      reviewMode: plan.reviewMode,
+      approvalLabel: plan.approvalLabel,
+      maxReviewRounds: plan.maxReviewRounds,
+      reviewRules: plan.reviewRules,
+    });
+    const ruleDigest = rulesetHash(rulesetOptions(plan.reviewRules));
+    return {
+      digest: reviewDigest({
+        head,
+        base: plan.baseSha,
+        policy: policyDigest,
+        ruleset: ruleDigest,
+        reviewer: REVIEWER_DETERMINISTIC_RULES,
+      }),
+      head,
+      base: plan.baseSha,
+      policy: policyDigest,
+      ruleset: ruleDigest,
+      reviewer: REVIEWER_DETERMINISTIC_RULES,
+      at: new Date(clock()).toISOString(),
+    };
+  };
+
   const writeRecord = async (reviewRound: number, opts: { force?: boolean } = {}): Promise<void> => {
     const signature = `${plan.runId}|${reviewRound}|${pr === undefined ? '-' : pr.number}`;
     const nowMs = clock();
@@ -663,6 +700,13 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
           message: `round ${round + 1}: waiting for a human${review.note === undefined ? '' : ` — ${review.note}`}`,
           fields: { round, head: thisRef.headSha },
         });
+        // The version being PRESENTED for approval is recorded now. The approval a human gives
+        // names this version, and a later tick compares its own digest against it — so an approval
+        // can never be carried onto a head or a policy the human never saw, which is the only
+        // thing a review digest is really protecting (every merge is backed by a review this run
+        // just performed; a human's judgement is not).
+        reviewedBlock = reviewInputsFor(thisRef.headSha);
+        await writeRecord(round, { force: true });
         record('review', `round ${round + 1}: awaiting a human${review.note === undefined ? '' : ` — ${review.note}`}`);
         return {
           outcome: 'awaiting_review',
@@ -705,28 +749,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       // exactly this point with `reviewMode` edited before the next one. Without the digest, the
       // next tick (resuming, which is what resuming is for) would merge the OLD review under the
       // NEW policy, and nothing anywhere would say so.
-      const policyDigest = policyHash({
-        reviewMode: plan.reviewMode,
-        approvalLabel: plan.approvalLabel,
-        maxReviewRounds: plan.maxReviewRounds,
-        reviewRules: plan.reviewRules,
-      });
-      const ruleDigest = rulesetHash(rulesetOptions(plan.reviewRules));
-      reviewedBlock = {
-        digest: reviewDigest({
-          head: thisRef.headSha,
-          base: plan.baseSha,
-          policy: policyDigest,
-          ruleset: ruleDigest,
-          reviewer: REVIEWER_DETERMINISTIC_RULES,
-        }),
-        head: thisRef.headSha,
-        base: plan.baseSha,
-        policy: policyDigest,
-        ruleset: ruleDigest,
-        reviewer: REVIEWER_DETERMINISTIC_RULES,
-        at: new Date(clock()).toISOString(),
-      };
+      reviewedBlock = reviewInputsFor(thisRef.headSha);
       if (plan.reviewMode === 'label') {
         // A label says somebody approved; on most boards it does not say WHO. The identity is
         // recorded as null rather than invented, and the label is kept as the reference.
@@ -743,7 +766,9 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       // write and refuse a merge that is actually fine.
       await writeRecord(round, { force: true });
 
-      const stale = staleReviewReason(priorRecord, reviewedBlock);
+      const stale = staleReviewReason(priorRecord, reviewedBlock, {
+        requiresApproval: plan.reviewMode === 'label',
+      });
       if (stale !== null) {
         events.emit({
           kind: 'review.stale',

@@ -897,7 +897,7 @@ test('runDeliveryLoop: mergeability that stays unknown blocks the item, visibly'
 
 // --- ADR-018: a review is evidence about ONE set of inputs --------------------------
 
-test('runDeliveryLoop: a delivery whose recorded review no longer matches is REFUSED, by name', async () => {
+test('runDeliveryLoop: an approval that no longer matches the run is REFUSED, by name', async () => {
   const h = harness();
   // What a previous tick left on the board: a delivery, and a review digest computed under a
   // DIFFERENT policy — the case being an operator who edited `reviewMode` between the ticks.
@@ -924,7 +924,8 @@ test('runDeliveryLoop: a delivery whose recorded review no longer matches is REF
   const result = await runDeliveryLoop({
     board: h.board,
     delivery: h.delivery,
-    plan,
+    // The human gate is what a digest protects: without it, this run's own review is the evidence.
+    plan: { ...plan, reviewMode: 'label', approvalLabel: 'approved' },
     now: () => Date.parse('2026-09-15T02:00:00.000Z'),
     sleep: async () => {},
     events: createEventLog({ sink: { write: (e) => seen.push(e.kind) }, retain: false }),
@@ -938,7 +939,7 @@ test('runDeliveryLoop: a delivery whose recorded review no longer matches is REF
   assert.equal(h.board.items.get(plan.itemId)?.state, 'blocked', 'and the item says so');
 });
 
-test('runDeliveryLoop: a delivery with NO review digest on record is unknown provenance, and refused', async () => {
+test('runDeliveryLoop: a human gate with no record of what was presented is refused', async () => {
   const h = harness();
   // Written before digests existed, or by another tool: "unknown" is not "probably fine".
   h.board.seedRecord(plan.itemId, {
@@ -954,13 +955,13 @@ test('runDeliveryLoop: a delivery with NO review digest on record is unknown pro
   const result = await runDeliveryLoop({
     board: h.board,
     delivery: h.delivery,
-    plan,
+    plan: { ...plan, reviewMode: 'label', approvalLabel: 'approved' },
     now: () => Date.parse('2026-09-15T02:00:00.000Z'),
     sleep: async () => {},
     hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
   });
 
   assert.equal(result.outcome, 'blocked');
-  assert.match(String(result.error), /carries no review digest/);
+  assert.match(String(result.error), /no record of what was presented/);
   assert.equal(h.delivery.merged, false);
 });

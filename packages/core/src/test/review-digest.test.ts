@@ -10,6 +10,10 @@ import {
 import { staleReviewReason } from '../delivery-loop.js';
 import type { BoardStateRecord } from '../board-state-record.js';
 
+function otherDigest(base: NonNullable<BoardStateRecord['reviewed']>): NonNullable<BoardStateRecord['reviewed']> {
+  return { ...base, digest: 'f'.repeat(64) };
+}
+
 const inputs = {
   head: 'a'.repeat(40),
   base: 'b'.repeat(40),
@@ -70,16 +74,23 @@ test('staleReviewReason: the three answers, and no fourth', () => {
     ...(reviewed === undefined ? {} : { reviewed }),
   });
 
+  const approve = { requiresApproval: true };
+  const machine = { requiresApproval: false };
   // 1. matching: nothing to say
-  assert.equal(staleReviewReason(withDelivery(current), current), null);
+  assert.equal(staleReviewReason(withDelivery(current), current, approve), null);
   // 2. nothing delivered before: nothing to distrust
-  assert.equal(staleReviewReason({ ...withDelivery(current), deliveryRef: undefined }, current), null);
-  assert.equal(staleReviewReason(null, current), null);
-  // 3. a delivery with no digest: unknown provenance, refused
-  assert.match(String(staleReviewReason(withDelivery(), current)), /carries no review digest/);
+  assert.equal(staleReviewReason({ ...withDelivery(current), deliveryRef: undefined }, current, approve), null);
+  assert.equal(staleReviewReason(null, current, approve), null);
+  // 3. THE FIX ROUND: without a human gate, a digest on record cannot justify a refusal. An earlier
+  //    tick may have ended in `fix_needed` (which writes no digest), and this run's review — just
+  //    performed, under the policy in force — is what the merge leans on.
+  assert.equal(staleReviewReason(withDelivery(), current, machine), null, 'a fix round must not be refused');
+  assert.equal(staleReviewReason(withDelivery(otherDigest(current)), current, machine), null, 'nor must an older digest');
+  // 4. WITH a human gate, the approval must name the version being merged
+  assert.match(String(staleReviewReason(withDelivery(), current, approve)), /no record of what was presented/);
   // 4. a digest that does not match: refused, and the reason names what moved
   const other = { ...current, digest: 'f'.repeat(64), policy: policyHash({ reviewMode: 'checks-only' }) };
-  const why = staleReviewReason(withDelivery(other), current);
+  const why = staleReviewReason(withDelivery(other), current, approve);
   assert.match(String(why), /different inputs/);
   assert.match(String(why), /policy changed/);
 });
