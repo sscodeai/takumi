@@ -53,6 +53,15 @@ export interface DeliveryLoopPlan {
   /** The frozen base sha the worktree was created from. */
   baseSha: string;
   /**
+   * WHO is judging this run, recorded in the review evidence and bound into the digest.
+   *
+   * The loop named `REVIEWER_DETERMINISTIC_RULES` unconditionally, so a record could claim the
+   * deterministic rules reviewer had judged a change that an injected or sidecar reviewer judged
+   * instead — the record naming something that did not happen, the same class as a stale version
+   * label. The caller supplies the identity, and an approval then binds to the reviewer that ran.
+   */
+  reviewer?: string;
+  /**
    * This run is FINISHING a delivery an earlier run left open (ADR-014), so round 0's work is
    * already committed on the branch.
    *
@@ -352,6 +361,8 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
    * approve and the version a later tick merges are compared with the same arithmetic — two
    * computations of "what was reviewed" is how a check passes while being wrong.
    */
+  const reviewerId = plan.reviewer ?? REVIEWER_DETERMINISTIC_RULES;
+
   const reviewInputsFor = (head: string): NonNullable<BoardStateRecord['reviewed']> => {
     const policyDigest = policyHash({
       reviewMode: plan.reviewMode,
@@ -366,13 +377,13 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         base: plan.baseSha,
         policy: policyDigest,
         ruleset: ruleDigest,
-        reviewer: REVIEWER_DETERMINISTIC_RULES,
+        reviewer: reviewerId,
       }),
       head,
       base: plan.baseSha,
       policy: policyDigest,
       ruleset: ruleDigest,
-      reviewer: REVIEWER_DETERMINISTIC_RULES,
+      reviewer: reviewerId,
       at: new Date(clock()).toISOString(),
     };
   };

@@ -124,6 +124,12 @@ export interface PilotTickDeps {
   agent: (ctx: { item: BoardWorkItem; worktree: string; branch: string; round: number; runId: string }) => Promise<void>;
   /** Optional extra review signal (a second reader, a lint pass). */
   review?: (ctx: ReviewContext & { item: BoardWorkItem }) => Promise<ReviewOutcome>;
+  /**
+   * The identity of the reviewer behind `review`, recorded in the review evidence and bound into
+   * the digest. Supply it whenever the judge is not the built-in deterministic rules engine: a
+   * record that names the wrong reviewer is evidence for something that did not happen.
+   */
+  reviewerId?: string;
   changedFiles?: (ctx: { worktree: string; baseSha: string }) => Promise<string[]>;
   policy: PilotPolicy;
   /** Where the tick's events go. */
@@ -397,6 +403,7 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
       // Round 0 of a resumed run has no agent work to do; the loop needs to know that, or its
       // event trail reports an agent run that never happened.
       ...(resumeBranch === undefined ? {} : { resumed: true }),
+      ...(deps.reviewerId === undefined ? {} : { reviewer: deps.reviewerId }),
       // The review policy travels WITH the plan (ADR-018): the loop binds its review evidence to
       // it, so a policy edited after a review makes that evidence stale by construction.
       reviewMode: policy.reviewMode,

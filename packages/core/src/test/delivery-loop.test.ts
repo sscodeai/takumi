@@ -11,6 +11,7 @@ import {
   DeliveryError,
   formatEventLine,
   ProviderError,
+  REVIEWER_DETERMINISTIC_RULES,
   assertTransition,
   runDeliveryLoop,
   runReviewRules,
@@ -1089,6 +1090,43 @@ test('gate fire: the reviewer cannot run -> not merged, retried instead', async 
   assert.equal(result.outcome, 'retriable', 'an unavailable reviewer must never read as clean');
   assert.equal(h.delivery.merged, false);
   GATE_ROWS.push({ fixture: 'reviewer-unavailable', guard: 'fail-closed: no review, no merge', outcome: 'Block', note: 'retriable, nothing merged' });
+});
+
+test('runDeliveryLoop: the evidence names the reviewer that actually judged', async () => {
+  const mine = harness();
+  const custom = await runDeliveryLoop({
+    board: mine.board,
+    delivery: mine.delivery,
+    plan: { ...plan, reviewer: 'semgrep:deadbeefcafe' },
+    hooks: {
+      agent: async () => {
+        mine.delivery.headSha = COMMIT_1;
+      },
+      review: async () => ({ verdict: 'clean' }),
+    },
+  });
+  assert.equal(custom.outcome, 'merged');
+  const customRecord = await mine.board.readState('ITEM-7');
+
+  const theirs = harness();
+  await runDeliveryLoop({
+    board: theirs.board,
+    delivery: theirs.delivery,
+    plan,
+    hooks: {
+      agent: async () => {
+        theirs.delivery.headSha = COMMIT_1;
+      },
+      review: async () => ({ verdict: 'clean' }),
+    },
+  });
+  const defaultRecord = await theirs.board.readState('ITEM-7');
+
+  assert.equal(customRecord?.reviewed?.reviewer, 'semgrep:deadbeefcafe');
+  assert.equal(defaultRecord?.reviewed?.reviewer, REVIEWER_DETERMINISTIC_RULES);
+  // The reviewer is part of WHAT the evidence is about, so it moves the digest: an approval given
+  // under one reviewer does not silently transfer to another.
+  assert.notEqual(customRecord?.reviewed?.digest, defaultRecord?.reviewed?.digest);
 });
 
 test('runDeliveryLoop: a resumed round 0 runs NO agent, and the trail says so instead of claiming one', async () => {
