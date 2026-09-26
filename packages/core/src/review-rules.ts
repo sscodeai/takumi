@@ -378,6 +378,15 @@ export function hasHumanFinding(findings: readonly ReviewFinding[]): boolean {
 /** One line per finding, for a board comment or an event message. */
 export function describeFindings(findings: readonly ReviewFinding[]): string {
   return findings
-    .map((finding) => `${finding.rule}${finding.path === undefined ? '' : ` (${finding.path})`}: ${finding.detail}`)
+    .map((finding) => {
+      // The LINE belongs in the rendered form. A finding a person cannot locate is a finding they
+      // cannot act on, and this string is what travels to the board comment — recording the line in
+      // the object and dropping it here left the field unavailable everywhere it is read.
+      const where =
+        finding.path === undefined
+          ? ''
+          : ` (${finding.path}${finding.line === undefined ? '' : `:${finding.line}`})`;
+      return `${finding.rule}${where}: ${finding.detail}`;
+    })
     .join('; ');
 }

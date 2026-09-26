@@ -200,8 +200,14 @@ test('the findings list is stable and renders one line per finding', () => {
     ['test-weakening/assertions-removed', 'protected-path'],
   );
   const text = describeFindings(findings);
-  assert.match(text, /test-weakening\/assertions-removed \(test\/a\.test\.ts\)/);
-  assert.match(text, /protected-path \(package\.json\)/);
+  assert.match(text, /test-weakening\/assertions-removed \(test\/a\.test\.ts(?::\d+)?\)/);
+  assert.match(text, /protected-path \(package\.json(?::\d+)?\)/);
+  // A finding that can point at a line renders it: the line is what makes it actionable, and this
+  // string is what reaches the board comment.
+  const located = describeFindings([
+    { rule: 'semgrep:fixture', severity: 'block', path: 'calc.py', line: 42, detail: 'a credential' },
+  ]);
+  assert.equal(located, 'semgrep:fixture (calc.py:42): a credential');
 });
 
 test('isTestPath: the plumbing and the rules agree on what a test file is', () => {
