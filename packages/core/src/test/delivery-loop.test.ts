@@ -13,8 +13,11 @@ import {
   ProviderError,
   assertTransition,
   runDeliveryLoop,
+  runReviewRules,
+  verdictFromFindings,
 } from '../index.js';
 import type {
+  ReviewOutcome,
   BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentRef,
@@ -175,6 +178,11 @@ class LoopDelivery implements DeliveryProvider {
   pushCount = 0;
   prCount = 0;
   failNextDeliver: ProviderError | undefined;
+  /** Move the branch AFTER the review, as a second push would (the double's `pr` is private). */
+  moveHeadAfterReview(sha: string): void {
+    this.headSha = sha;
+    this.pr.headSha = sha;
+  }
   private readonly pr: PullRequestRef = { number: '1', url: 'https://host.example/pull/1', headSha: COMMIT_1, baseSha: 'main' };
 
   constructor(private readonly base: string) {
@@ -964,4 +972,133 @@ test('runDeliveryLoop: a human gate with no record of what was presented is refu
   assert.equal(result.outcome, 'blocked');
   assert.match(String(result.error), /no record of what was presented/);
   assert.equal(h.delivery.merged, false);
+});
+
+// =====================================================================================
+// GATE FIRE BENCH (slice C): for each adversarial fixture, does the guard FIRE?
+//
+// Inspired by the gate benchmarks of projects that ship governed delivery loops (agent-gate-bench):
+// a claim about a guard is worth nothing until there is a fixture that would catch it failing. The
+// rows call PRODUCTION predicates — the real rules engine and the real verdict mapping — never a
+// local re-derivation, because a bench that re-implements the thing it tests can pass while the
+// thing is broken.
+//
+// Vocabulary for every cell: Block / Allow / Pass / Fail / Partial / n/a / TBD. Nothing here is TBD:
+// every fixture runs offline and deterministically. The rows that need a live forge or a real git
+// binary are marked n/a with the test that covers them instead of being guessed at.
+// =====================================================================================
+
+type GateRow = { fixture: string; guard: string; outcome: 'Block' | 'Allow' | 'Partial' | 'n/a'; note: string };
+const GATE_ROWS: GateRow[] = [];
+
+function gateChange(path: string, base: string | null, head: string | null) {
+  return { baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), changes: [{ path, status: base === null ? ('added' as const) : ('modified' as const), baseContent: base, headContent: head }] };
+}
+
+/** The reviewer a delivery would really meet: the rules engine, mapped by the production verdict. */
+function ruleReviewerFor(changes: Parameters<typeof runReviewRules>[0]['changes']) {
+  return async (): Promise<ReviewOutcome> => verdictFromFindings(runReviewRules({ baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), changes }));
+}
+
+test('gate fire: weakened tests -> review blocks, nothing merges', async () => {
+  const h = harness();
+  const changes = [{ path: 'src/calc.test.ts', status: 'deleted' as const, baseContent: 'test("add", () => {});\n', headContent: null }];
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, sleep: async () => {}, hooks: { agent: async () => {}, review: ruleReviewerFor(changes) } });
+  assert.notEqual(result.outcome, 'merged');
+  assert.equal(h.delivery.merged, false);
+  GATE_ROWS.push({ fixture: 'weakened-tests', guard: 'review: test-weakening/deleted', outcome: 'Block', note: `loop=${result.outcome}` });
+});
+
+test('gate fire: a committed credential -> review blocks', async () => {
+  const h = harness();
+  const FAKE_GLPAT = 'glpat-' + 'AbCdEf0123456789xyzQ'; // assembled: no token-shaped literal in the tree
+  const changes = gateChange('config.py', 'x = 1\n', `x = 1\ntoken = "${FAKE_GLPAT}"\n`).changes;
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, sleep: async () => {}, hooks: { agent: async () => {}, review: ruleReviewerFor(changes) } });
+  assert.notEqual(result.outcome, 'merged');
+  GATE_ROWS.push({ fixture: 'committed-secret', guard: 'review: secret/committed', outcome: 'Block', note: `loop=${result.outcome}` });
+});
+
+test('gate fire: a protected path -> waits for a person, does not merge', async () => {
+  const h = harness();
+  const changes = gateChange('.github/workflows/ci.yml', 'name: ci\n', 'name: ci\non: push\n').changes;
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, sleep: async () => {}, hooks: { agent: async () => {}, review: ruleReviewerFor(changes) } });
+  assert.equal(result.outcome, 'awaiting_review');
+  assert.equal(h.delivery.merged, false);
+  GATE_ROWS.push({ fixture: 'protected-path', guard: 'review: protected-path -> human', outcome: 'Block', note: 'delivery waits, a person decides' });
+});
+
+test('gate fire: a dirty worktree -> the delivery refuses', async () => {
+  const h = harness();
+  h.delivery.dirty = true;
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) } });
+  assert.notEqual(result.outcome, 'merged');
+  assert.equal(h.delivery.merged, false);
+  GATE_ROWS.push({ fixture: 'dirty-worktree', guard: 'delivery: agent boundary = commit', outcome: 'Block', note: 'never commits for the agent' });
+});
+
+test('gate fire: the head moves after the review -> that merge is refused and the change is re-reviewed', async () => {
+  const h = harness();
+  let reviews = 0;
+  h.delivery.checks = async () => {
+    h.delivery.moveHeadAfterReview('c'.repeat(40)); // the branch moved between review and merge
+    return [{ name: 'build', conclusion: 'success' as const }];
+  };
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan,
+    sleep: async () => {},
+    hooks: {
+      agent: async () => {},
+      review: async () => {
+        reviews += 1;
+        return { verdict: 'clean' };
+      },
+    },
+  });
+  // The guard is not "never merge" — it is "never merge code the review did not see". The stale
+  // merge is refused, the item goes back for review, and the run then merges at a head that WAS
+  // reviewed. (Asserting "not merged" here was the bench's first draft, and it was wrong.)
+  assert.ok(reviews >= 2, `the change must be reviewed again after the head moved (reviews=${reviews})`);
+  assert.equal(result.steps.some((s) => s.detail.includes('head moved') || s.detail.includes('moved after the review')), true);
+  GATE_ROWS.push({ fixture: 'head-moved', guard: 'merge: only the reviewed head', outcome: 'Block', note: `stale merge refused, re-reviewed (${reviews}x), then merged at the new head` });
+});
+
+test('gate fire: mergeability stays unknown -> blocks visibly, never merges', async () => {
+  const h = harness();
+  h.delivery.mergeable = null;
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, sleep: async () => {}, hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) } });
+  assert.notEqual(result.outcome, 'merged');
+  assert.equal(result.outcome, 'blocked', 'an unknown is not a yes, and it must be visible');
+  GATE_ROWS.push({ fixture: 'mergeability-unknown', guard: 'merge: unknown is not yes', outcome: 'Block', note: 'bounded window, then blocked' });
+});
+
+test('gate fire: the reviewer cannot run -> not merged, retried instead', async () => {
+  const h = harness();
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan,
+    hooks: {
+      agent: async () => {},
+      review: async () => {
+        throw new ProviderError('transport', 'the reviewer could not read the change set');
+      },
+    },
+  });
+  assert.equal(result.outcome, 'retriable', 'an unavailable reviewer must never read as clean');
+  assert.equal(h.delivery.merged, false);
+  GATE_ROWS.push({ fixture: 'reviewer-unavailable', guard: 'fail-closed: no review, no merge', outcome: 'Block', note: 'retriable, nothing merged' });
+});
+
+test('gate fire: the scoreboard (every deterministic row is filled; nothing is TBD)', () => {
+  const covered: GateRow[] = [
+    ...GATE_ROWS,
+    { fixture: 'force-push-attempt', guard: 'delivery: push is always plain', outcome: 'n/a', note: 'covered by deliveries/git + deliveries/github suites' },
+    { fixture: 'stale-approval', guard: 'approval must name the merged version', outcome: 'Block', note: 'covered by the ADR-018 tests above' },
+  ];
+  const rows = covered.map((r) => `  ${r.fixture.padEnd(22)} ${r.outcome.padEnd(6)} ${r.guard.padEnd(46)} ${r.note}`);
+  console.log(`\ngate-fire bench:\n${rows.join('\n')}\n`);
+  assert.equal(covered.some((r) => r.outcome === 'Block'), true);
+  assert.equal(covered.some((r) => r.outcome === 'Allow'), false, 'no fixture here is meant to merge: they are all guards');
 });

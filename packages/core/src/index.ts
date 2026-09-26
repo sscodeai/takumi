@@ -72,7 +72,7 @@ export {
   isTestPath,
   runReviewRules,
 } from './review-rules.js';
-export { collectReviewInput, createRuleReviewer } from './review.js';
+export { collectReviewInput, createRuleReviewer, verdictFromFindings } from './review.js';
 export type { CollectReviewInputOptions, RuleReviewerOptions } from './review.js';
 export type { Sandbox, SandboxOptions, SandboxResult } from './sandbox.js';
 export { DockerSandbox, NoopSandbox, dockerAvailable } from './sandbox-docker.js';
