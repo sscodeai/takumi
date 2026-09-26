@@ -223,3 +223,39 @@ export function newestBoardStateRecord(texts: readonly string[]): BoardStateReco
   }
   return newest;
 }
+
+/**
+ * Carry a record forward, preserving the fields this writer does NOT own.
+ *
+ * WHY THIS EXISTS (measured on a real GitLab instance, 2026-09-19): every adapter's `transition()`
+ * writes the state record with its own evidence, and the ones here rebuilt the record from a fixed
+ * list of fields they knew about. So `branch` — and later `reviewed`, the digest of what a review
+ * covered — were dropped the moment an item moved state. The loss was invisible until something
+ * depended on surviving a transition: a resumed delivery could no longer find the branch to resume
+ * (the pilot refused to guess, correctly), and the review digest never reached the next tick, which
+ * left the "policy changed after the review" hole wide open behind a check that looked right.
+ *
+ * The rule: a writer sets the fields it owns (`runId`, `note`, `updatedAt`, the item id) and
+ * carries EVERY other field forward. An adapter that does not understand a field must not delete it.
+ */
+export function carryStateRecordForward(
+  existing: BoardStateRecord | null,
+  updates: { runId: string; item: string; note?: string; reviewRound?: number },
+): BoardStateRecord {
+  const carried: BoardStateRecord = existing ?? {
+    schema: 1,
+    runId: updates.runId,
+    item: updates.item,
+    reviewRound: 0,
+    updatedAt: new Date(0).toISOString(),
+  };
+  return {
+    ...carried,
+    schema: 1,
+    runId: updates.runId,
+    item: updates.item,
+    reviewRound: updates.reviewRound ?? carried.reviewRound,
+    updatedAt: new Date().toISOString(),
+    ...(updates.note === undefined ? {} : { note: updates.note }),
+  };
+}

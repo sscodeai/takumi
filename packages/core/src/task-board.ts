@@ -854,6 +854,43 @@ export async function runTaskBoardProviderContractSuite(
       await provider.transition(opts.itemId, 'fix_needed', { runId });
       await provider.transition(opts.itemId, 'pr_open', { runId });
     }
+    // A transition must not cost the record the fields the adapter does NOT own. Found on a real
+    // GitLab instance (2026-09-19): `branch` and then `reviewed` — the digest of what a review
+    // covered — were dropped exactly here, by adapters that rebuilt the record from a fixed list of
+    // fields they knew about. A resumed delivery could no longer find its branch, and the review
+    // digest never reached the next tick, which left a real hole behind a check that looked right.
+    if (caps.machineReadableState && caps.states.includes('fix_needed')) {
+      await provider.writeState(opts.itemId, {
+        schema: 1,
+        runId,
+        item: opts.itemId,
+        reviewRound: 0,
+        updatedAt: new Date().toISOString(),
+        baseBranch: 'main',
+        branch: 'takumi/contract-suite',
+        reviewed: {
+          digest: 'a'.repeat(64),
+          head: 'b'.repeat(40),
+          base: 'c'.repeat(40),
+          policy: 'd'.repeat(64),
+          ruleset: 'e'.repeat(64),
+          reviewer: 'reviewer:rules@1',
+          at: new Date().toISOString(),
+        },
+      });
+      await provider.transition(opts.itemId, 'fix_needed', { runId });
+      await provider.transition(opts.itemId, 'pr_open', { runId, note: 'after the record was written' });
+      const after = await provider.readState(opts.itemId);
+      if (after?.branch !== 'takumi/contract-suite' || after.reviewed === undefined) {
+        throw new Error(
+          `a transition dropped fields the adapter does not own (branch=${String(after?.branch)}, reviewed=${after?.reviewed === undefined ? 'missing' : 'kept'})`,
+        );
+      }
+      notes.push('transition carries unknown fields: PASS (branch and the review digest survived a state move)');
+    } else {
+      notRun += 1;
+      notes.push('transition carries unknown fields: NOT_RUN (this board keeps no machine-readable record)');
+    }
     notes.push('transition: PASS (claimed→pr_open applied and observable; claimed→claimed rejected)');
   } else {
     notRun += 1;
