@@ -27,6 +27,7 @@ import {
   runDeliveryLoop,
   type DeliveryLoopResult,
   type LoopStep,
+  type ReportContext,
   type ReviewContext,
   type ReviewOutcome,
 } from './delivery-loop.js';
@@ -130,6 +131,11 @@ export interface PilotTickDeps {
    * record that names the wrong reviewer is evidence for something that did not happen.
    */
   reviewerId?: string;
+  /**
+   * Optional: where the findings are SHOWN (a pull-request comment). Never a gate — see
+   * `DeliveryLoopHooks.report` — so a broken reporter cannot fail a delivery.
+   */
+  report?: (ctx: ReportContext) => Promise<void>;
   changedFiles?: (ctx: { worktree: string; baseSha: string }) => Promise<string[]>;
   policy: PilotPolicy;
   /** Where the tick's events go. */
@@ -435,6 +441,9 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
       },
       hooks: {
         agent: async ({ round }) => runAgent(round),
+        // The report surface (ADR-022) belongs with the other hooks: the loop tells it what a human
+        // should see, and treats its failure as a record rather than a verdict.
+        ...(deps.report === undefined ? {} : { report: deps.report }),
         review: async (ctx) => {
           // The policy decides who is trusted to judge, and its answer comes FIRST:
           // a missing human approval must not be mistaken for "fix something".

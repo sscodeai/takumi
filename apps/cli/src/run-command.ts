@@ -35,6 +35,7 @@ import {
   type BoardWorkItem,
   type EventLog,
   type GitRunner,
+  type ReportContext,
   type ReviewContext,
   type ReviewOutcome,
   type PilotPolicy,
@@ -44,6 +45,7 @@ import {
   type WorktreeHandle,
 } from '@takumi/core';
 import { createSemgrepReviewer } from '@takumi/reviewer-semgrep';
+import { createReviewdogReporter } from '@takumi/reporter-reviewdog';
 
 export interface PilotAgentConfig {
   /**
@@ -87,6 +89,16 @@ export interface PilotConfig {
    * a record names the judge that actually ran.
    */
   reviewer?: 'rules' | 'semgrep';
+  /** Where the findings are shown (ADR-022). Absent means "nowhere but the trail". */
+  reporter?: 'reviewdog';
+  reviewdog?: {
+    /** Default `local` (prints). A host reporter reads its token from the ENVIRONMENT. */
+    reporter?: string;
+    filterMode?: 'added' | 'diff_context' | 'file' | 'nofilter';
+    name?: string;
+    binary?: string;
+    timeoutSeconds?: number;
+  };
   semgrep?: {
     configPath: string;
     expectedVersion?: string;
@@ -141,6 +153,43 @@ function reviewerFor(
   return {
     review: createRuleReviewer({ git, rules: pilot.policy.reviewRules }),
     reviewerId: REVIEWER_DETERMINISTIC_RULES,
+  };
+}
+
+/**
+ * Where the findings are SHOWN (ADR-022), when the deployment asked for it.
+ *
+ * A report is a BYPASS: this returns a hook that can fail freely, because the loop records a failure
+ * as `report.failed` and the delivery outcome is untouched. That is also why the unpostable findings
+ * are PRINTED: a finding that no comment can carry still reaches the tick's own output, rather than
+ * disappearing because the report surface had nowhere to put it.
+ */
+function reporterFor(
+  pilot: PilotConfig,
+  out: (line: string) => void,
+): { report?: (ctx: ReportContext) => Promise<void> } {
+  if (pilot.reporter !== 'reviewdog') return {};
+  const config = pilot.reviewdog ?? {};
+  const reporter = createReviewdogReporter({
+    ...(config.reporter === undefined ? {} : { reporter: config.reporter }),
+    ...(config.filterMode === undefined ? {} : { filterMode: config.filterMode }),
+    ...(config.name === undefined ? {} : { name: config.name }),
+    ...(config.binary === undefined ? {} : { binary: config.binary }),
+    ...(config.timeoutSeconds === undefined ? {} : { timeoutMs: config.timeoutSeconds * 1000 }),
+  });
+  return {
+    report: async (ctx) => {
+      const result = await reporter.report({
+        findings: ctx.findings,
+        baseSha: ctx.baseSha,
+        headSha: ctx.headSha,
+        cwd: ctx.worktree,
+      });
+      out(`report   reviewdog (${config.reporter ?? 'local'}): ${result.posted} finding(s) shown`);
+      for (const finding of result.unlocated) {
+        out(`report   no comment can carry this one, so it is here: ${finding.rule}: ${finding.detail}`);
+      }
+    },
   };
 }
 
@@ -260,6 +309,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     // delivers a rubber stamp, so the two are wired together here — and an injected
     // reviewer (tests) still wins, with an injectable identity so a test can assert that the
     // evidence names what ran.
+    ...reporterFor(deps.pilot, out),
     ...(deps.review === undefined
       ? reviewerFor(deps.pilot, deps.git ?? createGitRunner())
       : {

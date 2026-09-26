@@ -47,6 +47,9 @@ importers:
       '@takumi/delivery-gitlab':
         specifier: workspace:*
         version: link:../../deliveries/gitlab
+      '@takumi/reporter-reviewdog':
+        specifier: workspace:*
+        version: link:../../reporters/reviewdog
       '@takumi/reviewer-semgrep':
         specifier: workspace:*
         version: link:../../reviewers/semgrep

@@ -1129,6 +1129,52 @@ test('runDeliveryLoop: the evidence names the reviewer that actually judged', as
   assert.notEqual(customRecord?.reviewed?.digest, defaultRecord?.reviewed?.digest);
 });
 
+test('runDeliveryLoop: the report surface is told what was found, and a broken reporter changes nothing', async () => {
+  const finding = {
+    rule: 'test-weakening/deleted',
+    severity: 'block' as const,
+    path: 'test/a.test.ts',
+    line: 3,
+    detail: 'a test file was deleted',
+  };
+  const run = async (report: (ctx: { findings: readonly unknown[] }) => Promise<void>): Promise<{ outcome: string; log: ReturnType<typeof createEventLog> }> => {
+    const h = harness();
+    const log = createEventLog();
+    const result = await runDeliveryLoop({
+      board: h.board,
+      delivery: h.delivery,
+      events: log,
+      plan: { ...plan, maxReviewRounds: 1 },
+      hooks: {
+        agent: async () => {
+          h.delivery.headSha = COMMIT_1;
+        },
+        review: async () => ({ verdict: 'findings', note: 'a weakened test', findings: [finding] }),
+        report: report as never,
+      },
+    });
+    return { outcome: result.outcome, log };
+  };
+
+  const told: number[] = [];
+  const ok = await run(async (ctx) => {
+    told.push(ctx.findings.length);
+  });
+  assert.deepEqual(told, [1], 'the findings behind the verdict reach the report surface');
+  assert.equal(ok.log.of('report.posted').length, 1);
+  assert.equal(ok.log.of('report.posted')[0]?.fields?.findings, 1);
+
+  // The report is a BYPASS: a reporter that cannot run is recorded, and the item does exactly what
+  // it would have done without one. A missing comment must not fail a delivery, and must not save one.
+  const broken = await run(async () => {
+    throw new ProviderError('transport', 'reviewdog is not installed');
+  });
+  assert.equal(broken.outcome, ok.outcome, 'the delivery outcome is unchanged by the reporter');
+  assert.equal(broken.log.of('report.posted').length, 0);
+  assert.equal(broken.log.of('report.failed').length, 1);
+  assert.match(broken.log.of('report.failed')[0]?.message ?? '', /reviewdog is not installed/);
+});
+
 test('runDeliveryLoop: a resumed round 0 runs NO agent, and the trail says so instead of claiming one', async () => {
   const { board, delivery } = harness();
   const log = createEventLog();

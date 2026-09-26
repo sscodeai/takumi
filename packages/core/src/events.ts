@@ -41,6 +41,8 @@ export const EVENT_KINDS = [
   'agent.started',
   'agent.finished',
   'agent.skipped',
+  'report.posted',
+  'report.failed',
   'agent.failed',
   'agent.retry',
   // Delivery

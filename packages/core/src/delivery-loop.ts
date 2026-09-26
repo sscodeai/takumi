@@ -34,6 +34,7 @@ import { ProviderError } from './provider-error.js';
 import { acquireSlot, type SlotHandle } from './slot-lock.js';
 import type { TaskBoardProvider } from './task-board.js';
 import type { BoardStateRecord } from './board-state-record.js';
+import type { ReviewFinding } from './review-rules.js';
 import {
   REVIEWER_DETERMINISTIC_RULES,
   policyHash,
@@ -151,15 +152,37 @@ export type ReviewOutcome =
    * is not a defect: "only the tests changed" belongs on the record, and forcing it into
    * `findings` would spend a fix round on work that may be exactly what the item asked for.
    */
-  | { verdict: 'clean'; note?: string }
-  | { verdict: 'findings'; note?: string }
+  | {
+      verdict: 'clean';
+      note?: string;
+      /**
+       * What the reviewer saw while finding nothing that blocks (notes, observations). Uniform with
+       * the other verdicts so a report surface reads ONE shape.
+       */
+      findings?: readonly ReviewFinding[];
+    }
+  | {
+      verdict: 'findings';
+      note?: string;
+      /**
+       * What was found, when the reviewer is willing to say. The verdict alone is enough to gate a
+       * merge; this is for the surfaces that show a PERSON something (ADR-022), and it travels with
+       * the verdict so a reporter never has to re-derive it.
+       */
+      findings?: readonly ReviewFinding[];
+    }
   /**
    * The change is ready but a HUMAN has not approved it yet (orbi's human review).
    * Deliberately distinct from `findings`: waiting is not a defect, so it must not
    * consume a review round, must not move the item to `fix_needed`, and must not
    * merge. The item stays in review for a later tick.
    */
-  | { verdict: 'awaiting-human'; note?: string };
+  | {
+      verdict: 'awaiting-human';
+      note?: string;
+      /** The findings a person must decide on — exactly what a report surface should show them. */
+      findings?: readonly ReviewFinding[];
+    };
 
 export interface DeliveryLoopHooks {
   /**
@@ -172,6 +195,28 @@ export interface DeliveryLoopHooks {
   review: (ctx: ReviewContext) => Promise<ReviewOutcome>;
   /** Optional: what changed since the frozen base, for the review context. */
   changedFiles?: (ctx: { worktree: string; baseSha: string }) => Promise<string[]>;
+  /**
+   * Optional: where the findings are SHOWN — a pull-request comment, an MR discussion (ADR-022).
+   *
+   * A report is a BYPASS, never a gate: it is called after the review's verdict is known and before
+   * the item moves, a reporter that throws is recorded as `report.failed`, and the delivery outcome
+   * is exactly what it would have been. The findings are already in the trail; a missing comment
+   * must not become a merged change, and must not become a blocked one either.
+   */
+  report?: (ctx: ReportContext) => Promise<void>;
+}
+
+/** What a report surface is told: the verdict, the findings, and where they came from. */
+export interface ReportContext {
+  itemId: string;
+  runId: string;
+  round: number;
+  outcome: ReviewOutcome;
+  findings: readonly ReviewFinding[];
+  headSha: string;
+  baseSha: string;
+  worktree: string;
+  pr?: PullRequestRef;
 }
 
 export interface LoopStep {
@@ -537,6 +582,45 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     record('claim', `${plan.itemId} claimed by run ${plan.runId}`);
     await writeRecord(0);
 
+    /**
+     * Tell the report surface what a human should see — and never let that decision into the
+     * delivery's own. See `DeliveryLoopHooks.report`.
+     */
+    const reportFindings = async (outcome: ReviewOutcome, round: number, head: string): Promise<void> => {
+      const report = hooks.report;
+      if (report === undefined) return;
+      const findings = outcome.findings ?? [];
+      if (findings.length === 0 && outcome.note === undefined) return;
+      try {
+        await report({
+          itemId: plan.itemId,
+          runId: plan.runId,
+          round,
+          outcome,
+          findings,
+          headSha: head,
+          baseSha: plan.baseSha,
+          worktree: plan.worktree,
+          ...(pr === undefined ? {} : { pr }),
+        });
+        events.emit({
+          kind: 'report.posted',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          message: `reported ${findings.length} finding(s) to the report surface`,
+          fields: { findings: findings.length, head },
+        });
+      } catch (error) {
+        // The report is a bypass: recorded, visible, and irrelevant to what happens to the item.
+        events.emit({
+          kind: 'report.failed',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          message: `the report surface was not updated: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    };
+
     // --- 2. rounds of work → deliver → review ---------------------------------
     for (let round = 0; round < maxRounds; round++) {
       rounds = round + 1;
@@ -744,6 +828,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         reviewedBlock = reviewInputsFor(thisRef.headSha);
         await writeRecord(round, { force: true });
         record('review', `round ${round + 1}: awaiting a human${review.note === undefined ? '' : ` — ${review.note}`}`);
+        await reportFindings(review, round, thisRef.headSha);
         return {
           outcome: 'awaiting_review',
           itemId: plan.itemId,
@@ -767,6 +852,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         fields: { round, head: thisRef.headSha },
       });
       record('review', `round ${round + 1}: ${review.verdict}${review.note ? ` — ${review.note}` : ''}`);
+      await reportFindings(review, round, thisRef.headSha);
 
       if (review.verdict === 'findings') {
         if (round + 1 >= maxRounds) {

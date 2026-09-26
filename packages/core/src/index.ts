@@ -205,6 +205,7 @@ export type {
   DeliveryLoopPlan,
   DeliveryLoopResult,
   LoopStep,
+  ReportContext,
   ReviewContext,
   ReviewOutcome,
 } from './delivery-loop.js';

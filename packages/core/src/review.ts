@@ -94,15 +94,24 @@ export function verdictFromFindings(
   notes: readonly ReviewFinding[] = [],
 ): ReviewOutcome {
   if (hasBlockingFinding(findings)) {
-    return { verdict: 'findings', note: describeFindings(findings.filter((f) => f.severity === 'block')) };
+    return {
+      verdict: 'findings',
+      note: describeFindings(findings.filter((f) => f.severity === 'block')),
+      // The findings travel with the verdict so a report surface shows exactly what was decided from
+      // (ADR-022): a reporter that re-derives them is a second source of truth about the review.
+      findings,
+    };
   }
   if (hasHumanFinding(findings)) {
     return {
       verdict: 'awaiting-human',
       note: `${describeFindings(findings.filter((finding) => finding.severity === 'human'))} — this delivery waits for a person`,
+      findings,
     };
   }
-  return notes.length === 0 ? { verdict: 'clean' } : { verdict: 'clean', note: describeFindings(notes) };
+  return notes.length === 0
+    ? { verdict: 'clean', ...(findings.length === 0 ? {} : { findings }) }
+    : { verdict: 'clean', note: describeFindings(notes), findings };
 }
 
 export async function collectReviewInput(

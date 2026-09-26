@@ -813,3 +813,67 @@ test(
     }
   },
 );
+
+test('runOnce: a report surface that cannot run is recorded, and the delivery is untouched', async () => {
+  const repo = makeRepo();
+  try {
+    const worktreeRoot = join(repo.root, 'worktrees');
+    // A test file at the base, so the rules have something to compare against.
+    mkdirSync(join(repo.work, 'test'), { recursive: true });
+    writeFileSync(
+      join(repo.work, 'test', 'calc.test.ts'),
+      'test("add", () => {\n  expect(1 + 1).toBe(2);\n  expect(2 + 2).toBe(4);\n});\n',
+    );
+    git(['add', '.'], repo.work);
+    git(['commit', '-m', 'test: cover add'], repo.work);
+
+    const agentScript = join(repo.root, 'weakening-agent.mjs');
+    writeFileSync(
+      agentScript,
+      [
+        'import { execFileSync } from "node:child_process";',
+        'import { writeFileSync } from "node:fs";',
+        '// The agent "fixes" CI by dropping an assertion — the finding the deterministic reviewer exists for.',
+        'writeFileSync("test/calc.test.ts", `test("add", () => {\\n  expect(1 + 1).toBe(2);\\n});\\n`);',
+        'const g = (a) => execFileSync("git", a, { encoding: "utf8" });',
+        'g(["add", "."]);',
+        'g(["-c", "user.name=Agent", "-c", "user.email=agent@example.invalid", "commit", "-m", "test: weaken"]);',
+        '',
+      ].join('\n'),
+    );
+
+    const board = new FakeBoardProvider({ items: [{ id: 'ITEM-12', state: 'ready', title: 'Tidy the tests', labels: [] }] });
+    const delivery = new GitDeliveryProvider({ repo: repo.work, baseBranch: 'main' });
+    const log = createEventLog();
+    const lines: string[] = [];
+    const { tick } = await runOnce({
+      board,
+      delivery,
+      log,
+      out: (line) => lines.push(line),
+      pilot: {
+        repo: repo.work,
+        worktreeRoot,
+        slotDir: join(repo.root, 'slots'),
+        baseBranch: 'main',
+        agent: { command: process.execPath, args: [agentScript], timeoutSeconds: 60 },
+        // Asked for a report surface, on a host that has no reviewdog.
+        reporter: 'reviewdog',
+        reviewdog: { binary: '/nonexistent-reviewdog' },
+        policy: { reviewMode: 'rules', maxReviewRounds: 1 },
+      },
+    });
+
+    // The FINDING still blocks: the reporter's fate never changes what happens to the item.
+    assert.equal(tick.outcome, 'blocked', tick.detail);
+    assert.match(tick.detail, /review found issues/);
+    assert.equal((await board.getWork('ITEM-12')).state, 'blocked');
+    // ...and the fact that nobody saw it is recorded rather than swallowed.
+    const failed = log.of('report.failed');
+    assert.equal(failed.length, 1);
+    assert.match(failed[0]?.message ?? '', /not installed|not on PATH/);
+    assert.equal(log.of('report.posted').length, 0);
+  } finally {
+    repo.cleanup();
+  }
+});

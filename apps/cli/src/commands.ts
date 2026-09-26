@@ -97,6 +97,15 @@ export interface ProjectConfig {
      * `composeDeterministic: false`. There is deliberately no default that reaches the network.
      */
     reviewer?: 'rules' | 'semgrep';
+    /** Where the findings are SHOWN (ADR-022): `reviewdog` posts them on the host's review surface. */
+    reporter?: 'reviewdog';
+    reviewdog?: {
+      reporter?: string;
+      filterMode?: 'added' | 'diff_context' | 'file' | 'nofilter';
+      name?: string;
+      binary?: string;
+      timeoutSeconds?: number;
+    };
     semgrep?: {
       /** The PINNED rule set. Required for `reviewer: semgrep` — there is no `--config auto` path. */
       configPath: string;
