@@ -2,6 +2,8 @@
 
 - **Date**: 2026-09-19
 - **Status**: Accepted (`review-digest.ts`, `BoardStateRecord.reviewed`/`approval`, the merge refusal)
+  — **with decision 4 corrected on 2026-09-25** (see the correction note at the end: the digest
+  protects the HUMAN gate, not the machine review of a previous tick)
 - **Related**: ADR-013 (the deterministic reviewer), ADR-014 (resuming an incomplete delivery),
   ADR-007 (the delivery port). Inspired by the artifact-approval designs measured in `code-oz`
   (`gate_artifact_sha256_mismatch`, approvals bound to an artifact's SHA-256).
@@ -37,6 +39,8 @@ it was approved against is evidence about half of what matters.
    block cannot merge: it predates digests or was written by another tool, and neither is evidence.
    This is fail-closed in the same direction as everything else here: re-reviewing is cheap,
    merging something the review does not describe is not.
+   **[Correction, 2026-09-25] As written this fires on the common path.** See the correction note at
+   the end: the refusal is now approval-centric and applies only under a human gate.
 5. **The refusal is a named fact**: `review.stale`, carrying both digests and which input moved,
    plus the item moves to `blocked` with the reason. A silent re-review would also be defensible;
    a merge nobody can explain afterwards is not.
@@ -63,3 +67,24 @@ it was approved against is evidence about half of what matters.
 - **Next, and named**: the same digest discipline applied to the rule set itself when the rules
   become data (`review-rules.yml`), and the cross-family assertion (builder family != reviewer
   family) that a model reviewer will need.
+
+**[Correction, 2026-09-25] Decision 4 was too broad, and the broadness was worse than the hole it closed.**
+
+The rule as first written — "a delivery on record with no `reviewed` block cannot merge" — was
+measured on the live instance and fails on an ordinary fix round: tick 1 reviews, finds something,
+returns `fix_needed` (**no digest is written, because the review was not clean**); tick 2 fixes it,
+the review is clean, and the record from tick 1 has no digest → **refused**. That refusal would land
+on the common path far more often than on the rare one it targets.
+
+What the live failure forced into the open: **every merge is already justified by the review THIS run
+performed, under the policy in force now** — the loop reviews before it merges, always. A digest on
+record therefore cannot justify a refusal in a machine-gated delivery at all. What a digest really
+binds is the **human's approval**, given in an earlier run, which can name a head or a policy the
+human never saw. The check is now approval-centric: it applies only when `reviewMode: label`, and it
+refuses when the record cannot show what was presented for approval, or when that digest differs from
+the one about to be merged. Under any other mode a digest is audit evidence, not grounds to refuse.
+
+Decisions 1-3 and 6 are unchanged, and both merge rules (the head is pinned, the judgement is pinned)
+now hold without refusing legitimate work. The lesson belongs to the same class as the ledger's
+"a check's SCOPE is part of the check": a guard that fires on the paths it was not aimed at is not a
+conservative guard, it is a broken one, and only a real run says which it is.
