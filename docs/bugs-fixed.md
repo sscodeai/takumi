@@ -39,6 +39,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 
 | 16 | A delivery that REUSED an existing pull request in round 0 never moved the item to `pr_open` — the loop read that off `delivered.created` — so the merge that followed was refused as an illegal transition (`claimed → merged`) and the item blocked on the state machine instead of on anything real | The post-delivery state was derived from who opened the pull request rather than from what the item IS (delivered and under review); every path that created its own pull request hid it, and the only paths that reuse one are round-0 re-runs and resumes — neither of which existed when the line was written | The rule reads the state itself: after delivering, an item not already in `pr_open` is moved there, and one already there is left alone | `37ead68` (`fix(core): a reused delivery in round 0 never reached pr_open, so it could not merge`) | the resume test in the CLI, on a real repository: `illegal board transition claimed → merged: allowed from claimed: pr_open, blocked` |
 
+| 17 | A RESUMED tick's event trail announced `agent.started` / `agent.finished` for an agent that never ran: the branch history held no commit that tick could have made, so the log — the artefact whose purpose is to be the record — described a run that did not exist | The loop emitted those two events unconditionally around the agent hook, and the CLI's hook returns immediately when the run is finishing an existing delivery (ADR-014). The hook knew; the loop did not; so the narration described a STEP instead of a FACT | The plan carries `resumed`; a resumed round 0 runs no agent and reports `agent.skipped`, naming where the work already is. A LATER round of the same run still runs the agent — the fix round after findings is work that does not exist yet | `1ba710b` (`fix(core): a resumed run must not report an agent it did not run`) | `packages/core/src/test/delivery-loop.test.ts` — "a resumed round 0 runs NO agent, and the trail says so instead of claiming one"; "a FIX round inside a resumed run DOES run the agent" |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -93,3 +95,8 @@ note, and to whoever wonders later whether this class of bug was ever hit.
   path, that path is part of the contract and belongs in the shared suite; and a guard should be
   re-derived from the authority that owns the fact (here: the board's state), never from a
   byproduct of a previous attempt.
+- **A step narrated as a fact** (#17): when a layer writes the record ("agent started"), it must know
+  whether the step happened. Here the hook knew and the loop did not, so the trail described the
+  shape of the code rather than the shape of the run — and it was found by reading the branch history
+  against the log, not by any test. Anything that narrates a stage needs the stage's own condition
+  passed to it, or a design in which skipping is impossible.

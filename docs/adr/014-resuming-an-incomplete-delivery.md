@@ -71,3 +71,12 @@ The loop gains an explicit resume entry point:
 - **Whether the resumed unit should be a full tick or a second phase.** A resume is not "one item
   per tick" in the same shape as a fresh delivery, and ADR-009's scheduling contract (one tick,
   one item, one decision) should stay intact.
+
+## Addendum (2026-09-25, measured on a live resumed delivery)
+
+Round 0 of a resumed run now reports `agent.skipped` and runs no agent, because the work it would do
+is already committed on the branch: the first live label-mode resume showed the trail announcing
+`agent.started` / `agent.finished` for a tick whose branch history contained no commit it could have
+made. The fix (`1ba710b`) is a `resumed` flag on the loop plan plus one new event kind, so the record
+says `skipped` where nothing was skipped by accident. A LATER round of the same run — the fix round
+after findings — still runs the agent: that work does not exist yet.
