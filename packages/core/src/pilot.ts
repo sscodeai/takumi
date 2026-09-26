@@ -394,6 +394,9 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
       plan: {
         worktree: worktree.path,
         branch: worktree.branch,
+      // Round 0 of a resumed run has no agent work to do; the loop needs to know that, or its
+      // event trail reports an agent run that never happened.
+      ...(resumeBranch === undefined ? {} : { resumed: true }),
       // The review policy travels WITH the plan (ADR-018): the loop binds its review evidence to
       // it, so a policy edited after a review makes that evidence stale by construction.
       reviewMode: policy.reviewMode,

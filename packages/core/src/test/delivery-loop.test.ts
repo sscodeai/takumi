@@ -1091,6 +1091,55 @@ test('gate fire: the reviewer cannot run -> not merged, retried instead', async 
   GATE_ROWS.push({ fixture: 'reviewer-unavailable', guard: 'fail-closed: no review, no merge', outcome: 'Block', note: 'retriable, nothing merged' });
 });
 
+test('runDeliveryLoop: a resumed round 0 runs NO agent, and the trail says so instead of claiming one', async () => {
+  const { board, delivery } = harness();
+  const log = createEventLog();
+  let agentCalls = 0;
+  const result = await runDeliveryLoop({
+    board,
+    delivery,
+    // A resumed delivery (ADR-014): the work is already committed on the branch an earlier run
+    // pushed, so round 0 has nothing for an agent to do.
+    plan: { ...plan, resumed: true },
+    events: log,
+    hooks: {
+      agent: async () => {
+        agentCalls += 1;
+      },
+      review: async () => ({ verdict: 'clean' }),
+    },
+  });
+
+  assert.equal(result.outcome, 'merged');
+  assert.equal(agentCalls, 0, 'the agent seam must not be invoked for work that is already committed');
+  assert.equal(log.of('agent.started').length, 0, 'no agent start is claimed');
+  assert.equal(log.of('agent.skipped').length, 1);
+  assert.match(log.of('agent.skipped')[0]?.message ?? '', /already committed/);
+});
+
+test('runDeliveryLoop: a FIX round inside a resumed run DOES run the agent', async () => {
+  const { board, delivery } = harness();
+  const roundsRun: number[] = [];
+  const result = await runDeliveryLoop({
+    board,
+    delivery,
+    plan: { ...plan, resumed: true, maxReviewRounds: 2 },
+    hooks: {
+      agent: async ({ round }) => {
+        roundsRun.push(round);
+        delivery.headSha = COMMIT_2;
+      },
+      review: async (ctx) =>
+        ctx.round === 0 ? { verdict: 'findings', note: 'this needs a fix' } : { verdict: 'clean' },
+    },
+  });
+
+  // Round 0 is the work that already exists; round 1 is NEW work, and skipping it would leave the
+  // finding unanswered — the fix for the trail must not become a reason not to fix anything.
+  assert.deepEqual(roundsRun, [1]);
+  assert.equal(result.outcome, 'merged');
+});
+
 test('gate fire: the scoreboard (every deterministic row is filled; nothing is TBD)', () => {
   const covered: GateRow[] = [
     ...GATE_ROWS,

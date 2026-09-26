@@ -52,6 +52,16 @@ export interface DeliveryLoopPlan {
   runId: string;
   /** The frozen base sha the worktree was created from. */
   baseSha: string;
+  /**
+   * This run is FINISHING a delivery an earlier run left open (ADR-014), so round 0's work is
+   * already committed on the branch.
+   *
+   * The loop then runs no agent in round 0 and reports `agent.skipped` instead of `agent.started`.
+   * Found on a live resumed tick: the event trail announced an agent start while the branch history
+   * showed no commit the agent could have made. A LATER round (the fix round after findings) is real
+   * work and runs the agent as usual.
+   */
+  resumed?: boolean;
   title?: string;
   body?: string;
   /** Bounded review/fix rounds. Default 3. */
@@ -520,21 +530,36 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     for (let round = 0; round < maxRounds; round++) {
       rounds = round + 1;
 
-      events.emit({
-        kind: 'agent.started',
-        runId: plan.runId,
-        itemId: plan.itemId,
-        message: `round ${round + 1} starting`,
-        fields: { worktree: plan.worktree },
-      });
-      await hooks.agent({ round, worktree: plan.worktree, branch: plan.branch });
-      events.emit({
-        kind: 'agent.finished',
-        runId: plan.runId,
-        itemId: plan.itemId,
-        message: `round ${round + 1} finished; a commit is expected`,
-      });
-      record('agent', `round ${round + 1} finished; expecting a commit in ${plan.worktree}`);
+      // A resumed run's round 0 has nothing for an agent to do: the work is already committed on
+      // the branch the earlier run pushed (ADR-014). Announcing `agent.started` anyway puts a run
+      // that never happened into the audit trail — which is exactly how this was found: a live
+      // resumed tick reported an agent start, and the branch history had no commit for it.
+      const runAgentThisRound = !(plan.resumed === true && round === 0);
+      if (runAgentThisRound) {
+        events.emit({
+          kind: 'agent.started',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          message: `round ${round + 1} starting`,
+          fields: { worktree: plan.worktree },
+        });
+        await hooks.agent({ round, worktree: plan.worktree, branch: plan.branch });
+        events.emit({
+          kind: 'agent.finished',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          message: `round ${round + 1} finished; a commit is expected`,
+        });
+        record('agent', `round ${round + 1} finished; expecting a commit in ${plan.worktree}`);
+      } else {
+        events.emit({
+          kind: 'agent.skipped',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          message: `round ${round + 1}: no agent — the work is already committed on ${plan.branch}`,
+        });
+        record('agent', `round ${round + 1}: skipped; ${plan.branch} already carries the work`);
+      }
 
       const delivered = await delivery.deliver(
         {

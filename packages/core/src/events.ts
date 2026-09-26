@@ -40,6 +40,7 @@ export const EVENT_KINDS = [
   // The agent's turn
   'agent.started',
   'agent.finished',
+  'agent.skipped',
   'agent.failed',
   'agent.retry',
   // Delivery
