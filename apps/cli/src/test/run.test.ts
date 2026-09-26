@@ -498,6 +498,12 @@ test('runOnce: an unfinished delivery is RESUMED, not redone (same branch, no ag
       branch: 'takumi/ITEM-1-deadrun',
     });
 
+    // The worktree the interrupted run left behind, still holding that branch. This is the exact
+    // condition that made a real resume impossible: git refuses to fetch into a branch a worktree
+    // holds, so the resume retried forever against the same worktree (found on the live instance).
+    const leftover = join(repo.root, 'leftover-worktree');
+    git(['worktree', 'add', leftover, 'takumi/ITEM-1-deadrun'], repo.work);
+
     const delivery = new RealHeadDelivery();
     delivery.opened = true; // the pull request is already open: this tick finishes it
 
@@ -522,6 +528,9 @@ test('runOnce: an unfinished delivery is RESUMED, not redone (same branch, no ag
     assert.match(tick.detail, /carries no review digest/);
     assert.equal(delivery.merged, false);
     assert.equal((await board.getWork('ITEM-1')).state, 'blocked');
+    // The resume REUSED that worktree instead of trying to check the branch out twice.
+    assert.match(git(['worktree', 'list', '--porcelain'], repo.work), /leftover-worktree/);
+    assert.doesNotMatch(lines.join('\n'), /refusing to fetch into branch/);
     // The decisive assertion: NO second branch was pushed for work that was already done.
     const heads = git(['ls-remote', '--heads', 'origin'], repo.work);
     assert.match(heads, /refs\/heads\/takumi\/ITEM-1-deadrun/);
