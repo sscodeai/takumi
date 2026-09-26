@@ -403,7 +403,13 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
         ...(deps.remote === undefined ? {} : { remote: deps.remote }),
         itemId: item.id,
         runId,
-        baseSha,
+        // The worktree HANDLE is authoritative about what this run is based on. For fresh work that
+        // equals `resolveBaseSha()`; for a RESUME it is the merge base of the branch and today's
+        // base branch — which is the only value the delivery's descent check can accept, because a
+        // delivery that has been sitting in `pr_open` while the base branch moved on is not "based
+        // on" today's head. Using the freshly resolved base here stranded a real resume on
+        // "HEAD is not descended from the frozen base", for a branch nobody had rewritten.
+        baseSha: worktree.baseSha,
         title: item.title,
         // Passed through explicitly: a policy knob the CLI accepts but the pilot drops is
         // the same silent drop as a config option nothing reads.
