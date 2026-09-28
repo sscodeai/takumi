@@ -35,3 +35,21 @@
 2. 要件・設計との不一致を優先指摘する
 3. セキュリティ上の問題は Critical として即時報告
 4. 指摘には具体的な修正提案を必ず付ける
+
+## Required verdict marker (machine contract)
+
+The workflow reads the verdict from a structured marker, never from this prose.
+The LAST line of the review MUST be exactly one of:
+
+```text
+REVIEW_VERDICT: pass
+REVIEW_VERDICT: findings
+REVIEW_VERDICT: blocked
+```
+
+- `pass` — no blocking finding; notes are allowed.
+- `findings` — at least one blocking defect the agent must answer.
+- `blocked` — the review could not be completed, or a decision is out of scope.
+
+Emit the marker once. A missing marker, an unknown value, or two conflicting
+markers fails the step closed: the prose is not consulted.

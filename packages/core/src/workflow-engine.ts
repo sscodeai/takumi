@@ -71,6 +71,58 @@ export interface WorkflowRunResult {
 
 const RUNNING = new Set<string>();
 
+/** The verdicts a prose reviewer is allowed to emit. */
+export type ReviewVerdict = 'pass' | 'findings' | 'blocked';
+
+/** Result of reading a `REVIEW_VERDICT` marker out of prose. */
+export interface ParsedReviewVerdict {
+  verdict?: ReviewVerdict;
+  /** Why no verdict could be trusted; present exactly when `verdict` is absent. */
+  error?: string;
+}
+
+const REVIEW_VERDICT_VALUES: readonly ReviewVerdict[] = ['pass', 'findings', 'blocked'];
+
+/**
+ * Read the reviewer's verdict from a STRUCTURED marker, never from its prose.
+ *
+ * The reviewer must emit a line `REVIEW_VERDICT: <value>` (a `=` separator is
+ * accepted; the key and the value are case-insensitive). Matching a word list
+ * against free text was wrong in both directions: a real defect phrased
+ * "脆弱性" or "broken" did not match, so the review passed, while `ng` without
+ * a word boundary matched "all tests passing" and `Critical` matched
+ * "No Critical or High issues found", so a clean review failed.
+ *
+ * Fail closed: a missing marker, an unknown value, or two conflicting markers
+ * all produce `error` and NO verdict. The prose decides nothing.
+ */
+export function parseReviewVerdict(text: string): ParsedReviewVerdict {
+  const seen: ReviewVerdict[] = [];
+  let unknown: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*REVIEW_VERDICT\s*[:=]\s*(\S+)\s*$/i.exec(line);
+    if (!match) continue;
+    const raw = match[1] ?? '';
+    const value = raw.toLowerCase();
+    if ((REVIEW_VERDICT_VALUES as readonly string[]).includes(value)) {
+      seen.push(value as ReviewVerdict);
+    } else if (unknown === undefined) {
+      unknown = raw;
+    }
+  }
+  if (unknown !== undefined) {
+    return { error: `unrecognised REVIEW_VERDICT value "${unknown}" (expected pass, findings or blocked)` };
+  }
+  if (seen.length === 0) {
+    return { error: 'the review verdict marker "REVIEW_VERDICT: <pass|findings|blocked>" was missing' };
+  }
+  const unique = [...new Set(seen)];
+  if (unique.length > 1) {
+    return { error: `ambiguous REVIEW_VERDICT: the review emitted both ${unique.join(' and ')}` };
+  }
+  return { verdict: unique[0] };
+}
+
 /** Extract trace IDs (REQ-xxx, UT-xxx, DESIGN-xxx...) from free text. */
 export function extractTraceIds(text: string): string[] {
   const seen = new Set<string>();
@@ -411,8 +463,9 @@ export async function executeWorkflow(
       // Independent Review step: a quality gate on top of review. Runs in an
       // ISOLATED runtime context (separate cwd → separate Pi session) so the
       // reviewer sees the code cold, untainted by the implementation session.
-      // Its prompt uses the independent_review skill; the review verdict is
-      // persisted as an artifact and the step fails if a critical finding exists.
+      // Its prompt uses the independent_review skill; the verdict is read from
+      // the STRUCTURED REVIEW_VERDICT marker and persisted as an artifact. The
+      // prose decides nothing: a missing or ambiguous marker fails closed.
       if (step.type === 'independent_review') {
         run.stepStatus[stepId] = 'running';
         const fsx2 = await import('node:fs/promises');
@@ -433,7 +486,8 @@ export async function executeWorkflow(
           context: { workflowStep: stepId, workflow: workflow.name, independentReview: true },
         };
         const res2 = await runTaskAndCollect(ctx.runtime, reviewTask);
-        const hasCritical = /Critical|High|重大|must fix|要修正|ng|✗|不合格/i.test(res2.summary);
+        const parsed = parseReviewVerdict(res2.summary);
+        const passed = parsed.verdict === 'pass';
         const kind = step.id.split('_')[0] ?? 'review';
         const artifact = await ctx.artifacts.write({
           taskId: reviewTask.id,
@@ -443,18 +497,25 @@ export async function executeWorkflow(
           contentType: 'text/markdown',
           trace: taskTraceFor(step, vars),
         });
+        const verdictLine =
+          parsed.verdict !== undefined
+            ? `REVIEW_VERDICT: ${parsed.verdict}`
+            : `REVIEW_VERDICT: (none — ${parsed.error ?? 'unparseable'})`;
+        const summary = passed
+          ? `independent review passed (${verdictLine})\n${res2.summary.slice(0, 800)}\nreview artifact: ${artifact.path}`
+          : `independent review FAILED (${verdictLine}): ${parsed.error ?? 'the reviewer reported findings'}\n${res2.summary.slice(0, 1500)}\nreview artifact: ${artifact.path}`;
         stepResults.push({
           stepId,
-          status: hasCritical ? 'failed' : 'completed',
-          summary: hasCritical ? `independent review found critical findings:\n${res2.summary.slice(0, 1500)}` : `independent review passed:\n${res2.summary.slice(0, 800)}`,
+          status: passed ? 'completed' : 'failed',
+          summary,
           artifacts: [artifact.path],
           tests: [],
         });
-        run.stepStatus[stepId] = hasCritical ? 'failed' : 'completed';
-        if (hasCritical) {
+        run.stepStatus[stepId] = passed ? 'completed' : 'failed';
+        if (!passed) {
           run.status = 'failed';
           failedIds.add(stepId);
-          ctx.onEvent?.(stepId, `independent review FAILED (critical findings) — workflow aborted`);
+          ctx.onEvent?.(stepId, `independent review FAILED (${verdictLine}) — workflow aborted`);
         } else {
           ctx.onEvent?.(stepId, `independent review passed`);
         }
