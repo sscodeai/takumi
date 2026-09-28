@@ -8,6 +8,9 @@ import { listExtensions, loadConfig } from '../commands.js';
 import { initProject } from '../init.js';
 import {
   createBoardProvider,
+  gitlabBoardOptions,
+  jiraBoardOptions,
+  notionBoardOptions,
   parseBoardArgs,
   parseStatusMap,
   renderBoard,
@@ -286,4 +289,125 @@ test('fake board: `items` seeds REAL work, and a bad seed fails closed', async (
     () => createBoardProvider(parseBoardArgs(['--provider', 'fake', '--items', '{"id":"X"}'])),
     /must be a JSON array/,
   );
+});
+
+// --- provider options: every documented one is REACHABLE, and a typo is an error -----
+//
+// The defect these pin down was found on a LIVE run: `labelsProperty: Labels` sat in takumi.yaml,
+// the CLI forwarded only `databaseId`/`apiBase`, and the option vanished — eight pages filed with an
+// empty Labels column, no error, nothing in the trail. Two shapes, one class: a key the wiring drops,
+// and a key nobody defines. Both are silent, so both are refused here.
+
+test('provider options: a key the adapter does not read is refused, and the readable ones are listed', async () => {
+  await assert.rejects(
+    () => createBoardProvider({ providerId: 'notion', providerOptions: { databaseId: 'abc', labellProperty: 'Labels' }, json: false }),
+    (e: unknown) => {
+      assert.ok(e instanceof Error);
+      // A near-miss key must name the key AND what the adapter actually reads.
+      assert.match(e.message, /unknown option "labellProperty"/);
+      assert.match(e.message, /labelsProperty/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => createBoardProvider({ providerId: 'gitlab', providerOptions: { project: 'a/b', trustedAuthor: 'someone' }, json: false }),
+    /unknown option "trustedAuthor"/,
+  );
+});
+
+test('provider options: a credential in configuration is refused, with the reason', async () => {
+  await assert.rejects(
+    () => createBoardProvider({ providerId: 'gitlab', providerOptions: { project: 'a/b', token: 'glpat-secret' }, json: false }),
+    /token comes from the ENVIRONMENT/,
+  );
+  await assert.rejects(
+    () => createBoardProvider({ providerId: 'notion', providerOptions: { databaseId: 'abc', token: 'ntn_secret' }, json: false }),
+    /token comes from the ENVIRONMENT/,
+  );
+});
+
+test('provider options: an option that belongs in code is refused as such', async () => {
+  await assert.rejects(
+    () => createBoardProvider({ providerId: 'notion', providerOptions: { databaseId: 'abc', request: 'x' }, json: false }),
+    /set in code/,
+  );
+});
+
+test('provider options: the documented ones are FORWARDED, not dropped at the factory', async () => {
+  // The assertion is on the option object the adapter receives (the mappers are exported for exactly
+  // this reason): the properties are unobservable from outside a constructed provider, and this is
+  // the seam where they used to disappear.
+  const notion = notionBoardOptions({
+    providerId: 'notion',
+    providerOptions: {
+      databaseId: '3f1a2b3c4d5e6f708192a3b4c5d6e7f8',
+      apiBase: 'https://notion.example/api',
+      titleProperty: 'Title',
+      stateProperty: 'Machine',
+      columnProperty: 'State',
+      labelsProperty: 'Labels',
+      stateMap: '{"ready":"Backlog"}',
+      readContent: 'false',
+    },
+    json: false,
+  });
+  assert.deepEqual(notion, {
+    databaseId: '3f1a2b3c4d5e6f708192a3b4c5d6e7f8',
+    apiBase: 'https://notion.example/api',
+    titleProperty: 'Title',
+    stateProperty: 'Machine',
+    columnProperty: 'State',
+    labelsProperty: 'Labels',
+    stateMap: { ready: 'Backlog' },
+    readContent: false,
+  });
+
+  const gitlab = gitlabBoardOptions({
+    providerId: 'gitlab',
+    providerOptions: { project: 'group/project', labelPrefix: 'tk', trustedAuthors: 'moon, sscodeai' },
+    json: false,
+  });
+  assert.deepEqual(gitlab, {
+    project: 'group/project',
+    labelPrefix: 'tk',
+    trustedAuthors: ['moon', 'sscodeai'],
+  });
+
+  const jira = jiraBoardOptions({
+    providerId: 'jira',
+    providerOptions: { baseUrl: 'https://x.atlassian.net', jql: 'project = ABC', issueType: 'Task', trustedAuthors: 'a@b.c' },
+    json: false,
+  });
+  assert.equal(jira['jql'], 'project = ABC');
+  assert.equal(jira['issueType'], 'Task');
+  assert.deepEqual(jira['trustedAuthors'], ['a@b.c']);
+});
+
+test('provider options: a value that cannot be what it claims is refused, never coerced', async () => {
+  const base = { providerId: 'notion', providerOptions: {}, json: false };
+  // `yes` is what YAML hands over; turning it into `false` would file a projection without the
+  // labels somebody asked for.
+  await assert.rejects(
+    () => createBoardProvider({ ...base, providerOptions: { databaseId: 'abc', readContent: 'yes' } }),
+    /readContent must be true or false/,
+  );
+  await assert.rejects(
+    () => createBoardProvider({ ...base, providerOptions: { databaseId: 'abc', stateMap: 'ready=Backlog' } }),
+    /stateMap must be a JSON object/,
+  );
+  await assert.rejects(
+    () => createBoardProvider({ ...base, providerOptions: { databaseId: 'abc', stateMap: '["ready"]' } }),
+    /stateMap must be a JSON object/,
+  );
+  await assert.rejects(
+    () => createBoardProvider({ providerId: 'redmine', providerOptions: { baseUrl: 'https://r.example', stateFieldId: 'seven' }, json: false }),
+    /stateFieldId must be a number/,
+  );
+});
+
+test('parseBoardArgs: --option carries any documented option, and rejects a non key=value', () => {
+  const parsed = parseBoardArgs(['--provider', 'notion', '--database', 'abc', '--option', 'labelsProperty=Labels', '--option', 'readContent=false']);
+  assert.deepEqual(parsed.providerOptions['labelsProperty'], 'Labels');
+  assert.deepEqual(parsed.providerOptions['readContent'], 'false');
+  assert.throws(() => parseBoardArgs(['--option', 'labelsProperty']), /--option needs key=value/);
 });
