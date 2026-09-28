@@ -99,6 +99,18 @@ export interface ParsedReviewVerdict {
 const REVIEW_VERDICT_VALUES: readonly ReviewVerdict[] = ['pass', 'findings', 'blocked'];
 
 /**
+ * Strip the decoration a markdown-minded reviewer wraps around the VALUE
+ * (`pass.`, `**pass**`, `` `pass` ``, "pass"). Only decoration is removed: the
+ * value still has to be one of the three verdicts, and the strict
+ * one-marker-per-review rule is unchanged.
+ */
+function normaliseVerdictToken(raw: string): string {
+  return raw
+    .replace(/^[*`"'\u201c\u201d\u2018\u2019]+/, '')
+    .replace(/[*`"'\u201c\u201d\u2018\u2019.,;:!?\u3002\uff01\uff1f]+$/, '');
+}
+
+/**
  * Read the reviewer's verdict from a STRUCTURED marker, never from its prose.
  *
  * The reviewer must emit a line `REVIEW_VERDICT: <value>` (a `=` separator is
@@ -117,7 +129,7 @@ export function parseReviewVerdict(text: string): ParsedReviewVerdict {
   for (const line of text.split(/\r?\n/)) {
     const match = /^\s*REVIEW_VERDICT\s*[:=]\s*(\S+)\s*$/i.exec(line);
     if (!match) continue;
-    const raw = match[1] ?? '';
+    const raw = normaliseVerdictToken(match[1] ?? '');
     const value = raw.toLowerCase();
     if ((REVIEW_VERDICT_VALUES as readonly string[]).includes(value)) {
       seen.push(value as ReviewVerdict);
