@@ -35,6 +35,9 @@ export { topoSort, groupByLevel } from './workflow.js';
 export { executeWorkflow, renderPrompt, resolveStepPrompt } from './workflow-engine.js';
 export type { WorkflowExecutionContext, WorkflowRunResult, WorkflowStepResult } from './workflow-engine.js';
 
+export { parseTestReport, judgeGate } from './quality-gate.js';
+export type { TestReport, TestShape } from './quality-gate.js';
+
 export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';

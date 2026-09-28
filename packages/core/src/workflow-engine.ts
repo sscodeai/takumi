@@ -13,6 +13,7 @@ import {
   validateCapabilities,
 } from './index.js';
 import { groupByLevel } from './workflow.js';
+import { judgeGate, parseTestReport } from './quality-gate.js';
 import { randomUUID } from 'node:crypto';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -371,29 +372,27 @@ export async function executeWorkflow(
           const msg = e instanceof Error && 'stdout' in e ? `${(e as { stdout?: string }).stdout ?? ''}${(e as { stderr?: string }).stderr ?? ''}` : e instanceof Error ? e.message : String(e);
           out = msg;
         }
-        // Parse test outcome: fail count / "not ok" markers / explicit failure.
+        // Parse and judge test outcome in a pure, testable module. The parser
+        // recognises TAP, jest/vitest, pytest, Maven and gradle/JUnit shapes;
+        // anything else is `unrecognised` and FAILS CLOSED (there is no
+        // `fails > 0 ? fails : 1` fallback: no known summary = no evidence).
         // A gate with ZERO tests is NOT green (Quality Gate must be enforced:
         // no tests at all = the gate has nothing to vouch for → ABORT).
         const allOut = out.toUpperCase();
-        // TAP format: "# tests N" / "# fail N" / "not ok"
-        const notOk = (out.match(/not ok/g) ?? []).length;
-        const failLine = out.match(/^#\s*fail\s*:?\s*(\d+)/m);
-        const testLine = out.match(/^#\s*tests\s*:?\s*(\d+)/m);
-        // Maven format: "Tests run: 2, Failures: 0, Errors: 1, Skipped: 0"
-        const mvnLine = out.match(/Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)/);
-        let fails: number;
-        let totalTests: number;
-        if (mvnLine) {
-          totalTests = parseInt(mvnLine[1] ?? '0', 10);
-          fails = parseInt(mvnLine[2] ?? '0', 10) + parseInt(mvnLine[3] ?? '0', 10);
-        } else {
-          fails = failLine ? parseInt(failLine[1] ?? '0', 10) : notOk;
-          totalTests = testLine ? parseInt(testLine[1] ?? '0', 10) : (fails > 0 ? fails : 1);
-        }
+        const report = parseTestReport(out);
         // Maven BUILD FAILURE (e.g. compile error before any test runs) is a hard fail.
         const hardFail = /BUILD FAILURE|BUILD FAILED|FATAL/i.test(allOut);
-        const gatePassed = exitOk && !hardFail && fails === 0 && totalTests > 0;
-        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${out.slice(0, 1200)}`;
+        const verdict = judgeGate(report, { exitOk, hardFail });
+        const gatePassed = verdict.passed;
+        const fails = report.shape === 'unrecognised' ? 0 : report.failed;
+        const totalTests = report.shape === 'unrecognised' ? 0 : report.total;
+        // Keep the summary diagnosable: the raw command, the parser verdict and
+        // the output tail, so a human does not reach for `|| true` first.
+        const shapeLine =
+          report.shape === 'unrecognised'
+            ? `shape: unrecognised (no known test summary found in the output)\ncommand: ${cmd}`
+            : `shape: ${report.shape}\ncommand: ${cmd}`;
+        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${shapeLine}\nreason: ${verdict.reason}\n${out.slice(0, 1200)}`;
         if (gatePassed) {
           run.stepStatus[stepId] = 'completed';
           stepResults.push({ stepId, status: 'completed', summary, artifacts: [], tests: [] });
