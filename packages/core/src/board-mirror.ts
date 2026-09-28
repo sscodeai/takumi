@@ -22,16 +22,22 @@
  *    `mirror.failed` with the reason. Silently dropping it would leave a stale board that people
  *    trust; failing the tick for it would let a decorative board block real work. Both are wrong,
  *    so it is loud and non-fatal.
- * 3. **Projections are rebuildable.** `resync()` re-derives every mirror item's state from the
- *    primary, so a mirror that drifted — or was never reachable — can be brought back without
- *    touching the primary. The id map is a cache, not a source of truth: losing it costs API calls,
- *    never correctness.
+ * 3. **Projections are rebuildable.** `resync()` re-derives every mirror item from the primary —
+ *    its state, its text and its labels — so a mirror that drifted, was never reachable, or was
+ *    filed by an older version of this code can be brought back without touching the primary. It
+ *    RE-ASSERTS the create for every item rather than trusting the id map, because the map knows
+ *    only that a copy exists, never that the copy is complete. The map is a cache, not a source of
+ *    truth: losing it costs API calls, never correctness.
  * 4. **Identity is carried by a marker, not by hope.** The mirror item is created with
  *    `<!-- takumi:mirror:<primaryId> -->` in its body and an idempotency key derived from the
  *    primary's item, so the projection can be re-run without creating duplicates.
- * 5. **What is mirrored is what a PERSON reads**: the delivery state and the comments. The state
- *    RECORD is deliberately not mirrored: it is the control-flow surface, and a mirror is for
+ * 5. **What is mirrored is what a PERSON reads**: the delivery state, the text and the comments. The
+ *    state RECORD is deliberately not mirrored: it is the control-flow surface, and a mirror is for
  *    readers — copying it would invite exactly the confusion rule 1 exists to prevent.
+ * 6. **A projection is complete or it is loud.** The item's title, its text and its labels all go
+ *    over together, and a mirror that can hold only some of them is a CONFIGURATION (`labels: false`),
+ *    not a runtime decision made by guessing what someone else's error meant. Forgetting a field
+ *    quietly is how a board becomes a summary of the truth that people nevertheless trust.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -61,6 +67,17 @@ export interface BoardMirror {
   id: string;
   /** The board to project onto. */
   board: TaskBoardProvider;
+  /**
+   * Project the authority's labels onto this mirror. Default **true**.
+   *
+   * WHY this is a choice and not a fallback: labels are part of what an item IS (they are how a
+   * board says "flaky", "p1", "backend"), so dropping them silently is the one thing a projection
+   * may not do. A mirror board that cannot record them REFUSES the create — correctly, fail-closed
+   * — and the projection then fails loudly per item instead of quietly filing rows without them.
+   * An operator whose mirror genuinely has no labels column sets `labels: false` here, once, and
+   * gets the rows; nobody has to guess which failure was about labels.
+   */
+  labels?: boolean;
 }
 
 export interface MirroringBoardOptions {
@@ -97,11 +114,22 @@ export class MirroringBoard implements TaskBoardProvider {
     if (ids.size !== mirrors.length) throw new Error('mirror ids must be unique (they name the projections)');
   }
 
-  /** The boards this one projects onto, for `takumi board --check` to report. */
-  mirrorsList(): Array<{ id: string; canCreateWork: boolean; editableComment: boolean }> {
+  /**
+   * The boards this one projects onto, for `takumi board --check` and the pilot to report.
+   *
+   * `labels` is part of the report because it is part of what a projection CARRIES: an operator
+   * reading a mirror's configuration must be able to see that this one is filed without its
+   * labels, on purpose, rather than wonder why a column is always empty.
+   */
+  mirrorsList(): Array<{ id: string; canCreateWork: boolean; editableComment: boolean; labels: boolean }> {
     return this.mirrors.map((m) => {
       const caps = m.board.capabilities();
-      return { id: m.id, canCreateWork: caps.canCreateWork, editableComment: caps.editableComment };
+      return {
+        id: m.id,
+        canCreateWork: caps.canCreateWork,
+        editableComment: caps.editableComment,
+        labels: m.labels !== false,
+      };
     });
   }
 
@@ -116,7 +144,11 @@ export class MirroringBoard implements TaskBoardProvider {
     const report = this.mirrors.map((mirror) => ({ mirror: mirror.id, projected: 0, failed: 0 }));
     for (const item of items) {
       for (const [index, mirror] of this.mirrors.entries()) {
-        const ok = await this.projectItem(mirror, item.id, item.state, item.title, item.body ?? '');
+        // `reassert`: a resync re-runs the create for EVERY item instead of trusting the id map,
+        // because the map knows only THAT a copy exists — never that the copy is COMPLETE. An
+        // adapter that can complete a page (Notion appends a body it never carried) does exactly
+        // that here, which is what makes "a projection is rebuildable" a fact rather than a hope.
+        const ok = await this.projectItem(mirror, item, { reassert: true });
         if (ok) report[index]!.projected += 1;
         else report[index]!.failed += 1;
       }
@@ -162,7 +194,9 @@ export class MirroringBoard implements TaskBoardProvider {
     const created = await this.primary.createWork(spec);
     const item = created.item;
     for (const mirror of this.mirrors) {
-      await this.projectItem(mirror, item.id, item.state, item.title, item.body ?? '');
+      // The item as the PRIMARY returns it: title, text and labels all travel, and the state it is
+      // already in is the state the copy opens in.
+      await this.projectItem(mirror, item);
     }
     return created;
   }
@@ -195,7 +229,9 @@ export class MirroringBoard implements TaskBoardProvider {
   private async projectState(primaryItemId: string, state: BoardWorkItemState): Promise<void> {
     const item = await this.primary.getWork(primaryItemId);
     for (const mirror of this.mirrors) {
-      await this.projectItem(mirror, primaryItemId, state, item.title, item.body ?? '');
+      // The state is passed explicitly rather than read off `item`: it is the state the caller just
+      // asked for, and reading it back would make the projection depend on a second read agreeing.
+      await this.projectItem(mirror, item, { state });
     }
   }
 
@@ -206,7 +242,7 @@ export class MirroringBoard implements TaskBoardProvider {
       // the copy at `ready` would state something false about work that is already merged.
       const known = this.map[primaryItemId]?.[mirror.id] !== undefined;
       const state = known ? undefined : (await this.primary.getWork(primaryItemId)).state;
-      const mirrorItemId = await this.ensureMirrorItem(mirror, primaryItemId, state);
+      const mirrorItemId = await this.ensureMirrorItem(mirror, primaryItemId, { state });
       if (mirrorItemId === null) continue;
       try {
         await mirror.board.comment(mirrorItemId, body, { runId });
@@ -220,48 +256,60 @@ export class MirroringBoard implements TaskBoardProvider {
   /** Ensure the mirror's copy exists and says `state`. Returns false when the mirror could not take it. */
   private async projectItem(
     mirror: BoardMirror,
-    primaryItemId: string,
-    state: BoardWorkItemState,
-    title: string,
-    body: string,
+    item: BoardWorkItem,
+    opts: { state?: BoardWorkItemState; reassert?: boolean } = {},
   ): Promise<boolean> {
-    const mirrorItemId = await this.ensureMirrorItem(mirror, primaryItemId, state, title, body);
+    const state = opts.state ?? item.state;
+    const mirrorItemId = await this.ensureMirrorItem(
+      mirror,
+      item.id,
+      { state, title: item.title, body: item.body ?? '', labels: item.labels },
+      { reassert: opts.reassert === true },
+    );
     if (mirrorItemId === null) return false;
     try {
       const current = await mirror.board.getWork(mirrorItemId);
       if (current.state !== state) {
-        await mirror.board.transition(mirrorItemId, state, { runId: this.runId, note: `mirror of ${this.primary.metadata().id}/${primaryItemId}` });
+        await mirror.board.transition(mirrorItemId, state, { runId: this.runId, note: `mirror of ${this.primary.metadata().id}/${item.id}` });
       }
-      this.emit('mirror.written', mirror.id, primaryItemId, `state ${state} projected onto ${mirror.id}`);
+      this.emit('mirror.written', mirror.id, item.id, `state ${state} projected onto ${mirror.id}`);
       return true;
     } catch (error) {
       // The mirror's own state table (or its columns) may not accept this state. That is a fact
       // about the mirror to REPORT, not a reason to stop the work the primary already recorded.
-      this.emit('mirror.failed', mirror.id, primaryItemId, `state ${state} not projected onto ${mirror.id}: ${reasonOf(error)}`);
+      this.emit('mirror.failed', mirror.id, item.id, `state ${state} not projected onto ${mirror.id}: ${reasonOf(error)}`);
       return false;
     }
   }
 
   /**
-   * The mirror's id for a primary item, creating the mirror item when it is missing.
+   * The mirror's id for a primary item, creating (or re-asserting) the mirror item.
    *
    * The map is the fast path; creating is the slow path, and it is idempotent because the marker
    * and the idempotency key both derive from the primary item. A mirror that cannot create work is
    * reported (once per attempt) and skipped — never silently absent.
+   *
+   * `reassert` re-runs that create even when the map already knows the id. It costs a query per
+   * item and it is the ONLY way a projection that exists but is incomplete can be completed: what
+   * is missing lives on the mirror's side, and an id in a cache cannot tell anyone about it.
    */
   private async ensureMirrorItem(
     mirror: BoardMirror,
     primaryItemId: string,
-    state: BoardWorkItemState | undefined,
-    title?: string,
-    body?: string,
+    spec: { state?: BoardWorkItemState; title?: string; body?: string; labels?: string[] },
+    opts: { reassert?: boolean } = {},
   ): Promise<string | null> {
     const cached = this.map[primaryItemId]?.[mirror.id];
-    if (cached !== undefined) return cached;
+    if (cached !== undefined && opts.reassert !== true) return cached;
     if (!mirror.board.capabilities().canCreateWork) {
       this.emit('mirror.failed', mirror.id, primaryItemId, `${mirror.id} cannot create work, so it cannot be projected onto`);
       return null;
     }
+    // The labels the authority carries. A mirror board that cannot record them refuses the create
+    // (correctly, fail-closed), so an operator whose mirror has no labels property opts OUT here —
+    // once, in the config — instead of this decorator guessing, from someone else's error string,
+    // that a refused create was about nothing but labels.
+    const labels = mirror.labels === false ? [] : spec.labels ?? [];
     try {
       // The mirror item is created IN the state it is being projected for, not at `ready` and then
       // walked there. The walk does not exist: the state table allows `ready -> claimed` and nothing
@@ -269,15 +317,15 @@ export class MirroringBoard implements TaskBoardProvider {
       // built — which is exactly what a resync of real work does. Found by wiring this decorator to a
       // caller for the first time; every adapter already honoured `spec.state`.
       const created = await mirror.board.createWork({
-        title: title ?? `mirror of ${primaryItemId}`,
-        body: `${body ?? ''}\n\n${mirrorMarker(primaryItemId)}\n`,
+        title: spec.title ?? `mirror of ${primaryItemId}`,
+        body: `${spec.body ?? ''}\n\n${mirrorMarker(primaryItemId)}\n`,
         idempotencyKey: `mirror:${this.primary.metadata().id}:${primaryItemId}`,
-        labels: [],
-        ...(state === undefined ? {} : { state }),
+        labels,
+        ...(spec.state === undefined ? {} : { state: spec.state }),
       });
       const mirrorItemId = created.item.id;
       this.map[primaryItemId] = { ...(this.map[primaryItemId] ?? {}), [mirror.id]: mirrorItemId };
-      this.emit('mirror.written', mirror.id, primaryItemId, `created the mirror item as ${mirrorItemId}`);
+      if (cached === undefined) this.emit('mirror.written', mirror.id, primaryItemId, `created the mirror item as ${mirrorItemId}`);
       return mirrorItemId;
     } catch (error) {
       this.emit('mirror.failed', mirror.id, primaryItemId, `could not create the mirror item: ${reasonOf(error)}`);

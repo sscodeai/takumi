@@ -1009,3 +1009,43 @@ test('runPilotCommand: --resync with no mirrors says so instead of pretending it
     repo.cleanup();
   }
 });
+
+test('runPilotCommand: a mirror reports whether it carries labels, and the config can opt out', async () => {
+  // The point of printing it: a mirror filed without its labels is a CONFIGURATION, and the only
+  // way an operator notices one is if the run says so. (Its sibling defect — an option with a
+  // parser and no reader — is what this assertion exists to catch.)
+  const withLabels = makeRepo();
+  try {
+    const project = mirrorProject(withLabels.root, withLabels.work, [
+      '  boardMirrors:',
+      '    - id: mirror-fake',
+      '      provider: fake',
+      `  eventsFile: ${join(withLabels.root, 'events-a.jsonl')}`,
+    ]);
+    const { code, lines } = await runPilotCli(['--once'], project);
+    assert.equal(code, 0, lines.join('\n'));
+    assert.match(
+      lines.join('\n'),
+      /mirror {3}mirror-fake: canCreateWork=true, editableComment=\w+, labels=true/,
+      'labels are projected by default, and the run says so',
+    );
+  } finally {
+    withLabels.cleanup();
+  }
+
+  const withoutLabels = makeRepo();
+  try {
+    const project = mirrorProject(withoutLabels.root, withoutLabels.work, [
+      '  boardMirrors:',
+      '    - id: mirror-fake',
+      '      provider: fake',
+      '      labels: false',
+      `  eventsFile: ${join(withoutLabels.root, 'events-b.jsonl')}`,
+    ]);
+    const { code, lines } = await runPilotCli(['--once'], project);
+    assert.equal(code, 0, lines.join('\n'));
+    assert.match(lines.join('\n'), /mirror {3}mirror-fake: .*labels=false/);
+  } finally {
+    withoutLabels.cleanup();
+  }
+});

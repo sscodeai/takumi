@@ -286,7 +286,13 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
         providerOptions: spec.options ?? {},
         json: false,
       });
-      mirrors.push({ id: spec.id, board: mirrorBoard });
+      mirrors.push({
+        id: spec.id,
+        board: mirrorBoard,
+        // Passed only when it was set: the default belongs to the decorator, so a config that says
+        // nothing and a config that says `true` cannot drift apart here.
+        ...(spec.labels === undefined ? {} : { labels: spec.labels }),
+      });
     }
     const composite = new MirroringBoard(primary, mirrors, { events: log });
     const idMapPath =
@@ -308,7 +314,10 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
     if (!json) {
       // What is projected WHERE, and what each mirror can represent — the check ADR-017 asks for.
       for (const entry of composite.mirrorsList()) {
-        console.log(`mirror   ${entry.id}: canCreateWork=${entry.canCreateWork}, editableComment=${entry.editableComment}`);
+        console.log(
+          `mirror   ${entry.id}: canCreateWork=${entry.canCreateWork}, editableComment=${entry.editableComment}, ` +
+            `labels=${entry.labels}`,
+        );
       }
     }
     if (resync) {

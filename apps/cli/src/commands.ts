@@ -102,10 +102,18 @@ export interface ProjectConfig {
       id: string;
       /** A board provider id (the same ones `takumi board --provider` accepts). */
       provider: string;
-      /** Provider options, e.g. `{ database: '<notion database id>' }`. */
+      /** Provider options, named as the provider documents them (e.g. `{ databaseId: '<notion id>' }`). */
       options?: Record<string, string>;
       /** Where the id map (a CACHE, rebuildable with `pilot --resync`) is kept. */
       idMapFile?: string;
+      /**
+       * Project the primary's labels onto this mirror. Default true.
+       *
+       * Set FALSE for a mirror whose board has no labels column: such a board refuses a labelled
+       * create (fail-closed, `precondition`), which is loud but leaves the mirror empty until an
+       * operator decides. Saying so here — once — is that decision.
+       */
+      labels?: boolean;
     }>;
     /**
      * WHICH reviewer judges a `rules` delivery (ADR-021). `rules` (the default) is the built-in
