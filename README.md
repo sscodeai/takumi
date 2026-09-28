@@ -187,6 +187,7 @@ takumi/
 | Board mirrors (ADR-017): `pilot.boardMirrors` — one authority, N write-only projections (state, text, labels, comments) onto e.g. a Notion database, with `takumi pilot --resync` to rebuild them; verified against a live Notion database | Done |
 | A page's body as CONTENT (ADR-023): Notion writes `spec.body` as paragraph blocks, reads it back on every read (`readContent`), and repairs an incomplete page append-only, so a rebuild really rebuilds | Done |
 | Report surface (ADR-022): `reporter: reviewdog` — findings posted on the host's review surface, diff-filtered, with a NOT_RUN that is recorded instead of a delivery that fails | Done |
+| Workflow review (ADR-024): a `rule_review` step runs the deterministic rules on the delivery path (a `block` OR a `human` finding stops it), the quality gate fails closed on output it cannot parse, and a reviewer's verdict is a structured `REVIEW_VERDICT:` marker — the prose decides nothing, a missing verdict is not a pass | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -258,6 +259,7 @@ Takumi is currently a Developer Preview.
 - The report surface (ADR-022) is verified with reviewdog's `local` reporter and through the CLI; posting to a LIVE host needs reviewdog's own `-conf` (project + merge-request ids) and a token in the environment, which is not wired yet.
 - The semgrep sidecar (ADR-021) costs ~333MB per host and is a hard dependency for `reviewer: semgrep`: a host without it stops rather than merging unverified. Its baseline discrimination on a repository with PRE-EXISTING findings is not covered by a test yet, its timing is measured only on small repositories, and an agent can still silence it with an inline `# nosemgrep` (the rules that catch a self-written suppression are not written yet).
 - Redmine needs its `statusMap` (CLI: `--status-map "ready=New,pr_open=In Progress"`) and, for the run record, a text custom field (`--state-field`). An issue whose status maps to nothing is REPORTED with the fix, never silently dropped from the board.
+- Workflow review (ADR-024): the deterministic rules now gate a workflow (`rule_review`), but the workflow path does not yet write ADR-018's review digest into a board state record — that binding belongs to the delivery loop, so a workflow delivery that merges through the pilot gets it and one that delivers directly does not. The rules themselves stay path-based heuristics: a missed test file means a missed finding (the same posture as CI), which is why they are the gate and the prose reviewer only reads.
 
 ## Roadmap
 
