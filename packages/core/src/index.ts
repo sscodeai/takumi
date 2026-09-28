@@ -30,8 +30,14 @@ export type {
 } from './extensions.js';
 export { discoverExtensions } from './extensions.js';
 
-export type { WorkflowDefinition, WorkflowRun, WorkflowStep, StepType } from './workflow.js';
-export { topoSort, groupByLevel } from './workflow.js';
+export type { WorkflowDefinition, WorkflowRun, WorkflowStep, StepType, WorkflowManifestIssue } from './workflow.js';
+export {
+  WORKFLOW_STEP_TYPES,
+  isWorkflowStepType,
+  topoSort,
+  groupByLevel,
+  validateWorkflowManifest,
+} from './workflow.js';
 export { executeWorkflow, renderPrompt, resolveStepPrompt, parseReviewVerdict } from './workflow-engine.js';
 export type {
   WorkflowExecutionContext,

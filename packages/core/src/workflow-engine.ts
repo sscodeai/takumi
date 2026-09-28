@@ -14,6 +14,15 @@ import {
 } from './index.js';
 import { groupByLevel } from './workflow.js';
 import { judgeGate, parseTestReport } from './quality-gate.js';
+import { createGitRunner, type GitRunner } from './git-runner.js';
+import { ProviderError } from './provider-error.js';
+import { collectReviewInput, verdictFromFindings } from './review.js';
+import {
+  describeFindings,
+  isTestPath,
+  runReviewRules,
+  type ReviewFinding,
+} from './review-rules.js';
 import { randomUUID } from 'node:crypto';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -33,6 +42,12 @@ export interface WorkflowExecutionContext {
   onApproval?: (req: ApprovalRequest) => Promise<boolean> | boolean;
   /** Optional event observer (progress reporting). */
   onEvent?: (stepId: string, message: string) => void;
+  /**
+   * Git seam for steps that read the real change set (`rule_review`). Absent
+   * means the engine builds the default async runner — the step never spawns
+   * git itself, so a test can inject a runner that refuses.
+   */
+  git?: GitRunner;
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
   /**
@@ -121,6 +136,14 @@ export function parseReviewVerdict(text: string): ParsedReviewVerdict {
     return { error: `ambiguous REVIEW_VERDICT: the review emitted both ${unique.join(' and ')}` };
   }
   return { verdict: unique[0] };
+}
+
+/**
+ * One finding per line, for a step summary and the review artifact. The rules
+ * already know how to render a finding; this only chooses the line shape.
+ */
+function renderFindingsLines(findings: readonly ReviewFinding[]): string {
+  return findings.length === 0 ? '(no findings)' : findings.map((finding) => `- ${describeFindings([finding])}`).join('\n');
 }
 
 /** Extract trace IDs (REQ-xxx, UT-xxx, DESIGN-xxx...) from free text. */
@@ -456,6 +479,147 @@ export async function executeWorkflow(
           stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `quality gate FAILED (${fails} failing) — workflow aborted`);
         }
+        done.add(stepId);
+        continue;
+      }
+
+      // Rule Review step: the DETERMINISTIC reviewer (ADR-013) over the real
+      // change set. It resolves the frozen base and the delivered head to SHAs
+      // through the injected GitRunner (never by spawning git here), collects
+      // the change set, lets the pure rules judge it, and fails closed on a
+      // block finding, on a human decision, and on a review that could not run.
+      if (step.type === 'rule_review') {
+        run.stepStatus[stepId] = 'running';
+        const git = ctx.git ?? createGitRunner();
+        const kind = step.id.split('_')[0] ?? 'review';
+        const baseRef = step.baseRef?.trim() ?? '';
+        const headRef = step.headRef?.trim() || 'HEAD';
+
+        const writeFindingsArtifact = async (verdictLine: string, details: string): Promise<string | null> => {
+          try {
+            const artifact = await ctx.artifacts.write({
+              taskId: `${runId}:${stepId}`,
+              kind,
+              fileName: `${stepId}.md`,
+              content: `# ${stepId} (rule_review)\n\nbase: ${baseRef || '(none)'}  |  head: ${headRef}\n\n${verdictLine}\n\n${details}\n`,
+              contentType: 'text/markdown',
+              trace: taskTraceFor(step, vars),
+            });
+            return artifact.path;
+          } catch (e) {
+            ctx.onEvent?.(stepId, `artifact persist failed: ${e instanceof Error ? e.message : String(e)}`);
+            return null;
+          }
+        };
+
+        const failRuleReview = async (summary: string, findings: readonly ReviewFinding[] = []): Promise<void> => {
+          const artifactPath = await writeFindingsArtifact(`verdict: FAILED`, `${summary}\n\n${renderFindingsLines(findings)}`);
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({
+            stepId,
+            status: 'failed',
+            summary: artifactPath === null ? summary : `${summary}\nrule_review artifact: ${artifactPath}`,
+            artifacts: artifactPath === null ? [] : [artifactPath],
+            tests: [],
+          });
+          ctx.onEvent?.(stepId, `rule review FAILED: ${summary.split('\n')[0]}`);
+        };
+
+        /** Resolve a ref to a commit sha through the git seam; undefined = could not. */
+        const resolveSha = async (ref: string): Promise<string | undefined> => {
+          try {
+            const resolved = await git.run(['rev-parse', '--verify', `${ref}^{commit}`], { cwd: ctx.cwd });
+            if (resolved.exitCode !== 0) return undefined;
+            const sha = resolved.stdout.trim().split('\n')[0]?.trim() ?? '';
+            return /^[0-9a-f]{40}$/i.test(sha) ? sha : undefined;
+          } catch {
+            return undefined;
+          }
+        };
+
+        if (baseRef.length === 0) {
+          await failRuleReview(
+            'rule_review precondition failed: the step has no baseRef to judge (a review with no base is not a review)',
+          );
+          done.add(stepId);
+          continue;
+        }
+        const baseSha = await resolveSha(baseRef);
+        if (baseSha === undefined) {
+          await failRuleReview(
+            `rule_review precondition failed: baseRef "${baseRef}" could not be resolved to a commit in ${ctx.cwd}`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        const headSha = await resolveSha(headRef);
+        if (headSha === undefined) {
+          await failRuleReview(
+            `rule_review precondition failed: headRef "${headRef}" could not be resolved to a commit in ${ctx.cwd}`,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        let findings: ReviewFinding[] = [];
+        try {
+          const input = await collectReviewInput(git, {
+            worktree: ctx.cwd,
+            baseSha,
+            headSha,
+            // Only test files need their CONTENT read; the rules that judge
+            // everything else work from the change list.
+            contentFor: (path) => isTestPath(path, step.rules?.testPathPatterns ?? []),
+          });
+          findings = runReviewRules(input, step.rules);
+        } catch (e) {
+          const message = e instanceof ProviderError ? e.message : e instanceof Error ? e.message : String(e);
+          await failRuleReview(
+            `rule_review precondition failed: the change set ${baseSha.slice(0, 12)}..${headSha.slice(0, 12)} could not be reviewed: ${message}`,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        const notes = findings.filter((finding) => finding.severity === 'note');
+        const outcome = verdictFromFindings(findings, notes);
+        if (outcome.verdict === 'findings') {
+          const blocking = findings.filter((finding) => finding.severity === 'block');
+          await failRuleReview(
+            `rule_review FAILED: blocking findings (${blocking.map((finding) => finding.rule).join(', ')})\n${outcome.note ?? describeFindings(blocking)}`,
+            blocking,
+          );
+          done.add(stepId);
+          continue;
+        }
+        if (outcome.verdict === 'awaiting-human') {
+          const human = findings.filter((finding) => finding.severity === 'human');
+          await failRuleReview(
+            `rule_review FAILED: a human must decide this — a machine may not decide it, and the automation must not continue\n${outcome.note ?? describeFindings(human)}`,
+            human,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        // Clean: no block and no human finding. Notes gate nothing and are
+        // rendered one per line so an observation still reaches the reader.
+        const summary =
+          notes.length === 0
+            ? `rule_review PASSED: no findings in ${baseSha.slice(0, 12)}..${headSha.slice(0, 12)}`
+            : `rule_review PASSED: ${notes.length} note(s) in ${baseSha.slice(0, 12)}..${headSha.slice(0, 12)}\n${renderFindingsLines(notes)}`;
+        const artifactPath = await writeFindingsArtifact('verdict: PASSED', `${summary}\n\n${renderFindingsLines(findings)}`);
+        run.stepStatus[stepId] = 'completed';
+        stepResults.push({
+          stepId,
+          status: 'completed',
+          summary: artifactPath === null ? summary : `${summary}\nrule_review artifact: ${artifactPath}`,
+          artifacts: artifactPath === null ? [] : [artifactPath],
+          tests: [],
+        });
+        ctx.onEvent?.(stepId, `rule review passed (${notes.length} note(s))`);
         done.add(stepId);
         continue;
       }

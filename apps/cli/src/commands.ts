@@ -7,6 +7,7 @@ import {
   discoverExtensions,
   executeWorkflow,
   renderTraceabilityMatrix,
+  validateWorkflowManifest,
   WorkflowDefinition,
   WorkflowStepResult,
 } from '@takumi/core';
@@ -233,6 +234,15 @@ export async function loadWorkflow(cwd: string, config: ProjectConfig, name: str
   const def = (manifest.endsWith('.json') ? JSON.parse(raw) : parse(raw)) as WorkflowDefinition;
   if (!def.name || !def.steps) {
     throw new Error(`invalid workflow manifest at ${manifest}: missing name or steps`);
+  }
+  // The engine dispatches on step type; refusing an unknown one here means a
+  // typo fails at load with the allowed list instead of silently behaving like
+  // an agent step. A rule_review with no baseRef is refused for the same reason:
+  // a review with no base is not a review.
+  const issues = validateWorkflowManifest(def);
+  if (issues.length > 0) {
+    const detail = issues.map((issue) => (issue.stepId === undefined ? issue.message : `${issue.stepId}: ${issue.message}`)).join('; ');
+    throw new Error(`invalid workflow manifest at ${manifest}: ${detail}`);
   }
   return def;
 }
