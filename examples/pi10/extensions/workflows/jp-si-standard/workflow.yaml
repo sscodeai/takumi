@@ -77,10 +77,9 @@ steps:
       独立レビューを実施せよ。対象プロジェクト: {projectDir}。
       実装が詳細設計書・品質基準を満たすか、テストが全てグリーンかを独立の視点で判断し、
       重大な欠陥（Critical/High/セキュリティ）があれば指摘せよ。なければ合格とする。
-      レビューの最終行に、必ず次のいずれか1行だけを出力すること:
-      REVIEW_VERDICT: pass
-      REVIEW_VERDICT: findings
-      REVIEW_VERDICT: blocked
+      レビューの最終行に、次の形式の1行だけを出力すること（値は3つのうち1つだけ）:
+      REVIEW_VERDICT: <pass | findings | blocked>
+      値の一覧をそのまま出力したり、2行以上出力してはならない（相反する判定は不合格として扱われる）。
     dependsOn: [rule_review]
   - id: evidence
     type: agent
