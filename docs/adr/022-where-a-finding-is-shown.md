@@ -63,6 +63,6 @@ answer is the same shape: one authority (the review), N write-only projections f
   the reason the wiring has a test that asserts the EFFECT and not the plumbing.
 - **A model reviewer, a SARIF artifact, a Check run**: all of them are the same seam now. The report
   hook takes findings and a verdict; what a surface does with them is the surface's business.
-- **ADR-017's five wiring steps remain open.** This ADR makes the mirror board MORE useful (a mirror
-  can project review conclusions) without closing that gap, and saying so is the point: two bypasses
-  with one of them unwired is exactly the state that looks finished from a distance.
+- **ADR-017's wiring is CLOSED** (2026-09-25): the mirror is built from `pilot.yaml` config, written
+  on every transition, rebuildable with `pilot --resync`, and verified against a live Notion database.
+  This ADR's own gap is now the only one of the two left: posting findings to a LIVE host.
