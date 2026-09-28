@@ -184,6 +184,7 @@ takumi/
 | Deterministic reviewer (ADR-013): `reviewMode: rules` — test-weakening and protected paths blocked, fail-closed review | Done |
 | Committed-credential rule (ADR-019): a secret in the diff blocks the delivery and asks for ROTATION, not deletion | Done |
 | Sidecar reviewer (ADR-021): `reviewer: semgrep` — a rule set pinned in the repository, a pinnable tool version, findings with file:line, and a refusal (never a clean review) when it cannot run | Done |
+| Board mirrors (ADR-017): `pilot.boardMirrors` — one authority, N write-only projections (e.g. a Notion database for the people looking), with `takumi pilot --resync` to rebuild them | Done |
 | Report surface (ADR-022): `reporter: reviewdog` — findings posted on the host's review surface, diff-filtered, with a NOT_RUN that is recorded instead of a delivery that fails | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
@@ -251,6 +252,7 @@ Takumi is currently a Developer Preview.
 - Every provider ships with offline tests only: no adapter has yet been exercised against a live board or host. Expect to adjust API details (pagination beyond the first page, site-specific status/property names, self-hosted base URLs) on first real use.
 - Claiming is not atomic on any of these boards (`atomicClaim: false` everywhere): two runs sharing one account can both believe they claimed an item, which is why a local slot lock — one runner per item — remains the caller's job.
 - A conflicting base merge is aborted and handed to the review session; takumi never resolves a conflict by rewriting history.
+- Board mirrors (ADR-017) are wired and tested through the CLI against the fake board; the live check against a real Notion database is still pending (it needs an integration token). A mirror projects delivery STATE and COMMENTS only — the state record is deliberately not mirrored, since it is the control-flow surface — and Notion cannot create its own column options, so the seven delivery states must exist in the database before the first projection.
 - The report surface (ADR-022) is verified with reviewdog's `local` reporter and through the CLI; posting to a LIVE host needs reviewdog's own `-conf` (project + merge-request ids) and a token in the environment, which is not wired yet. The mirror-board wiring (ADR-017) remains open for the same reason: a bypass nobody calls looks finished from a distance.
 - The semgrep sidecar (ADR-021) costs ~333MB per host and is a hard dependency for `reviewer: semgrep`: a host without it stops rather than merging unverified. Its baseline discrimination on a repository with PRE-EXISTING findings is not covered by a test yet, its timing is measured only on small repositories, and an agent can still silence it with an inline `# nosemgrep` (the rules that catch a self-written suppression are not written yet).
 - Redmine needs its `statusMap` (CLI: `--status-map "ready=New,pr_open=In Progress"`) and, for the run record, a text custom field (`--state-field`). An issue whose status maps to nothing is REPORTED with the fix, never silently dropped from the board.

@@ -92,6 +92,22 @@ export interface ProjectConfig {
     agent: { command: string; args?: string[]; timeoutSeconds?: number; env?: Record<string, string> };
     policy: { reviewMode: 'checks-only' | 'label' | 'rules'; reviewRules?: { forbidTestWeakening?: boolean; protectedPaths?: string[]; replaceProtectedPaths?: boolean; testPathPatterns?: string[]; testOnlyChange?: 'note' | 'block' | 'ignore' }; approvalLabel?: string; maxReviewRounds?: number; retainWorktreesHours?: number; agentRetries?: number; agentRetryDelaySeconds?: number; blockStaleClaims?: boolean; staleClaimSeconds?: number; checksWaitSeconds?: number; checksPollSeconds?: number; mergeabilityReads?: number; mergeabilityReadSeconds?: number; progressIntervalSeconds?: number; fileIssueOnExhaustedChecks?: boolean; scopeQuery?: string };
     /**
+     * Write-only projections of the primary board (ADR-017): the board OTHER people look at
+     * (a Notion database, a second Redmine project). The primary stays the authority — reading,
+     * claiming and every decision — and a mirror only ever receives state and comments. A mirror
+     * failure is loud (`mirror.failed`) and never fails the work.
+     */
+    boardMirrors?: Array<{
+      /** The name used in events and in the id map, e.g. `notion`. */
+      id: string;
+      /** A board provider id (the same ones `takumi board --provider` accepts). */
+      provider: string;
+      /** Provider options, e.g. `{ database: '<notion database id>' }`. */
+      options?: Record<string, string>;
+      /** Where the id map (a CACHE, rebuildable with `pilot --resync`) is kept. */
+      idMapFile?: string;
+    }>;
+    /**
      * WHICH reviewer judges a `rules` delivery (ADR-021). `rules` (the default) is the built-in
      * deterministic engine; `semgrep` is the pinned sidecar, composed with the built-in rules unless
      * `composeDeterministic: false`. There is deliberately no default that reaches the network.

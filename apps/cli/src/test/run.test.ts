@@ -877,3 +877,135 @@ test('runOnce: a report surface that cannot run is recorded, and the delivery is
     repo.cleanup();
   }
 });
+
+/*
+ * Board mirrors (ADR-017), driven through the COMMAND rather than the class: the decorator had tests
+ * and no caller, which is the "a capability with no reader" smell this project keeps removing. The
+ * mirror here is the fake board, so the wiring — construction, projection, the id map, --resync — is
+ * exercised without a network, and the live check against a real Notion database is a separate run.
+ */
+
+function mirrorProject(root: string, work: string, extra: string[]): string {
+  const project = join(root, 'project');
+  mkdirSync(project);
+  writeFileSync(
+    join(project, 'takumi.yaml'),
+    [
+      'runtime: fake',
+      'registry:',
+      '  skills: .takumi/skills',
+      '  tools: .takumi/tools',
+      '  workflows: .takumi/workflows',
+      '  runtimes: .takumi/runtimes',
+      'artifacts: .takumi/artifacts',
+      'pilot:',
+      `  repo: ${work}`,
+      `  worktreeRoot: ${join(root, 'worktrees')}`,
+      `  slotDir: ${join(root, 'slots')}`,
+      '  baseBranch: main',
+      '  board: fake',
+      '  delivery: fake',
+      '  deliveryOptions:',
+      `    baseSha: ${'a'.repeat(40)}`,
+      `    headSha: ${'b'.repeat(12)}commit000001`,
+      '  agent:',
+      `    command: ${process.execPath}`,
+      "    args: ['-e', 'process.exit(0)']",
+      '  policy:',
+      '    reviewMode: checks-only',
+      ...extra,
+      '',
+    ].join('\n'),
+  );
+  return project;
+}
+
+async function runPilotCli(args: string[], project: string): Promise<{ code: number; lines: string[] }> {
+  const lines: string[] = [];
+  const original = console.log;
+  const originalError = console.error;
+  console.log = (line?: unknown) => lines.push(String(line ?? ''));
+  console.error = (line?: unknown) => lines.push(String(line ?? ''));
+  try {
+    const code = await runPilotCommand(project, args);
+    return { code, lines };
+  } finally {
+    console.log = original;
+    console.error = originalError;
+  }
+}
+
+test('runPilotCommand: a configured mirror is projected onto, and its id map is written', async () => {
+  const repo = makeRepo();
+  try {
+    const eventsFile = join(repo.root, 'events.jsonl');
+    const idMapFile = join(repo.root, 'mirror-ids.json');
+    const project = mirrorProject(repo.root, repo.work, [
+      '  boardMirrors:',
+      '    - id: mirror-fake',
+      '      provider: fake',
+      `      idMapFile: ${idMapFile}`,
+      `  eventsFile: ${eventsFile}`,
+    ]);
+
+    const { code, lines } = await runPilotCli(['--once'], project);
+    assert.equal(code, 0, lines.join('\n'));
+    // What is projected WHERE, and what the mirror can represent: printed, not implied.
+    assert.match(lines.join('\n'), /mirror {3}mirror-fake: canCreateWork=true, editableComment=/);
+
+    const events = readFileSync(eventsFile, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { kind: string; fields?: Record<string, unknown> });
+    const mirrored = events.filter((event) => event.kind === 'mirror.written');
+    assert.ok(mirrored.length >= 1, 'the projection happened, and it is on the trail');
+    assert.equal(mirrored[0]?.fields?.mirror, 'mirror-fake');
+
+    // The id map is a CACHE, and it is on disk: losing it costs API calls, never correctness.
+    const map = JSON.parse(readFileSync(idMapFile, 'utf8')) as Record<string, Record<string, string>>;
+    const mirroredId = map['DEMO-1']?.['mirror-fake'];
+    assert.equal(typeof mirroredId, 'string', `expected a cached mirror id, got ${JSON.stringify(map)}`);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('runPilotCommand: --resync rebuilds every projection and runs NO tick', async () => {
+  const repo = makeRepo();
+  try {
+    const eventsFile = join(repo.root, 'events.jsonl');
+    const idMapFile = join(repo.root, 'mirror-ids.json');
+    const project = mirrorProject(repo.root, repo.work, [
+      '  boardMirrors:',
+      '    - id: mirror-fake',
+      '      provider: fake',
+      `      idMapFile: ${idMapFile}`,
+      `  eventsFile: ${eventsFile}`,
+    ]);
+
+    const { code, lines } = await runPilotCli(['--resync'], project);
+    const output = lines.join('\n');
+    assert.equal(code, 0, output);
+    // The fake board stands two items up: both are re-derived from the primary.
+    assert.match(output, /resync {3}mirror-fake: projected 2, failed 0/);
+    assert.equal(/delivered DEMO/.test(output), false, 'a resync is not a tick');
+    // The rebuild is visible on the trail, and the cache now exists for the next tick.
+    const events = readFileSync(eventsFile, 'utf8').trim().split('\n');
+    assert.ok(events.some((line) => line.includes('mirror.written')), 'the rebuild is on the trail');
+    assert.equal(existsSync(idMapFile), true);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('runPilotCommand: --resync with no mirrors says so instead of pretending it rebuilt something', async () => {
+  const repo = makeRepo();
+  try {
+    const project = mirrorProject(repo.root, repo.work, []);
+    const { code, lines } = await runPilotCli(['--resync'], project);
+    assert.equal(code, 1);
+    assert.match(lines.join('\n'), /needs `boardMirrors`/);
+  } finally {
+    repo.cleanup();
+  }
+});

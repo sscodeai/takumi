@@ -716,7 +716,9 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
           'pr_open',
           pr === undefined
             ? `branch ${delivered.push.branch} pushed for review${round === 0 ? '' : ` (round ${round + 1})`}`
-            : `PR #${pr.number} ready for review${round === 0 ? '' : ` (round ${round + 1})`}`,
+            // The URL is in the note on purpose: this is the comment a PROJECTION carries (ADR-017),
+              // and "PR #7" without a link is a reference a reader cannot follow.
+            : `PR #${pr.number} ready for review${round === 0 ? '' : ` (round ${round + 1})`}: ${pr.url}`,
         );
       }
       await writeRecord(round);

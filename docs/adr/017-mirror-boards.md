@@ -1,8 +1,10 @@
 # ADR-017: Mirror Boards — One Authority, N Write-Only Projections
 
 - **Date**: 2026-09-19
-- **Status**: Accepted, **core only** (`MirroringBoard` in `packages/core`; the CLI/config wiring is
-  the next slice and is named at the bottom)
+- **Status**: Accepted and **WIRED** (2026-09-25): `MirroringBoard` in `packages/core`, plus
+  `pilot.boardMirrors` in `takumi.yaml`, `takumi pilot --resync`, and a persisted id map. Verified
+  through the command against the fake board; the live check against a real Notion database is the
+  remaining step (it needs a token).
 - **Related**: ADR-006/007 (the two ports), ADR-008 (the event registry), the "progress write-back
   is a bypass" invariant, and the ledger's "a field nobody reads" class
 
@@ -57,8 +59,16 @@ thing to build.
   projected where and what each mirror can represent (Notion: append-only comments, no state
   creation).
 - A mirror that cannot create work is reported once per attempt and skipped, never silently absent.
-- **Still to wire (named, not hand-waved)**: `pilot.boardMirrors` in the CLI config, building the
-  decorator in `createProviders`, a `takumi board --resync` command, persisting the id map next to
-  the slot dir, and a real check against a real Notion database. Until that lands, this decorator
-  is reachable only from code — which is the "a capability with no reader" smell this project keeps
-  removing, and why it is the very next slice rather than a later one.
+- **WIRED (2026-09-25)**, which is what the line above asked for: `pilot.boardMirrors` in the config,
+  the decorator built where the board is built (through the same provider factory `takumi board`
+  uses), `takumi pilot --resync` (a resync is not a tick, and asking for one with no mirrors says so
+  instead of printing nothing), the id map persisted next to the slot dir (loaded tolerantly, written
+  after the work, and a write failure reported rather than thrown — a cache must not be able to fail a
+  tick that already happened), and what is projected WHERE printed on every tick. The whole wiring is
+  driven through the COMMAND in tests, not the class.
+- **CORRECTION (2026-09-25)**: "projections are rebuildable" was **false** until bug #21. Every mirror
+  item was created at `ready` and then walked to the projected state — but the only edge out of `ready`
+  is `claimed`, so a resync of anything in flight died with `projected 1, failed 1`. The port already
+  carried the answer (`BoardWorkItemSpec.state`, honoured by all six adapters); the mirror never passed
+  it. The double in core's suite hardcoded `state: 'ready'` too, so it agreed with the bug: only a real
+  CALLER could expose it, which is the argument for wiring a capability in the slice that builds it.
