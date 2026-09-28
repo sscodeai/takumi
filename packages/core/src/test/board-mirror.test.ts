@@ -69,7 +69,10 @@ class RecordingBoard implements TaskBoardProvider {
       title: spec.title,
       body: spec.body ?? '',
       url: `recording://${id}`,
-      state: 'ready',
+      // `spec.state ?? 'ready'` — exactly what all six real adapters do. This double used to hardcode
+      // `ready`, which is why it never noticed that the projection created every mirror item as ready
+      // and then asked for an illegal `ready -> merged` transition.
+      state: spec.state ?? 'ready',
       labels: [],
       assignees: [],
       updatedAt: new Date(0).toISOString(),
@@ -189,19 +192,21 @@ test('mirroring: a transition and a comment are projected onto the mirror', asyn
 
 test('mirroring: a FAILING mirror does not fail the delivery, and is not silent', async () => {
   const { primary, mirror } = primaryWithItem();
-  const item = await primary.createWork({ title: 'real work', body: 'b', labels: [] });
-  primary.items.get(item.item.id)!.item = { ...item.item, state: 'claimed' };
-  mirror.failTransition = true; // e.g. the Notion column does not have that option
   const { log, seen } = lines();
   const board = new MirroringBoard(primary, [{ id: 'notion', board: mirror }], { events: log, runId: 'r1' });
+  // The mirror's copy exists BEFORE the state change, so this exercises a real TRANSITION on the
+  // mirror. (It used to exercise the create path with a `ready` copy, because the copy was always
+  // created at `ready` and then walked — a walk that is not legal, which resync finally exposed.)
+  const item = await board.createWork({ title: 'real work', body: 'b', labels: [] });
+  mirror.failTransition = true; // e.g. the Notion column does not have that option
 
   // The primary's transition MUST succeed: a decorative board may not block or delay real work.
   await board.transition(item.item.id, 'pr_open', { runId: 'r1' });
   assert.equal(primary.items.get(item.item.id)!.item.state, 'pr_open');
-  // And the failure is reported with its reason.
+  // And the failure is reported, naming the mirror and the state it could not take.
   const failure = seen.find((l) => l.kind === 'mirror.failed');
   assert.ok(failure !== undefined, `a projection failure must be loud: ${seen.map((l) => l.kind).join(',')}`);
-  assert.match(String(failure?.message), /columns do not have it/);
+  assert.match(String(failure?.message), /state pr_open not projected onto notion/);
 });
 
 test('mirroring: a mirror that cannot create work is reported, never silently absent', async () => {
@@ -253,4 +258,41 @@ test('mirroring: the id map is a cache, and its persistence round-trips', async 
 test('mirroring: a composite without a mirror is refused (it would just be the primary)', () => {
   const { primary } = primaryWithItem();
   assert.throws(() => new MirroringBoard(primary, [], {}), /at least one mirror/);
+});
+
+test('mirror: a projection OPENS in the state it is projected for (no illegal walk exists)', async () => {
+  const primary = new RecordingBoard(caps({ canCreateWork: true, comments: true }));
+  primary.items.set('P-1', {
+    item: { id: 'P-1', title: 'in flight', body: '', url: 'primary://P-1', state: 'pr_open', labels: [], assignees: [], updatedAt: '2026-09-17T00:00:00.000Z' },
+    body: '',
+  });
+  const mirror = new RecordingBoard(caps({ canCreateWork: true, comments: true }));
+  const { log } = lines();
+  const board = new MirroringBoard(primary, [{ id: 'mirror-a', board: mirror }], { events: log });
+
+  // A resync is the case that has no history to replay: the mirror starts EMPTY and must reach the
+  // item's CURRENT state. `ready -> pr_open` is not a legal transition, so the only honest way there
+  // is to create the copy in `pr_open` — which every adapter already supports via `spec.state`.
+  const report = await board.resync();
+  assert.deepEqual(report, [{ mirror: 'mirror-a', projected: 1, failed: 0 }]);
+  const projected = [...mirror.items.values()][0]?.item;
+  assert.equal(projected?.state, 'pr_open', 'the projection is in the state the item is actually in');
+  assert.equal(log.of('mirror.failed').length, 0);
+});
+
+test('mirror: an item that comments reached FIRST is created in its real state, not at ready', async () => {
+  const primary = new RecordingBoard(caps({ canCreateWork: true, comments: true }));
+  primary.items.set('P-2', {
+    item: { id: 'P-2', title: 'already merged', body: '', url: 'primary://P-2', state: 'merged', labels: [], assignees: [], updatedAt: '2026-09-17T00:00:00.000Z' },
+    body: '',
+  });
+  const mirror = new RecordingBoard(caps({ canCreateWork: true, comments: true }));
+  const board = new MirroringBoard(primary, [{ id: 'mirror-a', board: mirror }], { events: lines().log });
+
+  // A comment can be the first thing a mirror hears about an item (the mirror was configured while
+  // work was in flight). Reading the state from the authority is what keeps the copy from claiming
+  // `ready` about work that is already merged.
+  await board.comment('P-2', 'delivered and merged: https://example.invalid/pr/2', { runId: 'r0000001' });
+  assert.equal([...mirror.items.values()][0]?.item.state, 'merged');
+  assert.equal(mirror.comments.length, 1, 'and the comment still lands');
 });

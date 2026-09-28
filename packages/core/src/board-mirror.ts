@@ -201,7 +201,12 @@ export class MirroringBoard implements TaskBoardProvider {
 
   private async projectComment(primaryItemId: string, body: string, runId: string): Promise<void> {
     for (const mirror of this.mirrors) {
-      const mirrorItemId = await this.ensureMirrorItem(mirror, primaryItemId);
+      // A comment can be the FIRST thing a mirror hears about an item (a mirror configured while work
+      // was already in flight), so the state is READ from the authority rather than assumed: creating
+      // the copy at `ready` would state something false about work that is already merged.
+      const known = this.map[primaryItemId]?.[mirror.id] !== undefined;
+      const state = known ? undefined : (await this.primary.getWork(primaryItemId)).state;
+      const mirrorItemId = await this.ensureMirrorItem(mirror, primaryItemId, state);
       if (mirrorItemId === null) continue;
       try {
         await mirror.board.comment(mirrorItemId, body, { runId });
@@ -220,7 +225,7 @@ export class MirroringBoard implements TaskBoardProvider {
     title: string,
     body: string,
   ): Promise<boolean> {
-    const mirrorItemId = await this.ensureMirrorItem(mirror, primaryItemId, title, body);
+    const mirrorItemId = await this.ensureMirrorItem(mirror, primaryItemId, state, title, body);
     if (mirrorItemId === null) return false;
     try {
       const current = await mirror.board.getWork(mirrorItemId);
@@ -244,7 +249,13 @@ export class MirroringBoard implements TaskBoardProvider {
    * and the idempotency key both derive from the primary item. A mirror that cannot create work is
    * reported (once per attempt) and skipped — never silently absent.
    */
-  private async ensureMirrorItem(mirror: BoardMirror, primaryItemId: string, title?: string, body?: string): Promise<string | null> {
+  private async ensureMirrorItem(
+    mirror: BoardMirror,
+    primaryItemId: string,
+    state: BoardWorkItemState | undefined,
+    title?: string,
+    body?: string,
+  ): Promise<string | null> {
     const cached = this.map[primaryItemId]?.[mirror.id];
     if (cached !== undefined) return cached;
     if (!mirror.board.capabilities().canCreateWork) {
@@ -252,11 +263,17 @@ export class MirroringBoard implements TaskBoardProvider {
       return null;
     }
     try {
+      // The mirror item is created IN the state it is being projected for, not at `ready` and then
+      // walked there. The walk does not exist: the state table allows `ready -> claimed` and nothing
+      // else out of `ready`, so a projection of an in-flight item (pr_open, merged) could never be
+      // built — which is exactly what a resync of real work does. Found by wiring this decorator to a
+      // caller for the first time; every adapter already honoured `spec.state`.
       const created = await mirror.board.createWork({
         title: title ?? `mirror of ${primaryItemId}`,
         body: `${body ?? ''}\n\n${mirrorMarker(primaryItemId)}\n`,
         idempotencyKey: `mirror:${this.primary.metadata().id}:${primaryItemId}`,
         labels: [],
+        ...(state === undefined ? {} : { state }),
       });
       const mirrorItemId = created.item.id;
       this.map[primaryItemId] = { ...(this.map[primaryItemId] ?? {}), [mirror.id]: mirrorItemId };
