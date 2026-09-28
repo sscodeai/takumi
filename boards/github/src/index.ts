@@ -178,7 +178,14 @@ export class GitHubBoardProvider implements TaskBoardProvider {
 
     const seen = new Map<string, BoardWorkItem>();
     for (const label of labelFilter) {
-      const params = new URLSearchParams({ state: 'open', per_page: String(query.limit ?? 100), labels: label });
+      // `merged` items are CLOSED issues, so the axis follows the request exactly as it does on
+      // GitLab: asking for a state the host files under "closed" and getting nothing back is the
+      // board contradicting itself, and it is what hid every finished item from a projection.
+      const params = new URLSearchParams({
+        state: states.includes('merged') ? 'all' : 'open',
+        per_page: String(query.limit ?? 100),
+        labels: label,
+      });
       const issues = await requestBoardJson<GitHubIssue[]>(
         this.request,
         { method: 'GET', url: `${this.apiBase}/repos/${this.repo}/issues?${params.toString()}` },

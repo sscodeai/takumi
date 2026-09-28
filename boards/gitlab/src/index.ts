@@ -382,8 +382,15 @@ export class GitLabBoardProvider implements TaskBoardProvider {
    * unrelated issues. At most `per_page=100` items are visible per call (note 3).
    */
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
+    // The host's own open/closed axis follows the REQUEST: `merged` items are CLOSED here, so a
+    // caller asking for them (a mirror rebuilding itself, an audit) must not be answered with an
+    // empty list. The local state filter below still decides what the caller sees.
+    const wantsTerminal = (query.states ?? []).includes('merged');
     const issues = await this.send<GitLabIssuePayload[]>(
-      { method: 'GET', url: this.issuesUrl('opened', query.labels, textSearchTerm(query.query)) },
+      {
+        method: 'GET',
+        url: this.issuesUrl(wantsTerminal ? 'all' : 'opened', query.labels, textSearchTerm(query.query)),
+      },
       'listIssues',
     );
     const items = asArray(issues).map((issue) => this.toWorkItem(issue));
