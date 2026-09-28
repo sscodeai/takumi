@@ -15,7 +15,14 @@ import type {
   BoardStateRecord,
   BoardWorkItemState,
 } from '@takumi/core';
-import { NotionBoardProvider, createNotionTransport, normalizeDatabaseId, plainText } from '../index.js';
+import {
+  NotionBoardProvider,
+  blocksToText,
+  bodyBlocks,
+  createNotionTransport,
+  normalizeDatabaseId,
+  plainText,
+} from '../index.js';
 
 /**
  * A tiny in-memory Notion: no network, no token. It answers exactly the
@@ -24,11 +31,20 @@ import { NotionBoardProvider, createNotionTransport, normalizeDatabaseId, plainT
  * (properties typed as `select` + `rich_text`, pages with `last_edited_time`).
  */
 
+interface SimBlock {
+  object: 'block';
+  id: string;
+  type: string;
+  paragraph?: { rich_text: Array<{ plain_text: string }> };
+}
+
 interface SimPage {
   id: string;
   url: string;
   last_edited_time: string;
   properties: Record<string, unknown>;
+  /** The page's CONTENT, in the read shape the blocks API answers with. */
+  blocks: SimBlock[];
 }
 
 const DB_ID = '3f1a2b3c4d5e6f708192a3b4c5d6e7f8';
@@ -59,6 +75,9 @@ function makePage(id: string, columnName: string, extra: Record<string, unknown>
       Status: select(columnName),
       ...extra,
     },
+    // A page a test hands in starts with NO content, which is what a real page filed by an
+    // adapter that did not carry bodies looks like — so a read of it reads as empty.
+    blocks: [],
   };
 }
 
@@ -85,7 +104,13 @@ function databasePayload(columnOptions: string[], columnType: 'select' | 'status
 
 const ALL_STATES: BoardWorkItemState[] = ['ready', 'claimed', 'pr_open', 'fix_needed', 'merged', 'blocked'];
 
-function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean; columnOptions?: string[] } = {}) {
+function notionSimulator(
+  pages: SimPage[],
+  // `refuseContent` is MUTABLE on purpose: a test can refuse a content write, watch the
+  // adapter report it, then let the next call through and watch the repair happen — which is
+  // the whole point of the append-only repair rule.
+  opts: { statusColumnType?: boolean; columnOptions?: string[]; refuseContent?: 'create' | 'append' } = {},
+) {
   const requests: BoardHttpRequest[] = [];
   const columnOptions = opts.columnOptions ?? ALL_STATES;
   const comments: Array<{ id: string; block_id: string; text: string; author: string }> = [];
@@ -135,6 +160,12 @@ function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean; c
       const written = (body['properties'] ?? {}) as Record<string, unknown>;
       const properties: Record<string, unknown> = {};
       for (const [name, value] of Object.entries(written)) properties[name] = toNotionReadShape(value);
+      const children = (body['children'] ?? []) as unknown[];
+      // A page is filed with its content in ONE request, so the same two limits apply —
+      // and the simulator enforces them exactly as Notion does, so an adapter that tried to
+      // send 101 blocks or a 3000-char run would be refused here, not in production.
+      const refusal = opts.refuseContent === 'create' ? 'the host refused this content' : childrenRefusal(children);
+      if (refusal !== null) return { status: 400, body: JSON.stringify({ object: 'error', code: 'validation_error', message: refusal }) };
       pageSeq += 1;
       clock += 1000;
       const page: SimPage = {
@@ -142,6 +173,10 @@ function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean; c
         url: `https://www.notion.so/page-new-${pageSeq}`,
         last_edited_time: new Date(clock).toISOString(),
         properties,
+        blocks: children.flatMap((child, index) => {
+          const read = toBlockReadShape(child, `page-new-${pageSeq}-block-${index + 1}`);
+          return read === null ? [] : [read];
+        }),
       };
       pages.push(page);
       return json(page);
@@ -180,6 +215,39 @@ function notionSimulator(pages: SimPage[], opts: { statusColumnType?: boolean; c
         object: 'list',
         results: comments.map((c) => ({ id: c.id, created_by: { id: c.author }, rich_text: [{ plain_text: c.text }] })),
       });
+    }
+    // The CONTENT of a page: a body is not a property, so it is its own endpoint — one page
+    // of at most 100 blocks per call, with `has_more`/`next_cursor` for the rest, exactly as
+    // Notion paginates. A write is refused for the same reasons Notion refuses one.
+    const [bare, search] = path.split('?');
+    if (bare !== undefined && bare.startsWith('/blocks/') && bare.endsWith('/children')) {
+      const pageId = bare.slice('/blocks/'.length, -'/children'.length);
+      const page = pages.find((p) => p.id === pageId);
+      if (page === undefined) return { status: 404, body: '{"object":"error","code":"object_not_found"}' };
+      if (req.method === 'GET') {
+        const query = new URLSearchParams(search ?? '');
+        const size = Math.min(Number(query.get('page_size') ?? '') || 100, 100);
+        const from = Number(query.get('start_cursor') ?? '') || 0;
+        const slice = page.blocks.slice(from, from + size);
+        const more = from + size < page.blocks.length;
+        return json({
+          object: 'list',
+          results: slice,
+          has_more: more,
+          next_cursor: more ? String(from + size) : null,
+        });
+      }
+      if (req.method === 'PATCH') {
+        const refusal = opts.refuseContent === 'append' ? 'the host refused this content' : childrenRefusal((body['children'] ?? []) as unknown[]);
+        if (refusal !== null) {
+          return { status: 400, body: JSON.stringify({ object: 'error', code: 'validation_error', message: refusal }) };
+        }
+        for (const [index, child] of ((body['children'] ?? []) as unknown[]).entries()) {
+          const read = toBlockReadShape(child, `${pageId}-block-${page.blocks.length + index + 1}`);
+          if (read !== null) page.blocks.push(read);
+        }
+        return json({ object: 'list', results: page.blocks });
+      }
     }
     return { status: 404, body: '{"object":"error","code":"not_found"}' };
   };
@@ -281,6 +349,49 @@ function toNotionReadShape(value: unknown): unknown {
 
 function json(payload: unknown): BoardHttpResponse {
   return { status: 200, body: JSON.stringify(payload) };
+}
+
+/**
+ * What Notion refuses about a `children` write, or `null` when it accepts it.
+ *
+ * The simulator refuses the SAME two things the real API does — more than 100 blocks in one
+ * request, and a rich_text run over 2000 characters — because those limits are precisely
+ * what the adapter has to chunk around: a simulator that accepted anything would let a
+ * "write the body as one block" implementation pass here and fail on the first long body.
+ */
+function childrenRefusal(children: unknown[]): string | null {
+  if (children.length > 100) return 'number of blocks exceeds the limit of 100';
+  for (const child of children) {
+    const block = child as { type?: string; paragraph?: { rich_text?: Array<{ text?: { content?: string } }> } };
+    if (block.type !== 'paragraph') return 'unsupported block type';
+    for (const run of block.paragraph?.rich_text ?? []) {
+      if ((run.text?.content ?? '').length > 2000) return 'rich_text content exceeds 2000 characters';
+    }
+  }
+  return null;
+}
+
+/** A written block in Notion's READ shape: the same paragraph, runs echoed with `plain_text`. */
+function toBlockReadShape(block: unknown, id: string): SimBlock | null {
+  const written = block as { type?: string; paragraph?: { rich_text?: Array<{ text?: { content?: string } }> } };
+  if (written.type !== 'paragraph') return null;
+  return {
+    object: 'block',
+    id,
+    type: 'paragraph',
+    paragraph: {
+      rich_text: (written.paragraph?.rich_text ?? []).map((run) => ({
+        plain_text: run.text?.content ?? '',
+      })),
+    },
+  };
+}
+
+/** The text a page's CONTENT spells, as a person reading the page would see it. */
+function pageContentText(page: SimPage): string {
+  return page.blocks
+    .flatMap((block) => (block.type === 'paragraph' ? [plainText(block.paragraph?.rich_text)] : []))
+    .join('\n');
 }
 
 function optionsFromFilter(filter: unknown): string[] {
@@ -403,9 +514,19 @@ test('request shapes: listWork queries the database, getWork reads the page', as
   assert.equal(listed[0]?.title, 'Item page-1');
 
   const fetched = await board.getWork('page-2');
-  assert.equal(sim.requests[1]?.method, 'GET');
-  assert.equal(sim.requests[1]?.url, 'https://api.notion.com/v1/pages/page-2');
+  // By URL, not by index: a read now costs a page read AND a content read, and an index
+  // would pin the order of two requests that are both about the same item.
+  const pageRead = sim.requests.find((r) => r.url === 'https://api.notion.com/v1/pages/page-2');
+  assert.equal(pageRead?.method, 'GET');
   assert.equal(fetched.state, 'claimed');
+  // The property read cannot carry a body: Notion answers a body from the blocks endpoint,
+  // and the adapter asks for it. `page-2` has no content, so the body is `''` — because the
+  // page is empty, not because the adapter does not look.
+  assert.ok(
+    sim.requests.some((r) => r.url === 'https://api.notion.com/v1/blocks/page-2/children?page_size=100'),
+    'a read must ask for the page content, or a body could never be told from an empty one',
+  );
+  assert.equal(fetched.body, '');
 });
 
 test('request shapes: listWork sends an `or` filter for several states', async () => {
@@ -424,6 +545,13 @@ test('request shapes: listWork sends an `or` filter for several states', async (
 
 // --- listWork: the free-text scope is a TITLE filter, and nothing wider -----
 
+/** The database QUERY requests the simulator recorded, in order. */
+function queries(sim: ReturnType<typeof notionSimulator>): BoardHttpRequest[] {
+  return sim.requests.filter(
+    (r) => r.method === 'POST' && r.url === `https://api.notion.com/v1/databases/${DB_ID}/query`,
+  );
+}
+
 test('listWork: a text scope is a TITLE filter — a term the page carries elsewhere is not a hit', async () => {
   const epic = makePage('page-epic', 'ready');
   epic.properties['Name'] = title('Epic alpha takuepicalpha: ship the intake');
@@ -433,14 +561,24 @@ test('listWork: a text scope is a TITLE filter — a term the page carries elsew
   // properties), so this page must NOT come back: the declared capability is narrower than
   // "everything", and a caller must be able to rely on WHICH text was searched.
   other.properties['Takumi State'] = rich('notes about takuepicalpha live over here');
-  const sim = notionSimulator([epic, other]);
+  const inContent = makePage('page-content', 'ready');
+  // And the term in the page's CONTENT — the surface this adapter now WRITES and READS.
+  // Reading a body back is not searching it: the query filter has no such condition, and a
+  // scope that matched on content would be a different (and uncomparable) promise.
+  inContent.blocks = [
+    { object: 'block', id: 'page-content-block-1', type: 'paragraph', paragraph: { rich_text: [{ plain_text: 'takuepicalpha is discussed in this page body' }] } },
+  ];
+  const sim = notionSimulator([epic, other, inContent]);
   const board = provider(sim);
 
   // (1) the scope REACHES the query body, ANDed with the column filter in one `and`.
   const hit = await board.listWork({ states: ['ready'], query: 'takuepicalpha' });
-  assert.equal(sim.requests[0]?.method, 'POST');
-  assert.equal(sim.requests[0]?.url, `https://api.notion.com/v1/databases/${DB_ID}/query`);
-  assert.deepEqual(sim.requests[0]?.body, {
+  // The query of the call that just happened, not "request number N": a list also reads
+  // content, so counting requests from zero would pin an order nothing promises.
+  const scopedQuery = queries(sim).at(-1);
+  assert.equal(scopedQuery?.method, 'POST');
+  assert.equal(scopedQuery?.url, `https://api.notion.com/v1/databases/${DB_ID}/query`);
+  assert.deepEqual(scopedQuery?.body, {
     page_size: 100,
     filter: {
       and: [
@@ -450,11 +588,20 @@ test('listWork: a text scope is a TITLE filter — a term the page carries elsew
     },
   });
   assert.deepEqual(hit.map((i) => i.id), ['page-epic'], 'the item whose TITLE carries the term is returned');
+  // ...and the content the scope is NOT searched on is still CARRIED BACK: the page whose body
+  // holds the term reaches a caller with that body, in the same kind of call. Reading a body
+  // and searching a body are different promises, and only the first one is made.
+  const listed = await board.listWork({ states: ['ready'] });
+  assert.equal(
+    listed.find((i) => i.id === 'page-content')?.body,
+    'takuepicalpha is discussed in this page body',
+  );
+  assert.equal(hit.some((i) => i.id === 'page-content'), false, 'a body is read, never matched on');
 
   // (2) a term NOTHING carries returns nothing — and, just as important, the column filter
   // was not quietly dropped either.
   const miss = await board.listWork({ states: ['ready'], query: 'takunothingcarriesthis' });
-  assert.deepEqual(sim.requests[1]?.body, {
+  assert.deepEqual(queries(sim).at(-1)?.body, {
     page_size: 100,
     filter: {
       and: [
@@ -468,7 +615,7 @@ test('listWork: a text scope is a TITLE filter — a term the page carries elsew
   // (3) the column scope survives beside the text scope: an `or` over states stays intact
   // inside the `and`, so scoping by BOTH state and text asks one question, once.
   const both = await board.listWork({ states: ['ready', 'claimed'], query: 'takuepicalpha' });
-  assert.deepEqual(sim.requests[2]?.body, {
+  assert.deepEqual(queries(sim).at(-1)?.body, {
     page_size: 100,
     filter: {
       and: [
@@ -545,7 +692,7 @@ test('createWork: the exact create request, the marker in the machine property, 
   assert.equal(first.item.id, 'page-new-1');
   assert.equal(first.item.title, 'Pipeline red');
   assert.equal(first.item.state, 'ready', 'the column option IS the delivery state, so a filed page starts ready');
-  assert.equal(first.item.body, '', 'a page has no body field, and the adapter returns "" rather than inventing one');
+  assert.equal(first.item.body, '', 'a create with no body files a page with no content, so the body reads as empty');
   assert.equal(await board.readState(first.item.id), null, 'the marker is NOT a record: no run has started yet');
   assert.deepEqual((await board.listWork({ states: ['ready'] })).map((i) => i.id), ['page-new-1']);
 
@@ -555,7 +702,13 @@ test('createWork: the exact create request, the marker in the machine property, 
   assert.equal(second.created, false, 'a repeated key must not report a creation');
   assert.equal(second.item.id, first.item.id, 'the FIRST page comes back');
   assert.equal(creates(sim).length, 1, 'a repeated key must never reach POST /v1/pages again');
-  assert.equal(sim.requests.length, before + 1, 'the retry costs exactly one search query');
+  // The retry is a search plus a content read: the search is what finds the page, and the
+  // read is what lets the page be REPAIRED rather than merely reported (see the body tests).
+  assert.deepEqual(
+    sim.requests.slice(before).map((r) => `${r.method} ${r.url.replace('https://api.notion.com/v1', '')}`),
+    [`POST /databases/${DB_ID}/query`, 'GET /blocks/page-new-1/children?page_size=100'],
+    'the retry costs one search query and one content read, and never a create',
+  );
 });
 
 test('createWork: the key survives a claim and a transition (the record write carries the marker forward)', async () => {
@@ -764,6 +917,7 @@ test('columns: a status-typed column is patched with `status`, not `select`', as
     url: 'https://www.notion.so/page-1',
     last_edited_time: '2026-09-15T00:00:00.000Z',
     properties: { Name: title('Item page-1'), Status: statusProp('ready') },
+    blocks: [],
   };
   const statusSim = notionSimulator([statusPage], { statusColumnType: true });
   const board = provider(statusSim);
@@ -812,5 +966,233 @@ test('fail closed without credentials: no token and no injected transport means 
     );
   } finally {
     if (prev !== undefined) process.env['NOTION_TOKEN'] = prev;
+  }
+});
+
+// --- a body is page CONTENT: written as paragraphs, read back whole -----------------
+//
+// A Notion page has no body FIELD. The port's `body` therefore travels as CONTENT, and the
+// pair below is the whole contract of that: what is written is what a person sees on the
+// page, and what a caller reads back is the same text — not a summary of it, not a
+// truncated one.
+
+/** A paragraph block in the read shape a content read answers with. */
+function paragraph(text: string): SimBlock {
+  return {
+    object: 'block',
+    id: `block-${text.length}-${text.slice(0, 3)}`,
+    type: 'paragraph',
+    paragraph: { rich_text: [{ plain_text: text }] },
+  };
+}
+
+/** The page a simulator filed for an id (the read-back path a test asserts against). */
+function pageOf(sim: ReturnType<typeof notionSimulator>, id: string): SimPage {
+  const page = sim.pages.find((p) => p.id === id);
+  assert.ok(page !== undefined, `the simulator has no page ${id}`);
+  return page;
+}
+
+/** The `children` of a recorded content write. */
+function childrenOf(request: BoardHttpRequest | undefined): Array<{ type?: string; paragraph?: { rich_text?: Array<{ text?: { content?: string } }> } }> {
+  return ((request?.body as { children?: unknown[] } | undefined)?.children ?? []) as Array<{
+    type?: string;
+    paragraph?: { rich_text?: Array<{ text?: { content?: string } }> };
+  }>;
+}
+
+test('a body is page CONTENT: written as one paragraph per line, read back byte for byte', async () => {
+  const sim = notionSimulator([]);
+  const board = provider(sim);
+  // One body that exercises everything the round trip must survive: blank lines, a trailing
+  // newline, a line PAST Notion's 2000-character rich_text ceiling (which must become
+  // several runs of the SAME paragraph, or the line would be split into two paragraphs and
+  // the read-back would grow a newline), and non-ASCII text.
+  const long = 'x'.repeat(2500);
+  const body = `first line\n\nthird line with 日本語 and an emoji 🚀\n${long}\nlast\n`;
+
+  const filed = await board.createWork({ title: 'Carried', body, idempotencyKey: 'k:body' });
+
+  const create = creates(sim)[0];
+  const children = childrenOf(create);
+  // Six lines: the blank one, and the empty line a TRAILING newline implies. The count is
+  // the line count of the body — that is what makes the read-back exact.
+  assert.equal(body.split('\n').length, 6);
+  assert.equal(children.length, 6, 'one block per line, the blank and the trailing gap included');
+  assert.deepEqual(children.map((b) => b.type), Array(6).fill('paragraph'));
+  assert.equal(children[1]?.paragraph?.rich_text?.length, 0, 'a blank line is a paragraph with no runs');
+  assert.equal(
+    children[3]?.paragraph?.rich_text?.length,
+    2,
+    'a line past the ceiling is 2 runs of ONE paragraph, never two paragraphs',
+  );
+  assert.equal(children[3]?.paragraph?.rich_text?.[0]?.text?.content?.length, 2000);
+  assert.equal(children[3]?.paragraph?.rich_text?.[1]?.text?.content?.length, 500);
+  assert.equal(children[5]?.paragraph?.rich_text?.length, 0, 'the trailing newline is an empty paragraph, not a lost one');
+
+  // What a person reading the page sees, and what the caller gets back: the same text.
+  assert.equal(pageContentText(pageOf(sim, filed.item.id)), body);
+  assert.equal(filed.item.body, body);
+  assert.equal((await board.getWork(filed.item.id)).body, body);
+});
+
+test('a body longer than one request: 100 blocks ride the create, the rest are appended, nothing is lost', async () => {
+  const sim = notionSimulator([]);
+  const board = provider(sim);
+  const lines = Array.from({ length: 250 }, (_, i) => `line ${i + 1}`);
+  const body = lines.join('\n');
+
+  const filed = await board.createWork({ title: 'Long', body, idempotencyKey: 'k:long' });
+
+  // The simulator refuses >100 blocks in one request exactly as Notion does, so this test
+  // fails loudly if the adapter ever posts the whole body in one call.
+  assert.equal(childrenOf(creates(sim)[0]).length, 100, 'the create carries what the host accepts');
+  const appends = sim.requests.filter((r) => r.method === 'PATCH' && r.url.endsWith(`/blocks/${filed.item.id}/children`));
+  assert.deepEqual(
+    appends.map((r) => childrenOf(r).length),
+    [100, 50],
+    'the rest is appended in batches, in order',
+  );
+  assert.equal(pageContentText(pageOf(sim, filed.item.id)), body);
+  assert.equal(filed.item.body, body);
+});
+
+test('readContent: false — the body is still WRITTEN; only the read is switched off, and it says so', async () => {
+  const sim = notionSimulator([]);
+  const board = provider(sim, { readContent: false });
+
+  const filed = await board.createWork({ title: 'Written anyway', body: 'a description', idempotencyKey: 'k:off' });
+  assert.equal(pageContentText(pageOf(sim, filed.item.id)), 'a description', 'text is never dropped by a read option');
+  assert.equal(filed.item.body, '', 'and the item is honest: it did not read the content');
+  assert.equal(sim.requests.some((r) => r.url.includes('/blocks/')), false, 'no content request is made at all');
+  const listed = await board.listWork();
+  assert.equal(listed.find((i) => i.id === filed.item.id)?.body, '');
+});
+
+test('reading content: `has_more` is followed, so a body past one page of blocks comes back whole', async () => {
+  const page = makePage('page-big', 'merged');
+  const lines = Array.from({ length: 150 }, (_, i) => `line ${i + 1}`);
+  page.blocks = lines.map(paragraph);
+  const sim = notionSimulator([page]);
+
+  const item = await provider(sim).getWork('page-big');
+
+  assert.equal(item.body, lines.join('\n'));
+  const reads = sim.requests.filter((r) => r.url.includes('/blocks/page-big/children'));
+  assert.equal(reads.length, 2, 'one request per page of 100 blocks');
+  assert.equal(reads[1]?.url.includes('start_cursor=100'), true, 'the cursor is the host\'s, not an offset this adapter invented');
+});
+
+test('a re-create REPAIRS a body, and never rewrites content it did not write', async () => {
+  // (a) the page exists with NO content: a projection filed before this adapter carried
+  // bodies. The same create key is how a tick (and `pilot --resync`) asks for it, so the
+  // repair has to happen HERE — rebuilding the page instead would lose its comments.
+  const empty = makePage('page-old', 'merged');
+  empty.properties['Takumi State'] = rich(`<!-- takumi:created=k:old -->`);
+  const sim = notionSimulator([empty]);
+  const adopted = await provider(sim).createWork({
+    title: 'Item page-old',
+    body: 'line one\nline two',
+    idempotencyKey: 'k:old',
+  });
+  assert.equal(adopted.created, false, 'the page exists: nothing is filed a second time');
+  assert.equal(adopted.item.id, 'page-old');
+  assert.equal(pageContentText(empty), 'line one\nline two', 'the missing body is appended to the page');
+  assert.equal(adopted.item.body, 'line one\nline two', 'and the item returned states the page as it now is');
+  assert.equal(creates(sim).length, 0, 'a repair appends; it never creates a page');
+
+  // (b) an interrupted append: the page carries a PREFIX of the spec's text, so only the
+  // missing lines are added — never a second copy of the ones already there.
+  const partial = makePage('page-partial', 'merged');
+  partial.properties['Takumi State'] = rich('<!-- takumi:created=k:part -->');
+  partial.blocks = [paragraph('one'), paragraph('two')];
+  const sim2 = notionSimulator([partial]);
+  await provider(sim2).createWork({ title: 'Item page-partial', body: 'one\ntwo\nthree', idempotencyKey: 'k:part' });
+  assert.equal(pageContentText(partial), 'one\ntwo\nthree');
+  const repairs = sim2.requests.filter((r) => r.method === 'PATCH');
+  assert.equal(repairs.length, 1);
+  assert.deepEqual(childrenOf(repairs[0]).map((b) => b.paragraph?.rich_text?.[0]?.text?.content), ['three']);
+
+  // (c) a page a PERSON filled in: its content is not a prefix of the spec's text, so it is
+  // left exactly as it is — and the returned item carries the page's real text, not a
+  // comforting fiction about what this adapter would have written.
+  const human = makePage('page-human', 'merged');
+  human.properties['Takumi State'] = rich('<!-- takumi:created=k:human -->');
+  human.blocks = [paragraph('please do not touch this')];
+  const sim3 = notionSimulator([human]);
+  const untouched = await provider(sim3).createWork({
+    title: 'Item page-human',
+    body: 'something else entirely',
+    idempotencyKey: 'k:human',
+  });
+  assert.equal(pageContentText(human), 'please do not touch this');
+  assert.equal(untouched.item.body, 'please do not touch this');
+  assert.equal(sim3.requests.filter((r) => r.method === 'PATCH').length, 0, 'nothing is written over a human\'s page');
+});
+
+test('a content write the host refuses: classified, named, and repairable by the same key', async () => {
+  // The append is the half that can fail AFTER a page exists, and that is the state a caller
+  // must not have to guess at: "filed" and "complete" are different facts.
+  const scenario: { refuseContent?: 'create' | 'append' } = { refuseContent: 'append' };
+  const lines = Array.from({ length: 120 }, (_, i) => `line ${i + 1}`);
+  const sim = notionSimulator([], scenario);
+  const board = provider(sim);
+
+  await assert.rejects(
+    () => board.createWork({ title: 'Refused append', body: lines.join('\n'), idempotencyKey: 'k:append' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError, String(e));
+      assert.equal(e.kind, 'precondition');
+      assert.match(e.message, /was filed, but its content is incomplete/);
+      assert.match(e.message, /0 of 20 block\(s\) were appended/, 'the count is of the blocks this call was appending');
+      assert.match(e.message, /Re-running the same create key appends the missing lines/);
+      return true;
+    },
+  );
+
+  // The promise that message makes is kept: the next call with the SAME key appends what is
+  // missing, and files nothing twice. (This is also what makes `resync` a real rebuild.)
+  delete scenario.refuseContent;
+  const healed = await board.createWork({ title: 'Refused append', body: lines.join('\n'), idempotencyKey: 'k:append' });
+  assert.equal(healed.created, false);
+  assert.equal(pageContentText(pageOf(sim, healed.item.id)), lines.join('\n'));
+  assert.equal(creates(sim).length, 1, 'the page existed: the repair created nothing');
+});
+
+test('a create whose CONTENT is refused is not reported as a missing column option', async () => {
+  // Notion answers 400 for both, and the operator's next move differs: editing a column
+  // versus reading what the host said about the page. The message has to allow for both.
+  const sim = notionSimulator([], { refuseContent: 'create' });
+  await assert.rejects(
+    () => provider(sim).createWork({ title: 'Refused', body: 'a line', idempotencyKey: 'k:refused' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'precondition');
+      assert.match(e.message, /the host refused this content/, "the host's own message is quoted");
+      assert.match(e.message, /CONTENT the host refused/, 'and the instruction does not send them to a column that is fine');
+      assert.match(e.message, /nothing was filed/);
+      return true;
+    },
+  );
+});
+
+test('bodies round trip through the block helpers for arbitrary text (the invariant)', async () => {
+  const samples = [
+    '',
+    'one line',
+    '\n',
+    'a\n\nb\n',
+    'trailing\n',
+    `${'y'.repeat(2000)}\n${'z'.repeat(2001)}`,
+    'unicode 日本語 emoji 🚀 tab\there',
+  ];
+  for (const body of samples) {
+    assert.equal(
+      blocksToText(bodyBlocks(body)),
+      body,
+      `bodyBlocks/blocksToText must be exact for ${JSON.stringify(body.slice(0, 24))}`,
+    );
+    // ...and the arithmetic behind it: one block per line, and no line split across two.
+    assert.equal(bodyBlocks(body).length, body === '' ? 0 : body.split('\n').length);
   }
 });

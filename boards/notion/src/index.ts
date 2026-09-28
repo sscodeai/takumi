@@ -77,6 +77,52 @@ function richTextRun(content: string): Record<string, unknown> {
 }
 
 /**
+ * One paragraph block, carrying ONE LINE of a body.
+ *
+ * WHY a block per line, and runs inside it: the text a page reads back is the paragraph
+ * text joined by newlines, so one block per line makes that round trip EXACT (an
+ * invariant the tests assert) — while a line longer than Notion's 2000-char rich_text
+ * ceiling still fits, as several runs of the SAME paragraph, which is the only way to
+ * carry it without dropping or reflowing a character.
+ */
+function paragraphBlock(line: string): Record<string, unknown> {
+  if (line.length === 0) {
+    // An empty line is a paragraph with no runs: legal, and it reads back as '' so the
+    // newline that separated it from its neighbours survives the round trip.
+    return { object: 'block', type: 'paragraph', paragraph: { rich_text: [] } };
+  }
+  const runs: Array<Record<string, unknown>> = [];
+  for (let at = 0; at < line.length; at += MAX_RICH_TEXT_LENGTH) {
+    runs.push(richTextRun(line.slice(at, at + MAX_RICH_TEXT_LENGTH)));
+  }
+  return { object: 'block', type: 'paragraph', paragraph: { rich_text: runs } };
+}
+
+/**
+ * A body as page content. `bodyBlocks(b)` spell `b` exactly:
+ * `blocksToText(bodyBlocks(b)) === b`, for every `b`, including one with long lines.
+ */
+export function bodyBlocks(body: string): Array<Record<string, unknown>> {
+  if (body.length === 0) return [];
+  return body.split('\n').map(paragraphBlock);
+}
+
+/**
+ * The text page content spells: every paragraph's text, in order, joined by newline.
+ *
+ * A block of another type (a heading, an image, a to-do a human added in the Notion UI)
+ * carries no text in this join: what this maps to is the port's `body` — the text of the
+ * page — not a rendering of arbitrary content. This adapter writes paragraphs and reads
+ * paragraphs, so a body it wrote comes back whole; a page a person wrote in other block
+ * types reports the paragraphs among them and nothing else.
+ */
+export function blocksToText(blocks: NotionBlock[]): string {
+  return blocks
+    .flatMap((block) => (block.type === 'paragraph' ? [plainText(block.paragraph?.rich_text)] : []))
+    .join('\n');
+}
+
+/**
  * NotionBoardProvider — a Notion DATABASE used as the task board.
  *
  * This adapter exists to keep the abstraction honest. GitHub, GitLab and Jira
@@ -100,20 +146,28 @@ function richTextRun(content: string): Record<string, unknown> {
  *     therefore answers `not-creatable` with the exact UI step — the first
  *     minute of a deployment must produce instructions, not a "no such option"
  *     error, and not a silent concurrent write either.
- *   - a page has no body FIELD: `BoardWorkItem.body` is therefore always `''`, and a
- *     `createWork` spec's `body` cannot be stored (page content is a separate blocks
- *     API this adapter does not speak). A caller that must record detail has to put
- *     it in the title or file on a board that has a body — the adapter says so here
- *     rather than quietly dropping the text.
+ *   - a page has no body FIELD, so a body travels as page CONTENT: `createWork`
+ *     writes `spec.body` onto the page as paragraph blocks (one block per line, at
+ *     most one rich_text run per 2000 characters — Notion's ceiling — appended in
+ *     batches of 100 blocks), and a READ path reads that content back into
+ *     `BoardWorkItem.body`. Nothing is dropped and nothing is truncated; the one
+ *     thing this adapter never does is rewrite content it did not write.
+ *     WHY the read is on by default (`readContent`): the pilot hands an item's body
+ *     to the agent as `TAKUMI_ITEM_BODY`, so a board that stores text it will not
+ *     return hands every agent an empty task — the exact silent degradation this
+ *     port's rules exist to prevent. The cost is one request per page, plus one per
+ *     100 blocks of content, and `listWork` pays it per ROW: that cost is real and
+ *     stated, and `readContent: false` is the documented trade (cheap reads, `body`
+ *     is `''` — never "the body is empty", which only an empty body means).
  *   - a `BoardWorkQuery.query` SEARCHES TITLES ONLY (`canTextSearch: true`): Notion
- *     can filter a title property with `title.contains`, but it exposes NO search over
- *     page BODIES, and this adapter does not read page content at all (previous
- *     bullet). A caller scoping a tick to an epic must therefore carry that epic in
- *     the item's TITLE or the scope will not find it — and the capability's own doc
- *     demands exactly this disclosure: say what is searched when it is narrower than
- *     "everything". The search is not silently widened to compensate, because a scope
- *     that quietly means less than the caller asked for is how a runner works on
- *     items the operator excluded.
+ *     can filter a title property with `title.contains`, and it exposes NO search over
+ *     page CONTENT — reading a page back does not change that, and this adapter does
+ *     not pretend otherwise by sending content text to a query. A caller scoping a
+ *     tick to an epic must therefore carry that epic in the item's TITLE or the scope
+ *     will not find it — and the capability's own doc demands exactly this disclosure:
+ *     say what is searched when it is narrower than "everything". The search is not
+ *     silently widened to compensate, because a scope that quietly means less than the
+ *     caller asked for is how a runner works on items the operator excluded.
  *
  * The run state record keeps the SAME versioned grammar as every other adapter
  * (renderBoardStateRecord / parseBoardStateRecord); only its storage differs —
@@ -155,6 +209,19 @@ export interface NotionBoardOptions {
   labelsProperty?: string;
   /** Column option names, when they differ from the state names. */
   stateMap?: NotionStateMap;
+  /**
+   * Read page CONTENT back into `BoardWorkItem.body`. Default **true**.
+   *
+   * TRUE because `body` is not decoration: the pilot passes it to the agent, and an
+   * item's text silently reading as empty is how an agent gets sent to work on a
+   * description nobody gave it. The price is one request per page (plus one per 100
+   * blocks of content) and `listWork` pays it once per ROW, sequentially, because
+   * Notion rate-limits concurrent reads.
+   *
+   * FALSE is the documented trade, not a silent one: reads cost nothing extra and
+   * every `body` is `''` — which then means "not read", not "no description".
+   */
+  readContent?: boolean;
   /** Injected transport; tests pass a fake, production uses the curl default. */
   request?: BoardRequestFn;
 }
@@ -171,8 +238,13 @@ const DEFAULT_STATE_MAP: Record<BoardWorkItemState, string> = {
 /** Notion's per-run limit for one rich_text value. */
 const MAX_RICH_TEXT_LENGTH = 2000;
 
+/** Notion's ceiling for the `children` of one write, and for one page of a content read. */
+const MAX_BLOCKS_PER_REQUEST = 100;
+
 interface NotionRich {
   plain_text?: string;
+  /** Present on a run this adapter WROTE (a read echoes `plain_text` instead). */
+  text?: { content?: string };
 }
 
 interface NotionProperty {
@@ -182,6 +254,25 @@ interface NotionProperty {
   select?: { name?: string } | null;
   status?: { name?: string } | null;
   multi_select?: Array<{ name?: string }>;
+}
+
+/** The write shape of a `multi_select` value: one place, so a read and a write cannot disagree. */
+function multiSelect(names: string[]): Record<string, unknown> {
+  return { multi_select: names.map((name) => ({ name })) };
+}
+
+/** The labels a page carries in its labels property (`[]` when the board has none). */
+function readLabels(page: NotionPage, property: string | undefined): string[] {
+  if (property === undefined) return [];
+  return (page.properties?.[property]?.multi_select ?? []).flatMap((entry) =>
+    entry.name === undefined ? [] : [entry.name],
+  );
+}
+
+/** One block of a page's content, in the shape both a read and a write use. */
+export interface NotionBlock {
+  type?: string;
+  paragraph?: { rich_text?: NotionRich[] };
 }
 
 interface NotionPage {
@@ -224,6 +315,8 @@ export class NotionBoardProvider implements TaskBoardProvider {
   private readonly labelsProperty: string | undefined;
   private readonly stateMap: Record<BoardWorkItemState, string>;
   private readonly request: BoardRequestFn;
+  /** Read page content into `body` (see the option: on by default, and why). */
+  private readonly readContent: boolean;
   /** Learned from the first page read; `select` is the documented default. */
   private columnType: 'select' | 'status' = 'select';
   /**
@@ -241,6 +334,7 @@ export class NotionBoardProvider implements TaskBoardProvider {
     this.stateProperty = opts.stateProperty ?? 'Takumi State';
     this.columnProperty = opts.columnProperty ?? 'Status';
     this.labelsProperty = opts.labelsProperty;
+    this.readContent = opts.readContent ?? true;
     this.stateMap = { ...DEFAULT_STATE_MAP, ...opts.stateMap };
     const token = opts.token ?? process.env['NOTION_TOKEN'];
     // Fail closed like every other adapter: without a token there is nothing to
@@ -313,7 +407,12 @@ export class NotionBoardProvider implements TaskBoardProvider {
       { method: 'POST', url: `${this.apiBase}/databases/${this.databaseId}/query`, body },
       'listWork',
     );
-    const items = (result.results ?? []).map((page) => this.toWorkItem(page));
+    const items: BoardWorkItem[] = [];
+    // Sequential on purpose: with `readContent` on, each row's body is a separate content
+    // request, and Notion rate-limits a burst of concurrent reads. The cost is stated in the
+    // class doc and switchable off — and a board used only as a projection never pays it,
+    // because a projection is written to, never listed.
+    for (const page of result.results ?? []) items.push(await this.toWorkItem(page));
     if (query.labels === undefined) return items;
     return items.filter((item) => query.labels?.every((label) => item.labels.includes(label)));
   }
@@ -329,13 +428,15 @@ export class NotionBoardProvider implements TaskBoardProvider {
    * property is the requested state's option (the SAME shape `claim`/`transition` write,
    * built from this instance's `columnProperty`/`columnType`/`stateMap` rather than a
    * second copy of the vocabulary), the caller's labels when a labels property exists,
-   * and — with an idempotency key — CORE's create marker in this adapter's own machine
-   * property (see the class doc for why that property and what it costs).
+   * — with an idempotency key — CORE's create marker in this adapter's own machine
+   * property (see the class doc for why that property and what it costs), and
+   * `spec.body` as page CONTENT: one paragraph block per line, the first 100 in this
+   * create and the rest appended. A body is never truncated and never reflowed.
    *
-   * WHAT is NOT written, stated rather than dropped quietly: `spec.body`. A page has no
-   * body field, `BoardWorkItem.body` is always `''` on this board, and page content is a
-   * separate blocks API. A caller that must record detail puts it in the title or files
-   * on a board with a body.
+   * An idempotent hit is not merely reported: the page it found is brought up to the
+   * spec's body first (see {@link adoptExisting}), so a projection filed before this
+   * adapter carried bodies — or one whose appends were cut short — is repaired by the
+   * re-run that was going to happen anyway, instead of staying half-empty forever.
    *
    * Idempotency: Notion has no native idempotency key, so a create with a key QUERIES
    * the database for the marker (`rich_text contains <marker>`) before writing, and
@@ -348,7 +449,9 @@ export class NotionBoardProvider implements TaskBoardProvider {
    * A create the host rejects — Notion answers a column option the database does not have
    * with `400 validation_error` — is re-thrown as the port's classified error with the
    * option name and the UI step in the message: the caller can act on it instead of
-   * reading Notion's own wording.
+   * reading Notion's own wording. A CONTENT write that fails is classified the same way
+   * but says what it is: the page was filed, its content is incomplete, and re-running the
+   * same key appends the missing lines.
    */
   async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
     assertBoardCapability(this, 'canCreateWork');
@@ -369,7 +472,7 @@ export class NotionBoardProvider implements TaskBoardProvider {
 
     if (key !== undefined && marker !== null) {
       const existing = await this.findByCreateKey(key, marker);
-      if (existing !== null) return { item: this.toWorkItem(existing), created: false };
+      if (existing !== null) return { item: await this.adoptExisting(existing, spec), created: false };
     }
 
     await this.learnColumnType();
@@ -381,24 +484,33 @@ export class NotionBoardProvider implements TaskBoardProvider {
       properties[this.stateProperty] = { rich_text: [richTextRun(marker)] };
     }
     if (this.labelsProperty !== undefined && spec.labels !== undefined && spec.labels.length > 0) {
-      properties[this.labelsProperty] = { multi_select: spec.labels.map((name) => ({ name })) };
+      properties[this.labelsProperty] = multiSelect(spec.labels);
     }
+    const blocks = bodyBlocks(spec.body ?? '');
 
+    let created: NotionPage;
     try {
-      const created = await requestBoardJson<NotionPage>(
+      created = await requestBoardJson<NotionPage>(
         this.request,
         {
           method: 'POST',
           url: `${this.apiBase}/pages`,
           // The parent is the DATABASE: this adapter files rows, not sub-pages.
-          body: { parent: { database_id: this.databaseId }, properties },
+          body: {
+            parent: { database_id: this.databaseId },
+            properties,
+            ...(blocks.length === 0 ? {} : { children: blocks.slice(0, MAX_BLOCKS_PER_REQUEST) }),
+          },
         },
         'createWork',
       );
-      return { item: this.toWorkItem(created), created: true };
     } catch (e) {
       throw this.createFailure(e, state);
     }
+    if (blocks.length > MAX_BLOCKS_PER_REQUEST) {
+      await this.appendBlocks(created.id, blocks.slice(MAX_BLOCKS_PER_REQUEST));
+    }
+    return { item: await this.toWorkItem(created), created: true };
   }
 
   async claim(id: string, runId: string): Promise<ClaimResult> {
@@ -610,9 +722,25 @@ export class NotionBoardProvider implements TaskBoardProvider {
     return requestBoardJson<NotionPage>(this.request, { method: 'GET', url: `${this.apiBase}/pages/${id}` }, `getWork ${id}`);
   }
 
-  private async patchPage(id: string, properties: Record<string, unknown>, what: string): Promise<void> {
+  /**
+   * Patch a page's properties.
+   *
+   * Returns the page Notion answers with (it echoes the patched page) so a caller that has just
+   * written something can report the page as it NOW is; `null` when the host did not answer with
+   * JSON, in which case the caller keeps its own view rather than inventing one.
+   */
+  private async patchPage(
+    id: string,
+    properties: Record<string, unknown>,
+    what: string,
+  ): Promise<NotionPage | null> {
     const res = await this.request({ method: 'PATCH', url: `${this.apiBase}/pages/${id}`, body: { properties } });
     if (res.status < 200 || res.status >= 300) throw boardErrorFromResponse(res, `${what} on ${id}`, id);
+    try {
+      return JSON.parse(res.body) as NotionPage;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -686,9 +814,16 @@ export class NotionBoardProvider implements TaskBoardProvider {
     if (e instanceof BoardError && e.kind === 'precondition') {
       return new BoardError(
         'precondition',
-        `${e.message} — nothing was filed: check that the ${this.columnProperty} property of this database has an ` +
-          `option named ${JSON.stringify(this.stateMap[state])} (Notion UI: database settings -> property -> Edit ` +
-          'options), then re-run `takumi board --check`',
+        // TWO causes reach here, and naming only the first would send an operator to edit a
+        // column that is fine: Notion answers 400 both for a column option the database does
+        // not have AND for page content it refuses (a block it does not accept, a body that
+        // broke its limits). The host's own message is quoted above, so the instruction
+        // covers both and starts from what the host actually said.
+        `${e.message} — nothing was filed. Read the host's message above: it is either a ${this.columnProperty} ` +
+          `option this database does not have (Notion UI: database settings -> property -> Edit options, looking for ` +
+          `${JSON.stringify(this.stateMap[state])}) or CONTENT the host refused (a body is written in chunks of ` +
+          `${MAX_BLOCKS_PER_REQUEST} blocks and runs of ${MAX_RICH_TEXT_LENGTH} characters, so a refusal means the ` +
+          'host rejected a block, not that the body was dropped). Re-run `takumi board --check` afterwards',
         { cause: e },
       );
     }
@@ -707,20 +842,128 @@ export class NotionBoardProvider implements TaskBoardProvider {
       : { [this.columnProperty]: { select: { name: this.stateMap[to] } } };
   }
 
-  private toWorkItem(page: NotionPage): BoardWorkItem {
+  /**
+   * A page a create key already filed, brought up to the spec's `body`.
+   *
+   * WHY a re-create repairs rather than only reporting: the same create key is how a
+   * retried tick, and a `pilot --resync`, ask for the item — and a page filed before
+   * this adapter carried bodies (or one whose appends were cut short) would otherwise
+   * stay half-empty for as long as nobody deletes it. Rebuilding it instead is not the
+   * same thing: recreating loses the comments, and any note a person left on the page.
+   *
+   * The rules that keep this from being vandalism: only content that is a strict PREFIX of
+   * the spec's text is completed, only the MISSING lines are APPENDED, and a page whose
+   * content is anything else — a human's own writing, some other tool's — is returned
+   * untouched with its own text as its `body`. Nothing is ever rewritten or removed.
+   */
+  private async adoptExisting(page: NotionPage, spec: BoardWorkItemSpec): Promise<BoardWorkItem> {
+    const text = spec.body ?? '';
+    let content: string | undefined;
+    if (text.length > 0 && this.readContent) {
+      const existing = blocksToText(await this.readBlocks(page.id));
+      content = existing;
+      if (existing !== text && text.startsWith(existing)) {
+        // One block per line, so the lines already written are exactly `existing.split('\n')`.
+        const written = existing.length === 0 ? 0 : existing.split('\n').length;
+        const missing = bodyBlocks(text).slice(written);
+        if (missing.length > 0) {
+          await this.appendBlocks(page.id, missing);
+          content = text;
+        }
+      }
+    }
+    const filled = await this.fillLabels(page, spec.labels ?? []);
+    return await this.toWorkItem(filled ?? page, content);
+  }
+
+  /**
+   * Write the labels a page never got, when the spec carries some.
+   *
+   * WHY a "create" touches properties on a page that already exists: the same key is how a
+   * `pilot --resync` asks for the item, and a page filed before labels were projected carries
+   * none — leaving it that way would make the projection's completeness depend on WHEN it was
+   * built, which is the one thing a rebuild must not depend on.
+   *
+   * The limit is deliberate: only a page with NO labels is filled. A page a person has labelled is
+   * theirs; this adapter appends what is missing and never rewrites what is there.
+   */
+  private async fillLabels(page: NotionPage, labels: string[]): Promise<NotionPage | null> {
+    if (labels.length === 0 || this.labelsProperty === undefined) return null;
+    if (readLabels(page, this.labelsProperty).length > 0) return null;
+    return await this.patchPage(page.id, { [this.labelsProperty]: multiSelect(labels) }, 'adoptLabels');
+  }
+
+  /**
+   * Read a page's content.
+   *
+   * `has_more` is followed (a body can be longer than one page of 100 blocks) and the loop
+   * stops when the host stops advancing its cursor — a host that answers `has_more: true`
+   * with the same cursor forever must not turn a read into a hang.
+   */
+  private async readBlocks(pageId: string): Promise<NotionBlock[]> {
+    const blocks: NotionBlock[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const query = cursor === undefined
+        ? `?page_size=${MAX_BLOCKS_PER_REQUEST}`
+        : `?page_size=${MAX_BLOCKS_PER_REQUEST}&start_cursor=${encodeURIComponent(cursor)}`;
+      const result = await requestBoardJson<{
+        results?: NotionBlock[];
+        has_more?: boolean;
+        next_cursor?: string | null;
+      }>(
+        this.request,
+        { method: 'GET', url: `${this.apiBase}/blocks/${pageId}/children${query}` },
+        `readContent ${pageId}`,
+      );
+      blocks.push(...(result.results ?? []));
+      const next = result.has_more === true ? result.next_cursor ?? undefined : undefined;
+      if (next === undefined || next === cursor) return blocks;
+      cursor = next;
+    }
+  }
+
+  /**
+   * Append blocks to a page, in batches of Notion's per-request ceiling.
+   *
+   * A failure is classified AND explicit about the state it leaves: the page exists with
+   * part of its content, which is not something a caller may discover by reading a body
+   * that looks short. The message names the page, the count, and the way out (re-run the
+   * same create key — the missing lines are appended, never duplicated).
+   */
+  private async appendBlocks(pageId: string, blocks: Array<Record<string, unknown>>): Promise<void> {
+    for (let at = 0; at < blocks.length; at += MAX_BLOCKS_PER_REQUEST) {
+      const batch = blocks.slice(at, at + MAX_BLOCKS_PER_REQUEST);
+      const res = await this.request({
+        method: 'PATCH',
+        url: `${this.apiBase}/blocks/${pageId}/children`,
+        body: { children: batch },
+      });
+      if (res.status < 200 || res.status >= 300) {
+        const classified = boardErrorFromResponse(res, `content write on ${pageId}`, pageId);
+        const kind = classified instanceof BoardError ? classified.kind : 'transport';
+        throw new BoardError(
+          kind,
+          `${this.metadata().id}: page ${pageId} was filed, but its content is incomplete — ${at} of ${blocks.length} ` +
+            `block(s) were appended and the host refused the next batch (${classified.message}). Re-running the same ` +
+            'create key appends the missing lines',
+          { cause: classified },
+        );
+      }
+    }
+  }
+
+  private async toWorkItem(page: NotionPage, content?: string): Promise<BoardWorkItem> {
     const column = page.properties?.[this.columnProperty];
     this.rememberColumnType(column?.type);
     const record = this.readRecord(page);
-    const labels =
-      this.labelsProperty === undefined
-        ? []
-        : (page.properties?.[this.labelsProperty]?.multi_select ?? []).flatMap((entry) =>
-            entry.name === undefined ? [] : [entry.name],
-          );
+    const labels = readLabels(page, this.labelsProperty);
     return {
       id: page.id,
       title: plainText(page.properties?.[this.titleProperty]?.title) || page.id,
-      body: '',
+      // `content` is the caller's already-read text: reading it twice would cost a request
+      // per page and could report a state the caller has just changed.
+      body: content ?? (this.readContent ? blocksToText(await this.readBlocks(page.id)) : ''),
       url: page.url ?? '',
       state: this.readColumn(page),
       labels,
@@ -774,9 +1017,17 @@ export function normalizeDatabaseId(value: string): string {
   return match[1].replace(/-/g, '');
 }
 
-/** Flatten Notion rich text into a plain string. */
+/**
+ * Flatten Notion rich text into a plain string.
+ *
+ * A READ answers a run as `plain_text` (the flattened text) beside the `text` it came from;
+ * a WRITE carries only `text.content`. Both are read here, because the same runs are handed
+ * to this function on the way out of a write and on the way back in from a read — and a
+ * helper that answered `''` for its own write shape would make the body round trip
+ * (`blocksToText(bodyBlocks(b)) === b`) hold only for pages fetched from a live API.
+ */
 export function plainText(rich: NotionRich[] | undefined): string {
-  return (rich ?? []).map((entry) => entry.plain_text ?? '').join('');
+  return (rich ?? []).map((entry) => entry.plain_text ?? entry.text?.content ?? '').join('');
 }
 
 /**
