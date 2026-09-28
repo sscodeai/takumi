@@ -88,7 +88,14 @@ adapter from LYING, and it lets a real capability difference stand where the wor
   labels appended, no duplicates (the count stayed at eight), the page's identity marker in its
   machine property and its text — and the whole thing read back through a raw REST client that never
   asks takumi what it thinks it wrote.
-- **Not done, and named**: content is not edited, only appended (a changed description on the
-  authority does not rewrite a page that already has text); `listWork` still reads one page of items;
-  and Notion's own block-level features (headings, to-dos, images) are read as text only, since
-  paragraphs are what this adapter writes.
+- **Decided (2026-09-25): an appended body is never rewritten, and that is a RULE, not a gap.**
+  Editing a page's content means deleting blocks this adapter did not write — a person's note beside
+  the description, a correction, a checklist — because Notion replaces content by removing and
+  re-adding it. A changed description on the authority therefore does NOT rewrite a page that already
+  has text. What a rebuild guarantees is completeness (nothing the authority carries is missing), not
+  currency of prose. The alternative considered and rejected: takumi-owned and human-owned sections,
+  separated so a rewrite could be safe — more machinery than the projection is worth, and every
+  version of it still needs a rule for a human who edits the takumi section anyway.
+- **Not done, and named**: `listWork` still reads one page of items; and Notion's own block-level
+  features (headings, to-dos, images) are read as text only, since paragraphs are what this adapter
+  writes.
