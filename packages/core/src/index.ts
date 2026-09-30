@@ -39,6 +39,23 @@ export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
+export { carryStateRecordForward } from './board-state-record.js';
+export {
+  REVIEWER_DETERMINISTIC_RULES,
+  policyHash,
+  reviewDigest,
+  rulesetHash,
+  shortDigest,
+  type ReviewInputs,
+} from './review-digest.js';
+export {
+  MirroringBoard,
+  mirrorMarker,
+  readMirrorIdMap,
+  writeMirrorIdMap,
+  type BoardMirror,
+  type MirrorIdMap,
+} from './board-mirror.js';
 
 // The deterministic reviewer (ADR-013): rules over the real change set, pure and testable.
 export type {
@@ -53,9 +70,10 @@ export {
   hasBlockingFinding,
   hasHumanFinding,
   isTestPath,
+  REVIEW_RULESET_ID,
   runReviewRules,
 } from './review-rules.js';
-export { collectReviewInput, createRuleReviewer } from './review.js';
+export { collectReviewInput, createRuleReviewer, verdictFromFindings } from './review.js';
 export type { CollectReviewInputOptions, RuleReviewerOptions } from './review.js';
 export type { Sandbox, SandboxOptions, SandboxResult } from './sandbox.js';
 export { DockerSandbox, NoopSandbox, dockerAvailable } from './sandbox-docker.js';
@@ -187,6 +205,7 @@ export type {
   DeliveryLoopPlan,
   DeliveryLoopResult,
   LoopStep,
+  ReportContext,
   ReviewContext,
   ReviewOutcome,
 } from './delivery-loop.js';

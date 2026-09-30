@@ -13,3 +13,6 @@ eval/results/*.json
 # maven build output
 examples/pi10/target/
 bench/results/*.json
+# Local secrets (a token pasted into a chat is already leaked; it must never reach a commit).
+.env
+.env.local

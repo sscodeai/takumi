@@ -40,6 +40,9 @@ export const EVENT_KINDS = [
   // The agent's turn
   'agent.started',
   'agent.finished',
+  'agent.skipped',
+  'report.posted',
+  'report.failed',
   'agent.failed',
   'agent.retry',
   // Delivery
@@ -61,6 +64,23 @@ export const EVENT_KINDS = [
    * as "this was free".
    */
   'runtime.usage',
+  /**
+   * A projection onto a mirror board succeeded. A mirror is a projection for READERS: what lands
+   * there is a fact about the primary, and the trail says which one was written where.
+   */
+  'mirror.written',
+  /**
+   * A merge was REFUSED because the review on record no longer describes this run: the head, the
+   * base, the policy, the rule set or the reviewer changed since the review. Emitted by name so a
+   * stale approval is a fact on the record instead of a merge nobody can explain afterwards.
+   */
+  'review.stale',
+  /**
+   * A projection FAILED, and the delivery did NOT. Emitted with the mirror's reason, because the
+   * alternative — a board other people trust silently going stale — is the failure mode this whole
+   * design has to avoid. Never fatal: the primary already recorded the fact.
+   */
+  'mirror.failed',
   /**
    * A tick took an item that already had a delivery in flight (same branch, same pull request)
    * instead of starting fresh work on it.

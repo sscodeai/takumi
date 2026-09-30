@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { FakeBoardProvider } from '@takumi/board-fake';
 import { GitDeliveryProvider } from '@takumi/delivery-git';
 import { FakeDeliveryProvider } from '@takumi/delivery-fake';
+import { createEventLog, ProviderError } from '@takumi/core';
 import type {
   CheckSummary,
   DeliveryOutcome,
@@ -498,6 +499,12 @@ test('runOnce: an unfinished delivery is RESUMED, not redone (same branch, no ag
       branch: 'takumi/ITEM-1-deadrun',
     });
 
+    // The worktree the interrupted run left behind, still holding that branch. This is the exact
+    // condition that made a real resume impossible: git refuses to fetch into a branch a worktree
+    // holds, so the resume retried forever against the same worktree (found on the live instance).
+    const leftover = join(repo.root, 'leftover-worktree');
+    git(['worktree', 'add', leftover, 'takumi/ITEM-1-deadrun'], repo.work);
+
     const delivery = new RealHeadDelivery();
     delivery.opened = true; // the pull request is already open: this tick finishes it
 
@@ -514,9 +521,15 @@ test('runOnce: an unfinished delivery is RESUMED, not redone (same branch, no ag
 
     const lines: string[] = [];
     const { tick } = await runOnce({ board, delivery, pilot, out: (line) => lines.push(line) });
+    // The resume finishes the delivery: the review THIS tick performs under the policy in force is
+    // the evidence the merge leans on (ADR-018 binds a digest to the HUMAN gate, not to the machine
+    // review), and the run reuses the branch and the pull request instead of redoing the work.
     assert.equal(tick.outcome, 'delivered', lines.join('\n'));
-    assert.equal(delivery.merged, true, 'a resumed delivery must finish: its work was already reviewed');
+    assert.equal(delivery.merged, true, 'a resumed delivery is finished, not stranded');
     assert.equal((await board.getWork('ITEM-1')).state, 'merged');
+    // The resume REUSED that worktree instead of trying to check the branch out twice.
+    assert.match(git(['worktree', 'list', '--porcelain'], repo.work), /leftover-worktree/);
+    assert.doesNotMatch(lines.join('\n'), /refusing to fetch into branch/);
     // The decisive assertion: NO second branch was pushed for work that was already done.
     const heads = git(['ls-remote', '--heads', 'origin'], repo.work);
     assert.match(heads, /refs\/heads\/takumi\/ITEM-1-deadrun/);
@@ -652,6 +665,214 @@ test('runOnce: an agent run through a RUNTIME reports what it cost, in the trail
     assert.equal(usage.fields?.['model'], 'stub-model');
     assert.match(String(usage.message), /4500 tokens/);
     assert.ok(Number(usage.fields?.['artifacts'] ?? 0) > 0, 'the artifacts the runtime collected are counted');
+  } finally {
+    repo.cleanup();
+  }
+});
+
+/*
+ * The reviewer wiring (ADR-021): `reviewer: semgrep` is a CONFIGURATION that must reach a real
+ * process, and a configuration nothing reads is silence (the ledger's class list). The first two
+ * tests pin the refusals; the third runs the real toolchain, because that is the only thing that can
+ * say whether the wiring works.
+ */
+
+test('runOnce: `reviewer: semgrep` with no rule set is refused, never quietly downgraded', async () => {
+  const repo = makeRepo();
+  try {
+    const board = new FakeBoardProvider({ items: [{ id: 'ITEM-9', state: 'ready', title: 'x', labels: [] }] });
+    const delivery = new FakeDeliveryProvider({ baseSha: 'a'.repeat(40) });
+    await assert.rejects(
+      () =>
+        runOnce({
+          board,
+          delivery,
+          pilot: {
+            repo: repo.work,
+            worktreeRoot: join(repo.root, 'worktrees'),
+            slotDir: join(repo.root, 'slots'),
+            baseBranch: 'main',
+            agent: { command: process.execPath, args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 },
+            reviewer: 'semgrep',
+            policy: { reviewMode: 'rules' },
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.kind, 'precondition');
+        assert.match(error.message, /needs a `semgrep` section/);
+        return true;
+      },
+    );
+    // Nothing was claimed: the tick failed before touching the board.
+    assert.equal((await board.getWork('ITEM-9')).state, 'ready');
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('runOnce: `reviewer: semgrep` with an unreadable rule set fails before any work starts', async () => {
+  const repo = makeRepo();
+  try {
+    const board = new FakeBoardProvider({ items: [{ id: 'ITEM-10', state: 'ready', title: 'x', labels: [] }] });
+    const delivery = new FakeDeliveryProvider({ baseSha: 'a'.repeat(40) });
+    await assert.rejects(
+      () =>
+        runOnce({
+          board,
+          delivery,
+          pilot: {
+            repo: repo.work,
+            worktreeRoot: join(repo.root, 'worktrees'),
+            slotDir: join(repo.root, 'slots'),
+            baseBranch: 'main',
+            agent: { command: process.execPath, args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 },
+            reviewer: 'semgrep',
+            semgrep: { configPath: join(repo.root, 'not-here.yml') },
+            policy: { reviewMode: 'rules' },
+          },
+        }),
+      (error: unknown) => error instanceof ProviderError && error.kind === 'precondition',
+    );
+    assert.equal((await board.getWork('ITEM-10')).state, 'ready');
+  } finally {
+    repo.cleanup();
+  }
+});
+
+const hasSemgrep = spawnSync('semgrep', ['--version'], { stdio: 'pipe' }).status === 0;
+
+test(
+  'runOnce (REAL semgrep): a delivery that commits a credential is blocked by the sidecar reviewer',
+  { skip: !hasSemgrep ? 'semgrep is not installed on this host' : false },
+  async () => {
+    const repo = makeRepo();
+    try {
+      const worktreeRoot = join(repo.root, 'worktrees');
+      const agentScript = join(repo.root, 'leaky-agent.mjs');
+      writeFileSync(
+        agentScript,
+        [
+          'import { execFileSync } from "node:child_process";',
+          'import { writeFileSync } from "node:fs";',
+          'writeFileSync("config.py", `AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\\n`);',
+          'const g = (a) => execFileSync("git", a, { encoding: "utf8" });',
+          'g(["add", "."]);',
+          'g(["-c", "user.name=Agent", "-c", "user.email=agent@example.invalid", "commit", "-m", "feat: add config"]);',
+          '',
+        ].join('\n'),
+      );
+
+      const board = new FakeBoardProvider({ items: [{ id: 'ITEM-11', state: 'ready', title: 'Add config', labels: [] }] });
+      // A REAL delivery: the reviewer reads the change from git, so the shas it is handed have to
+      // be real ones. (With the double, the loop hands the reviewer the double's invented head, and
+      // `git diff <invented> <invented>` fails closed — which is correct, and therefore useless for
+      // testing whether a credential blocks.)
+      const delivery = new GitDeliveryProvider({ repo: repo.work, baseBranch: 'main' });
+
+      const log = createEventLog();
+      const { tick, exitCode } = await runOnce({
+        board,
+        delivery,
+        log,
+        pilot: {
+          repo: repo.work,
+          worktreeRoot,
+          slotDir: join(repo.root, 'slots'),
+          baseBranch: 'main',
+          agent: { command: process.execPath, args: [agentScript], timeoutSeconds: 60 },
+          reviewer: 'semgrep',
+          semgrep: {
+            // The rule set SHIPPED with the reviewer, addressed from this file's own location.
+            configPath: join(import.meta.dirname, '..', '..', '..', '..', 'reviewers', 'semgrep', 'rules', 'takumi.yml'),
+          },
+          // One round: the finding is not something the agent should be asked to "fix" twice.
+          policy: { reviewMode: 'rules', maxReviewRounds: 1 },
+        },
+      });
+
+      assert.equal(tick.outcome, 'blocked', `a committed credential must block (got ${tick.outcome}: ${tick.detail})`);
+      assert.equal(exitCode, 1, 'a human is needed, and the scheduler can tell');
+      assert.match(tick.detail, /review found issues/);
+      // The finding NAMES the rule and the file, and it reaches the trail a person reads: the
+      // detail is what turns "something was found" into "rotate that key".
+      const findings = log.of('review.findings');
+      assert.equal(findings.length, 1, 'one review round, one findings event');
+      assert.match(findings[0]?.message ?? '', /aws-access-key/);
+      assert.match(findings[0]?.message ?? '', /config\.py/);
+      assert.equal((await board.getWork('ITEM-11')).state, 'blocked');
+      // The finding came from the SIDECAR, not from the built-in rules (which would name
+      // `secret/committed`): the rule id keeps the tool's own name, so an audit can tell which
+      // judge produced a finding instead of trusting a summary (bug #19).
+      assert.match(findings[0]?.message ?? '', /semgrep:.*aws-access-key/);
+      // A findings verdict writes no `reviewed` block — the digest is evidence about a review that
+      // can be merged, and this one cannot. Named here so the next reader does not go looking for it.
+      assert.equal((await board.readState('ITEM-11'))?.reviewed, undefined);
+    } finally {
+      repo.cleanup();
+    }
+  },
+);
+
+test('runOnce: a report surface that cannot run is recorded, and the delivery is untouched', async () => {
+  const repo = makeRepo();
+  try {
+    const worktreeRoot = join(repo.root, 'worktrees');
+    // A test file at the base, so the rules have something to compare against.
+    mkdirSync(join(repo.work, 'test'), { recursive: true });
+    writeFileSync(
+      join(repo.work, 'test', 'calc.test.ts'),
+      'test("add", () => {\n  expect(1 + 1).toBe(2);\n  expect(2 + 2).toBe(4);\n});\n',
+    );
+    git(['add', '.'], repo.work);
+    git(['commit', '-m', 'test: cover add'], repo.work);
+
+    const agentScript = join(repo.root, 'weakening-agent.mjs');
+    writeFileSync(
+      agentScript,
+      [
+        'import { execFileSync } from "node:child_process";',
+        'import { writeFileSync } from "node:fs";',
+        '// The agent "fixes" CI by dropping an assertion — the finding the deterministic reviewer exists for.',
+        'writeFileSync("test/calc.test.ts", `test("add", () => {\\n  expect(1 + 1).toBe(2);\\n});\\n`);',
+        'const g = (a) => execFileSync("git", a, { encoding: "utf8" });',
+        'g(["add", "."]);',
+        'g(["-c", "user.name=Agent", "-c", "user.email=agent@example.invalid", "commit", "-m", "test: weaken"]);',
+        '',
+      ].join('\n'),
+    );
+
+    const board = new FakeBoardProvider({ items: [{ id: 'ITEM-12', state: 'ready', title: 'Tidy the tests', labels: [] }] });
+    const delivery = new GitDeliveryProvider({ repo: repo.work, baseBranch: 'main' });
+    const log = createEventLog();
+    const lines: string[] = [];
+    const { tick } = await runOnce({
+      board,
+      delivery,
+      log,
+      out: (line) => lines.push(line),
+      pilot: {
+        repo: repo.work,
+        worktreeRoot,
+        slotDir: join(repo.root, 'slots'),
+        baseBranch: 'main',
+        agent: { command: process.execPath, args: [agentScript], timeoutSeconds: 60 },
+        // Asked for a report surface, on a host that has no reviewdog.
+        reporter: 'reviewdog',
+        reviewdog: { binary: '/nonexistent-reviewdog' },
+        policy: { reviewMode: 'rules', maxReviewRounds: 1 },
+      },
+    });
+
+    // The FINDING still blocks: the reporter's fate never changes what happens to the item.
+    assert.equal(tick.outcome, 'blocked', tick.detail);
+    assert.match(tick.detail, /review found issues/);
+    assert.equal((await board.getWork('ITEM-12')).state, 'blocked');
+    // ...and the fact that nobody saw it is recorded rather than swallowed.
+    const failed = log.of('report.failed');
+    assert.equal(failed.length, 1);
+    assert.match(failed[0]?.message ?? '', /not installed|not on PATH/);
+    assert.equal(log.of('report.posted').length, 0);
   } finally {
     repo.cleanup();
   }

@@ -1,0 +1,58 @@
+# The rule set this reviewer runs, PINNED IN THE REPOSITORY IT JUDGES.
+#
+# WHY HERE AND NOT IN A REGISTRY: `--config auto` (and `p/ci`, `p/secrets`) fetch a rule set over the
+# network at review time and report usage. A merge gate whose rules change without a commit cannot
+# answer "what judged this change?", and the fetch makes every review depend on a third party being
+# up. This file is the answer: it is versioned with the code, its content hash is part of the
+# reviewer's identity, and changing it changes what the review evidence is about.
+#
+# Editing it is a REVIEW DECISION: a new rule can block deliveries that used to merge, and every
+# stored approval digest computed under the old content becomes stale -- which is the intended
+# answer (re-review; do not carry an old judgement onto a new standard).
+rules:
+  - id: takumi.secret.aws-access-key
+    languages: [generic]
+    severity: ERROR
+    message: An AWS access key id is committed. It is leaked the moment it is pushed -- ROTATE it; deleting the line does not un-leak it.
+    pattern-regex: 'AKIA[0-9A-Z]{16}'
+
+  - id: takumi.secret.gitlab-token
+    languages: [generic]
+    severity: ERROR
+    message: A GitLab personal access token is committed. ROTATE it -- a token that reached a branch is a token that left the machine.
+    pattern-regex: 'glpat-[A-Za-z0-9_-]{20,}'
+
+  - id: takumi.secret.github-token
+    languages: [generic]
+    severity: ERROR
+    message: A GitHub token is committed. ROTATE it.
+    pattern-regex: 'gh[pousr]_[A-Za-z0-9]{30,}'
+
+  - id: takumi.secret.private-key-header
+    languages: [generic]
+    severity: ERROR
+    message: A private key is committed. ROTATE the key pair -- the private half cannot be un-published.
+    pattern-regex: '-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----'
+
+  - id: takumi.shell.curl-pipe-shell
+    languages: [generic]
+    severity: WARNING
+    message: Piping a download straight into a shell executes whatever the endpoint returns today. A human should decide this one.
+    pattern-regex: 'curl[^\\n|]*[|][^\\n]*(sh|bash)'
+
+  - id: takumi.python.eval
+    languages: [python]
+    severity: WARNING
+    message: eval() on a value that is not a literal. Prefer a parser; this change is a human's call.
+    patterns:
+      - pattern-not: eval("...")
+      - pattern: eval(...)
+
+  - id: takumi.node.child-process
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Command execution is a trust decision. A human should decide whether the input is trusted.
+    patterns:
+      - pattern-either:
+          - pattern: child_process.exec(...)
+          - pattern: child_process.execSync(...)

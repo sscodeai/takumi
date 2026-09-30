@@ -107,6 +107,23 @@ export async function createTaskWorktree(
     // would redo work that was already reviewed — and the frozen base becomes the MERGE BASE of
     // the two, so the review's diff is exactly what the delivery adds no matter what the base
     // branch has done since.
+    // FIRST, the worktree an interrupted run left behind. It is already ON the branch, and git
+    // refuses to fetch into a branch a worktree holds ("refusing to fetch into branch ... checked
+    // out at ...") — which stranded a real resume, retrying forever against the same worktree.
+    // Resuming means CONTINUING in that worktree, so it is reused; and a dirty one is refused by
+    // name rather than cleaned, because cleaning it would be takumi committing for the agent.
+    const leftover = await worktreeForBranch(git, request.repo, request.resumeBranch);
+    if (leftover !== null) {
+      const dirty = await requireGit(git, ['status', '--porcelain'], leftover, 'precondition');
+      if (dirty.trim().length > 0) {
+        throw new ProviderError(
+          'precondition',
+          `the worktree left by an earlier run of ${request.resumeBranch} has uncommitted changes (${leftover}); a human must decide what happens to them`,
+        );
+      }
+      const remergeBase = await requireGit(git, ['merge-base', request.baseSha, request.resumeBranch], leftover, 'precondition');
+      return { path: leftover, branch: request.resumeBranch, baseSha: remergeBase.trim() };
+    }
     await requireGit(
       git,
       ['fetch', '--force', remote, `${request.resumeBranch}:refs/heads/${request.resumeBranch}`],
@@ -212,6 +229,20 @@ export function readFrozenBase(path: string): string | null {
   if (!existsSync(file)) return null;
   const value = readFileSync(file, 'utf8').trim();
   return value.length === 0 ? null : value;
+}
+
+/** The path of the worktree that has `branch` checked out, or null when none does. */
+async function worktreeForBranch(git: GitRunner, repo: string, branch: string): Promise<string | null> {
+  const listed = await git.run(['worktree', 'list', '--porcelain'], { cwd: repo });
+  if (listed.exitCode !== 0) return null;
+  let current: string | null = null;
+  for (const line of listed.stdout.split('\n')) {
+    if (line.startsWith('worktree ')) current = line.slice('worktree '.length).trim();
+    else if (line.startsWith('branch ') && current !== null && line.slice('branch '.length).trim() === `refs/heads/${branch}`) {
+      return current;
+    }
+  }
+  return null;
 }
 
 async function requireGit(

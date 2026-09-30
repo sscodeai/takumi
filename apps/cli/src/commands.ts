@@ -91,6 +91,32 @@ export interface ProjectConfig {
     deliveryOptions?: Record<string, string>;
     agent: { command: string; args?: string[]; timeoutSeconds?: number; env?: Record<string, string> };
     policy: { reviewMode: 'checks-only' | 'label' | 'rules'; reviewRules?: { forbidTestWeakening?: boolean; protectedPaths?: string[]; replaceProtectedPaths?: boolean; testPathPatterns?: string[]; testOnlyChange?: 'note' | 'block' | 'ignore' }; approvalLabel?: string; maxReviewRounds?: number; retainWorktreesHours?: number; agentRetries?: number; agentRetryDelaySeconds?: number; blockStaleClaims?: boolean; staleClaimSeconds?: number; checksWaitSeconds?: number; checksPollSeconds?: number; mergeabilityReads?: number; mergeabilityReadSeconds?: number; progressIntervalSeconds?: number; fileIssueOnExhaustedChecks?: boolean; scopeQuery?: string };
+    /**
+     * WHICH reviewer judges a `rules` delivery (ADR-021). `rules` (the default) is the built-in
+     * deterministic engine; `semgrep` is the pinned sidecar, composed with the built-in rules unless
+     * `composeDeterministic: false`. There is deliberately no default that reaches the network.
+     */
+    reviewer?: 'rules' | 'semgrep';
+    /** Where the findings are SHOWN (ADR-022): `reviewdog` posts them on the host's review surface. */
+    reporter?: 'reviewdog';
+    reviewdog?: {
+      reporter?: string;
+      filterMode?: 'added' | 'diff_context' | 'file' | 'nofilter';
+      name?: string;
+      binary?: string;
+      timeoutSeconds?: number;
+    };
+    semgrep?: {
+      /** The PINNED rule set. Required for `reviewer: semgrep` — there is no `--config auto` path. */
+      configPath: string;
+      /** The tool version this rule set was written against. A mismatch fails closed. */
+      expectedVersion?: string;
+      binary?: string;
+      composeDeterministic?: boolean;
+      severityMap?: Record<string, 'block' | 'human' | 'note'>;
+      maxFindings?: number;
+      timeoutSeconds?: number;
+    };
     eventsFile?: string;
     /** Counters (JSON), and a Prometheus textfile beside it for whatever scrapes it. */
     metricsFile?: string;

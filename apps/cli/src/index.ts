@@ -223,6 +223,10 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
     baseBranch: p.baseBranch,
     ...(p.remote === undefined ? {} : { remote: p.remote }),
     agent: p.agent,
+    ...(p.reviewer === undefined ? {} : { reviewer: p.reviewer }),
+    ...(p.semgrep === undefined ? {} : { semgrep: p.semgrep }),
+    ...(p.reporter === undefined ? {} : { reporter: p.reporter }),
+    ...(p.reviewdog === undefined ? {} : { reviewdog: p.reviewdog }),
     policy: {
       reviewMode: p.policy.reviewMode,
       // The rules travel with the mode: a `rules` mode whose rules never arrived would

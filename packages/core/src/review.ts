@@ -24,6 +24,7 @@ import {
   describeFindings,
   hasBlockingFinding,
   hasHumanFinding,
+  type ReviewFinding,
   isTestPath,
   runReviewRules,
   type ReviewFileChange,
@@ -83,6 +84,36 @@ function parseNameStatus(
  * otherwise a genuine git failure would be mistaken for "the file was not there", which is
  * the one mistake that would silently weaken every rule that reads content.
  */
+/**
+ * The rules' verdicts, as a delivery outcome. Exported so that anything REASONING about the review
+ * (the gate-fire bench, an audit) reaches the same answer the live reviewer does — a bench that
+ * re-implements the mapping is a bench that can pass while the reviewer is broken.
+ */
+export function verdictFromFindings(
+  findings: readonly ReviewFinding[],
+  notes: readonly ReviewFinding[] = [],
+): ReviewOutcome {
+  if (hasBlockingFinding(findings)) {
+    return {
+      verdict: 'findings',
+      note: describeFindings(findings.filter((f) => f.severity === 'block')),
+      // The findings travel with the verdict so a report surface shows exactly what was decided from
+      // (ADR-022): a reporter that re-derives them is a second source of truth about the review.
+      findings,
+    };
+  }
+  if (hasHumanFinding(findings)) {
+    return {
+      verdict: 'awaiting-human',
+      note: `${describeFindings(findings.filter((finding) => finding.severity === 'human'))} — this delivery waits for a person`,
+      findings,
+    };
+  }
+  return notes.length === 0
+    ? { verdict: 'clean', ...(findings.length === 0 ? {} : { findings }) }
+    : { verdict: 'clean', note: describeFindings(notes), findings };
+}
+
 export async function collectReviewInput(
   git: GitRunner,
   options: CollectReviewInputOptions,
@@ -174,17 +205,7 @@ export function createRuleReviewer(options: RuleReviewerOptions): (ctx: ReviewCo
       contentFor,
     });
     const findings = runReviewRules(input, rules);
-    const blocking = findings.filter((finding) => finding.severity === 'block');
-    if (hasBlockingFinding(findings)) {
-      return { verdict: 'findings', note: describeFindings(blocking) };
-    }
-    if (hasHumanFinding(findings)) {
-      return {
-        verdict: 'awaiting-human',
-        note: `${describeFindings(findings.filter((finding) => finding.severity === 'human'))} — this delivery waits for a person`,
-      };
-    }
     const notes = findings.filter((finding) => finding.severity === 'note');
-    return notes.length === 0 ? { verdict: 'clean' } : { verdict: 'clean', note: describeFindings(notes) };
+    return verdictFromFindings(findings, notes);
   };
 }

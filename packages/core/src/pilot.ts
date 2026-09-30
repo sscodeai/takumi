@@ -27,6 +27,7 @@ import {
   runDeliveryLoop,
   type DeliveryLoopResult,
   type LoopStep,
+  type ReportContext,
   type ReviewContext,
   type ReviewOutcome,
 } from './delivery-loop.js';
@@ -124,6 +125,17 @@ export interface PilotTickDeps {
   agent: (ctx: { item: BoardWorkItem; worktree: string; branch: string; round: number; runId: string }) => Promise<void>;
   /** Optional extra review signal (a second reader, a lint pass). */
   review?: (ctx: ReviewContext & { item: BoardWorkItem }) => Promise<ReviewOutcome>;
+  /**
+   * The identity of the reviewer behind `review`, recorded in the review evidence and bound into
+   * the digest. Supply it whenever the judge is not the built-in deterministic rules engine: a
+   * record that names the wrong reviewer is evidence for something that did not happen.
+   */
+  reviewerId?: string;
+  /**
+   * Optional: where the findings are SHOWN (a pull-request comment). Never a gate — see
+   * `DeliveryLoopHooks.report` — so a broken reporter cannot fail a delivery.
+   */
+  report?: (ctx: ReportContext) => Promise<void>;
   changedFiles?: (ctx: { worktree: string; baseSha: string }) => Promise<string[]>;
   policy: PilotPolicy;
   /** Where the tick's events go. */
@@ -394,11 +406,26 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
       plan: {
         worktree: worktree.path,
         branch: worktree.branch,
+      // Round 0 of a resumed run has no agent work to do; the loop needs to know that, or its
+      // event trail reports an agent run that never happened.
+      ...(resumeBranch === undefined ? {} : { resumed: true }),
+      ...(deps.reviewerId === undefined ? {} : { reviewer: deps.reviewerId }),
+      // The review policy travels WITH the plan (ADR-018): the loop binds its review evidence to
+      // it, so a policy edited after a review makes that evidence stale by construction.
+      reviewMode: policy.reviewMode,
+      ...(policy.approvalLabel === undefined ? {} : { approvalLabel: policy.approvalLabel }),
+      ...(policy.reviewRules === undefined ? {} : { reviewRules: policy.reviewRules }),
         baseBranch: deps.baseBranch,
         ...(deps.remote === undefined ? {} : { remote: deps.remote }),
         itemId: item.id,
         runId,
-        baseSha,
+        // The worktree HANDLE is authoritative about what this run is based on. For fresh work that
+        // equals `resolveBaseSha()`; for a RESUME it is the merge base of the branch and today's
+        // base branch — which is the only value the delivery's descent check can accept, because a
+        // delivery that has been sitting in `pr_open` while the base branch moved on is not "based
+        // on" today's head. Using the freshly resolved base here stranded a real resume on
+        // "HEAD is not descended from the frozen base", for a branch nobody had rewritten.
+        baseSha: worktree.baseSha,
         title: item.title,
         // Passed through explicitly: a policy knob the CLI accepts but the pilot drops is
         // the same silent drop as a config option nothing reads.
@@ -414,6 +441,9 @@ export async function runPilotTick(deps: PilotTickDeps): Promise<PilotTickResult
       },
       hooks: {
         agent: async ({ round }) => runAgent(round),
+        // The report surface (ADR-022) belongs with the other hooks: the loop tells it what a human
+        // should see, and treats its failure as a record rather than a verdict.
+        ...(deps.report === undefined ? {} : { report: deps.report }),
         review: async (ctx) => {
           // The policy decides who is trusted to judge, and its answer comes FIRST:
           // a missing human approval must not be mistaken for "fix something".

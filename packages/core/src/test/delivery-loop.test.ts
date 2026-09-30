@@ -11,10 +11,14 @@ import {
   DeliveryError,
   formatEventLine,
   ProviderError,
+  REVIEWER_DETERMINISTIC_RULES,
   assertTransition,
   runDeliveryLoop,
+  runReviewRules,
+  verdictFromFindings,
 } from '../index.js';
 import type {
+  ReviewOutcome,
   BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentRef,
@@ -125,6 +129,11 @@ class LoopBoard implements TaskBoardProvider {
   async readState(id: string): Promise<BoardStateRecord | null> {
     return this.records.get(id) ?? null;
   }
+  /** Seed what the board already had before the run: a resumed delivery, with its digest. */
+  seedRecord(id: string, record: BoardStateRecord): void {
+    this.records.set(id, record);
+  }
+
   async writeState(id: string, record: BoardStateRecord): Promise<void> {
     this.records.set(id, record);
     this.seen.push(`record:round${record.reviewRound}`);
@@ -170,6 +179,11 @@ class LoopDelivery implements DeliveryProvider {
   pushCount = 0;
   prCount = 0;
   failNextDeliver: ProviderError | undefined;
+  /** Move the branch AFTER the review, as a second push would (the double's `pr` is private). */
+  moveHeadAfterReview(sha: string): void {
+    this.headSha = sha;
+    this.pr.headSha = sha;
+  }
   private readonly pr: PullRequestRef = { number: '1', url: 'https://host.example/pull/1', headSha: COMMIT_1, baseSha: 'main' };
 
   constructor(private readonly base: string) {
@@ -687,13 +701,13 @@ test('runDeliveryLoop: a retriable failure after the claim blocks the item (it w
 
 test('runDeliveryLoop: a transport failure BEFORE the claim leaves the item untouched', async () => {
   const h = harness();
+  // Patch the INSTANCE, never spread it: a spread class has no prototype methods, and the loop
+  // legitimately calls several of them (`readState` reads the prior record before claiming).
+  h.board.claim = async () => {
+    throw new ProviderError('transport', 'the board is unreachable');
+  };
   const result = await runDeliveryLoop({
-    board: {
-      ...h.board,
-      claim: async () => {
-        throw new ProviderError('transport', 'the board is unreachable');
-      },
-    } as unknown as TaskBoardProvider,
+    board: h.board,
     delivery: h.delivery,
     plan,
     hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
@@ -722,9 +736,12 @@ test('runDeliveryLoop: the progress record is throttled while the loop waits', a
   assert.equal(result.outcome, 'merged');
   const writes = h.board.seen.filter((s) => s.startsWith('record:'));
   assert.equal(polls, 5, 'one read that found pending, then four polls until it settled');
+  // Two progress writes — the throttle holds for PROGRESS — plus ONE forced write, the review
+  // digest: progress may be coalesced, the evidence a merge is allowed to trust may not be
+  // (ADR-018). If this count grows again, the question to ask is which of the two is lying.
   assert.equal(
     writes.length,
-    2,
+    3,
     `six checks() calls must not mean six board writes (saw ${writes.length}: ${writes.join(', ')})`,
   );
   assert.match(result.steps.map((s) => s.detail).join('\n'), /throttled \(unchanged/);
@@ -885,4 +902,336 @@ test('runDeliveryLoop: mergeability that stays unknown blocks the item, visibly'
     /move the item back to `ready`/,
     'the blocked item must carry the way back in the trail, not just a refusal',
   );
+});
+
+// --- ADR-018: a review is evidence about ONE set of inputs --------------------------
+
+test('runDeliveryLoop: an approval that no longer matches the run is REFUSED, by name', async () => {
+  const h = harness();
+  // What a previous tick left on the board: a delivery, and a review digest computed under a
+  // DIFFERENT policy — the case being an operator who edited `reviewMode` between the ticks.
+  h.board.seedRecord(plan.itemId, {
+    schema: 1,
+    runId: 'previous-run',
+    item: plan.itemId,
+    reviewRound: 0,
+    updatedAt: '2026-09-15T00:00:00.000Z',
+    deliveryRef: '#7',
+    branch: plan.branch,
+    reviewed: {
+      digest: 'f'.repeat(64),
+      head: 'a'.repeat(40),
+      base: plan.baseSha,
+      policy: '0'.repeat(64),
+      ruleset: '0'.repeat(64),
+      reviewer: 'reviewer:fixture',
+      at: '2026-09-15T00:00:00.000Z',
+    },
+  });
+
+  const seen: string[] = [];
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    // The human gate is what a digest protects: without it, this run's own review is the evidence.
+    plan: { ...plan, reviewMode: 'label', approvalLabel: 'approved' },
+    now: () => Date.parse('2026-09-15T02:00:00.000Z'),
+    sleep: async () => {},
+    events: createEventLog({ sink: { write: (e) => seen.push(e.kind) }, retain: false }),
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'blocked', 'a review that does not describe this run may not merge');
+  assert.match(String(result.error), /different inputs/);
+  assert.ok(seen.includes('review.stale'), `the refusal must be a named fact: ${seen.join(',')}`);
+  assert.equal(h.delivery.merged, false, 'nothing may be merged on a stale review');
+  assert.equal(h.board.items.get(plan.itemId)?.state, 'blocked', 'and the item says so');
+});
+
+test('runDeliveryLoop: a human gate with no record of what was presented is refused', async () => {
+  const h = harness();
+  // Written before digests existed, or by another tool: "unknown" is not "probably fine".
+  h.board.seedRecord(plan.itemId, {
+    schema: 1,
+    runId: 'ancient-run',
+    item: plan.itemId,
+    reviewRound: 0,
+    updatedAt: '2026-09-15T00:00:00.000Z',
+    deliveryRef: '#3',
+    branch: plan.branch,
+  });
+
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan: { ...plan, reviewMode: 'label', approvalLabel: 'approved' },
+    now: () => Date.parse('2026-09-15T02:00:00.000Z'),
+    sleep: async () => {},
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'blocked');
+  assert.match(String(result.error), /no record of what was presented/);
+  assert.equal(h.delivery.merged, false);
+});
+
+// =====================================================================================
+// GATE FIRE BENCH (slice C): for each adversarial fixture, does the guard FIRE?
+//
+// Inspired by the gate benchmarks of projects that ship governed delivery loops (agent-gate-bench):
+// a claim about a guard is worth nothing until there is a fixture that would catch it failing. The
+// rows call PRODUCTION predicates — the real rules engine and the real verdict mapping — never a
+// local re-derivation, because a bench that re-implements the thing it tests can pass while the
+// thing is broken.
+//
+// Vocabulary for every cell: Block / Allow / Pass / Fail / Partial / n/a / TBD. Nothing here is TBD:
+// every fixture runs offline and deterministically. The rows that need a live forge or a real git
+// binary are marked n/a with the test that covers them instead of being guessed at.
+// =====================================================================================
+
+type GateRow = { fixture: string; guard: string; outcome: 'Block' | 'Allow' | 'Partial' | 'n/a'; note: string };
+const GATE_ROWS: GateRow[] = [];
+
+function gateChange(path: string, base: string | null, head: string | null) {
+  return { baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), changes: [{ path, status: base === null ? ('added' as const) : ('modified' as const), baseContent: base, headContent: head }] };
+}
+
+/** The reviewer a delivery would really meet: the rules engine, mapped by the production verdict. */
+function ruleReviewerFor(changes: Parameters<typeof runReviewRules>[0]['changes']) {
+  return async (): Promise<ReviewOutcome> => verdictFromFindings(runReviewRules({ baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), changes }));
+}
+
+test('gate fire: weakened tests -> review blocks, nothing merges', async () => {
+  const h = harness();
+  const changes = [{ path: 'src/calc.test.ts', status: 'deleted' as const, baseContent: 'test("add", () => {});\n', headContent: null }];
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, sleep: async () => {}, hooks: { agent: async () => {}, review: ruleReviewerFor(changes) } });
+  assert.notEqual(result.outcome, 'merged');
+  assert.equal(h.delivery.merged, false);
+  GATE_ROWS.push({ fixture: 'weakened-tests', guard: 'review: test-weakening/deleted', outcome: 'Block', note: `loop=${result.outcome}` });
+});
+
+test('gate fire: a committed credential -> review blocks', async () => {
+  const h = harness();
+  const FAKE_GLPAT = 'glpat-' + 'AbCdEf0123456789xyzQ'; // assembled: no token-shaped literal in the tree
+  const changes = gateChange('config.py', 'x = 1\n', `x = 1\ntoken = "${FAKE_GLPAT}"\n`).changes;
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, sleep: async () => {}, hooks: { agent: async () => {}, review: ruleReviewerFor(changes) } });
+  assert.notEqual(result.outcome, 'merged');
+  GATE_ROWS.push({ fixture: 'committed-secret', guard: 'review: secret/committed', outcome: 'Block', note: `loop=${result.outcome}` });
+});
+
+test('gate fire: a protected path -> waits for a person, does not merge', async () => {
+  const h = harness();
+  const changes = gateChange('.github/workflows/ci.yml', 'name: ci\n', 'name: ci\non: push\n').changes;
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, sleep: async () => {}, hooks: { agent: async () => {}, review: ruleReviewerFor(changes) } });
+  assert.equal(result.outcome, 'awaiting_review');
+  assert.equal(h.delivery.merged, false);
+  GATE_ROWS.push({ fixture: 'protected-path', guard: 'review: protected-path -> human', outcome: 'Block', note: 'delivery waits, a person decides' });
+});
+
+test('gate fire: a dirty worktree -> the delivery refuses', async () => {
+  const h = harness();
+  h.delivery.dirty = true;
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) } });
+  assert.notEqual(result.outcome, 'merged');
+  assert.equal(h.delivery.merged, false);
+  GATE_ROWS.push({ fixture: 'dirty-worktree', guard: 'delivery: agent boundary = commit', outcome: 'Block', note: 'never commits for the agent' });
+});
+
+test('gate fire: the head moves after the review -> that merge is refused and the change is re-reviewed', async () => {
+  const h = harness();
+  let reviews = 0;
+  h.delivery.checks = async () => {
+    h.delivery.moveHeadAfterReview('c'.repeat(40)); // the branch moved between review and merge
+    return [{ name: 'build', conclusion: 'success' as const }];
+  };
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan,
+    sleep: async () => {},
+    hooks: {
+      agent: async () => {},
+      review: async () => {
+        reviews += 1;
+        return { verdict: 'clean' };
+      },
+    },
+  });
+  // The guard is not "never merge" — it is "never merge code the review did not see". The stale
+  // merge is refused, the item goes back for review, and the run then merges at a head that WAS
+  // reviewed. (Asserting "not merged" here was the bench's first draft, and it was wrong.)
+  assert.ok(reviews >= 2, `the change must be reviewed again after the head moved (reviews=${reviews})`);
+  assert.equal(result.steps.some((s) => s.detail.includes('head moved') || s.detail.includes('moved after the review')), true);
+  GATE_ROWS.push({ fixture: 'head-moved', guard: 'merge: only the reviewed head', outcome: 'Block', note: `stale merge refused, re-reviewed (${reviews}x), then merged at the new head` });
+});
+
+test('gate fire: mergeability stays unknown -> blocks visibly, never merges', async () => {
+  const h = harness();
+  h.delivery.mergeable = null;
+  const result = await runDeliveryLoop({ board: h.board, delivery: h.delivery, plan, sleep: async () => {}, hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) } });
+  assert.notEqual(result.outcome, 'merged');
+  assert.equal(result.outcome, 'blocked', 'an unknown is not a yes, and it must be visible');
+  GATE_ROWS.push({ fixture: 'mergeability-unknown', guard: 'merge: unknown is not yes', outcome: 'Block', note: 'bounded window, then blocked' });
+});
+
+test('gate fire: the reviewer cannot run -> not merged, retried instead', async () => {
+  const h = harness();
+  const result = await runDeliveryLoop({
+    board: h.board,
+    delivery: h.delivery,
+    plan,
+    hooks: {
+      agent: async () => {},
+      review: async () => {
+        throw new ProviderError('transport', 'the reviewer could not read the change set');
+      },
+    },
+  });
+  assert.equal(result.outcome, 'retriable', 'an unavailable reviewer must never read as clean');
+  assert.equal(h.delivery.merged, false);
+  GATE_ROWS.push({ fixture: 'reviewer-unavailable', guard: 'fail-closed: no review, no merge', outcome: 'Block', note: 'retriable, nothing merged' });
+});
+
+test('runDeliveryLoop: the evidence names the reviewer that actually judged', async () => {
+  const mine = harness();
+  const custom = await runDeliveryLoop({
+    board: mine.board,
+    delivery: mine.delivery,
+    plan: { ...plan, reviewer: 'semgrep:deadbeefcafe' },
+    hooks: {
+      agent: async () => {
+        mine.delivery.headSha = COMMIT_1;
+      },
+      review: async () => ({ verdict: 'clean' }),
+    },
+  });
+  assert.equal(custom.outcome, 'merged');
+  const customRecord = await mine.board.readState('ITEM-7');
+
+  const theirs = harness();
+  await runDeliveryLoop({
+    board: theirs.board,
+    delivery: theirs.delivery,
+    plan,
+    hooks: {
+      agent: async () => {
+        theirs.delivery.headSha = COMMIT_1;
+      },
+      review: async () => ({ verdict: 'clean' }),
+    },
+  });
+  const defaultRecord = await theirs.board.readState('ITEM-7');
+
+  assert.equal(customRecord?.reviewed?.reviewer, 'semgrep:deadbeefcafe');
+  assert.equal(defaultRecord?.reviewed?.reviewer, REVIEWER_DETERMINISTIC_RULES);
+  // The reviewer is part of WHAT the evidence is about, so it moves the digest: an approval given
+  // under one reviewer does not silently transfer to another.
+  assert.notEqual(customRecord?.reviewed?.digest, defaultRecord?.reviewed?.digest);
+});
+
+test('runDeliveryLoop: the report surface is told what was found, and a broken reporter changes nothing', async () => {
+  const finding = {
+    rule: 'test-weakening/deleted',
+    severity: 'block' as const,
+    path: 'test/a.test.ts',
+    line: 3,
+    detail: 'a test file was deleted',
+  };
+  const run = async (report: (ctx: { findings: readonly unknown[] }) => Promise<void>): Promise<{ outcome: string; log: ReturnType<typeof createEventLog> }> => {
+    const h = harness();
+    const log = createEventLog();
+    const result = await runDeliveryLoop({
+      board: h.board,
+      delivery: h.delivery,
+      events: log,
+      plan: { ...plan, maxReviewRounds: 1 },
+      hooks: {
+        agent: async () => {
+          h.delivery.headSha = COMMIT_1;
+        },
+        review: async () => ({ verdict: 'findings', note: 'a weakened test', findings: [finding] }),
+        report: report as never,
+      },
+    });
+    return { outcome: result.outcome, log };
+  };
+
+  const told: number[] = [];
+  const ok = await run(async (ctx) => {
+    told.push(ctx.findings.length);
+  });
+  assert.deepEqual(told, [1], 'the findings behind the verdict reach the report surface');
+  assert.equal(ok.log.of('report.posted').length, 1);
+  assert.equal(ok.log.of('report.posted')[0]?.fields?.findings, 1);
+
+  // The report is a BYPASS: a reporter that cannot run is recorded, and the item does exactly what
+  // it would have done without one. A missing comment must not fail a delivery, and must not save one.
+  const broken = await run(async () => {
+    throw new ProviderError('transport', 'reviewdog is not installed');
+  });
+  assert.equal(broken.outcome, ok.outcome, 'the delivery outcome is unchanged by the reporter');
+  assert.equal(broken.log.of('report.posted').length, 0);
+  assert.equal(broken.log.of('report.failed').length, 1);
+  assert.match(broken.log.of('report.failed')[0]?.message ?? '', /reviewdog is not installed/);
+});
+
+test('runDeliveryLoop: a resumed round 0 runs NO agent, and the trail says so instead of claiming one', async () => {
+  const { board, delivery } = harness();
+  const log = createEventLog();
+  let agentCalls = 0;
+  const result = await runDeliveryLoop({
+    board,
+    delivery,
+    // A resumed delivery (ADR-014): the work is already committed on the branch an earlier run
+    // pushed, so round 0 has nothing for an agent to do.
+    plan: { ...plan, resumed: true },
+    events: log,
+    hooks: {
+      agent: async () => {
+        agentCalls += 1;
+      },
+      review: async () => ({ verdict: 'clean' }),
+    },
+  });
+
+  assert.equal(result.outcome, 'merged');
+  assert.equal(agentCalls, 0, 'the agent seam must not be invoked for work that is already committed');
+  assert.equal(log.of('agent.started').length, 0, 'no agent start is claimed');
+  assert.equal(log.of('agent.skipped').length, 1);
+  assert.match(log.of('agent.skipped')[0]?.message ?? '', /already committed/);
+});
+
+test('runDeliveryLoop: a FIX round inside a resumed run DOES run the agent', async () => {
+  const { board, delivery } = harness();
+  const roundsRun: number[] = [];
+  const result = await runDeliveryLoop({
+    board,
+    delivery,
+    plan: { ...plan, resumed: true, maxReviewRounds: 2 },
+    hooks: {
+      agent: async ({ round }) => {
+        roundsRun.push(round);
+        delivery.headSha = COMMIT_2;
+      },
+      review: async (ctx) =>
+        ctx.round === 0 ? { verdict: 'findings', note: 'this needs a fix' } : { verdict: 'clean' },
+    },
+  });
+
+  // Round 0 is the work that already exists; round 1 is NEW work, and skipping it would leave the
+  // finding unanswered — the fix for the trail must not become a reason not to fix anything.
+  assert.deepEqual(roundsRun, [1]);
+  assert.equal(result.outcome, 'merged');
+});
+
+test('gate fire: the scoreboard (every deterministic row is filled; nothing is TBD)', () => {
+  const covered: GateRow[] = [
+    ...GATE_ROWS,
+    { fixture: 'force-push-attempt', guard: 'delivery: push is always plain', outcome: 'n/a', note: 'covered by deliveries/git + deliveries/github suites' },
+    { fixture: 'stale-approval', guard: 'approval must name the merged version', outcome: 'Block', note: 'covered by the ADR-018 tests above' },
+  ];
+  const rows = covered.map((r) => `  ${r.fixture.padEnd(22)} ${r.outcome.padEnd(6)} ${r.guard.padEnd(46)} ${r.note}`);
+  console.log(`\ngate-fire bench:\n${rows.join('\n')}\n`);
+  assert.equal(covered.some((r) => r.outcome === 'Block'), true);
+  assert.equal(covered.some((r) => r.outcome === 'Allow'), false, 'no fixture here is meant to merge: they are all guards');
 });

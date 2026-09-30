@@ -414,6 +414,9 @@ export class NotionBoardProvider implements TaskBoardProvider {
 
     await this.patchPage(id, this.columnPatch('claimed'), 'claim');
     await this.writeState(id, {
+      // Carry what we do not own: `branch`, `reviewed`, `approval` belong to the run, and a state
+      // move is no reason to forget them (found on a real instance: they were being dropped here).
+      ...(existing ?? {}),
       schema: 1,
       runId,
       item: id,
@@ -449,6 +452,9 @@ export class NotionBoardProvider implements TaskBoardProvider {
     await this.patchPage(id, this.columnPatch(to), `transition ${from}→${to}`);
     const existing = this.readRecord(page);
     await this.writeState(id, {
+      // Carry what we do not own: `branch`, `reviewed`, `approval` belong to the run, and a state
+      // move is no reason to forget them (found on a real instance: they were being dropped here).
+      ...(existing ?? {}),
       schema: 1,
       runId: existing?.runId ?? evidence.runId,
       item: id,
