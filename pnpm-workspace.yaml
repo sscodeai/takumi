@@ -25,3 +25,10 @@ packages:
 
 # Delivery providers (ADR-007): how a committed change reaches the host.
   - "deliveries/*"
+
+# Reviewer sidecars (ADR-021). A reviewer is an EXTERNAL PROGRAM behind the review seam, never a
+# git submodule and never a runtime dependency: its absence must be a refusal, not a smaller build.
+  - "reviewers/*"
+
+# Reporter sidecars (ADR-022): where a review's findings are shown (a host's review surface).
+  - "reporters/*"

@@ -403,6 +403,9 @@ export class JiraBoardProvider implements TaskBoardProvider {
 
     await this.applyStatus(id, 'claimed');
     await this.writeState(id, {
+      // Carry what we do not own: `branch`, `reviewed`, `approval` belong to the run, and a state
+      // move is no reason to forget them (found on a real instance: they were being dropped here).
+      ...(existing ?? {}),
       schema: 1,
       runId,
       item: id,
@@ -438,6 +441,9 @@ export class JiraBoardProvider implements TaskBoardProvider {
 
     const existing = await this.readState(id);
     await this.writeState(id, {
+      // Carry what we do not own: `branch`, `reviewed`, `approval` belong to the run, and a state
+      // move is no reason to forget them (found on a real instance: they were being dropped here).
+      ...(existing ?? {}),
       schema: 1,
       runId: existing?.runId ?? evidence.runId,
       item: id,

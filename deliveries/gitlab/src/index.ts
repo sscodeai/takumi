@@ -351,7 +351,12 @@ export class GitLabDeliveryProvider implements DeliveryProvider {
     if (!(await this.isAncestor(base.baseSha, 'HEAD', cwd))) {
       throw new DeliveryError(
         'precondition',
-        `HEAD (${snip(head, 12)}) is not descended from the frozen base ${snip(base.baseSha, 12)}: the branch was rebased or rewritten, and takumi never rewrites a branch`,
+        // Only what can be PROVEN: the head is not descended from the base. Whether the base moved
+        // past this branch's fork point or the branch was rewritten is not knowable from here, and
+        // saying "rebased or rewritten" pointed a real operator at the wrong thing (the base had
+        // simply moved on while the delivery sat in pr_open). takumi does not rewrite branches, so
+        // one of the two is true and a human says which.
+        `HEAD (${snip(head, 12)}) is not descended from the frozen base ${snip(base.baseSha, 12)}: either the base branch moved past this branch's fork point, or the branch was rewritten (takumi never rewrites a branch; a human must decide which happened)`,
         { item: req.itemId },
       );
     }

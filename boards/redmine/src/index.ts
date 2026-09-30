@@ -55,6 +55,7 @@
  */
 
 import {
+  carryStateRecordForward,
   decideClaim,
   assertBoardCapability,
   renderCreateMarker,
@@ -1168,20 +1169,12 @@ function recordFor(
   existing: BoardStateRecord | null,
   evidence: BoardTransitionEvidence,
 ): BoardStateRecord {
-  const record: BoardStateRecord = {
-    schema: 1,
+  const note = evidence.note ?? existing?.note;
+  return carryStateRecordForward(existing, {
     runId: existing?.runId ?? evidence.runId,
     item: id,
-    reviewRound: existing?.reviewRound ?? 0,
-    updatedAt: new Date().toISOString(),
-  };
-  const baseBranch = existing?.baseBranch;
-  if (baseBranch !== undefined) record.baseBranch = baseBranch;
-  const deliveryRef = existing?.deliveryRef;
-  if (deliveryRef !== undefined) record.deliveryRef = deliveryRef;
-  const note = evidence.note ?? existing?.note;
-  if (note !== undefined) record.note = note;
-  return record;
+    ...(note === undefined ? {} : { note }),
+  });
 }
 
 /**

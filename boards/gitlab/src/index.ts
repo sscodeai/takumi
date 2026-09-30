@@ -54,6 +54,7 @@
  */
 
 import {
+  carryStateRecordForward,
   assertBoardHttpOk,
   assertBoardCapability,
   decideClaim,
@@ -1063,20 +1064,8 @@ function recordFor(
   existing: BoardStateRecord | null,
   note?: string,
 ): BoardStateRecord {
-  const record: BoardStateRecord = {
-    schema: 1,
-    runId,
-    item: id,
-    reviewRound: existing?.reviewRound ?? 0,
-    updatedAt: new Date().toISOString(),
-  };
-  const baseBranch = existing?.baseBranch;
-  if (baseBranch !== undefined) record.baseBranch = baseBranch;
-  const deliveryRef = existing?.deliveryRef;
-  if (deliveryRef !== undefined) record.deliveryRef = deliveryRef;
-  const noteText = note ?? existing?.note;
-  if (noteText !== undefined) record.note = noteText;
-  return record;
+  // `runId` stays the run that owns the item; everything else is carried, not rebuilt.
+  return carryStateRecordForward(existing, { runId, item: id, ...(note === undefined ? {} : { note }) });
 }
 
 /** The newest record among trusted note bodies, or `null`. */
