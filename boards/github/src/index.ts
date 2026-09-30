@@ -1,6 +1,9 @@
 import {
   assertBoardCapability,
+  assertScopeQuery,
+  BOARD_WORK_ITEM_STATES,
   boardErrorFromResponse,
+  renderCreateMarker,
   BoardError,
   assertTransition,
   createCurlRequestFn,
@@ -11,7 +14,11 @@ import {
   unconfiguredRequestFn,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
+  BoardWorkItemSpec,
+  CreateWorkResult,
   BoardCommentAuthor,
   BoardCommentRef,
   BoardProviderMetadata,
@@ -70,6 +77,15 @@ export const GITHUB_STATE_LABELS: Record<BoardWorkItemState, string> = {
 
 /** GitHub's comment association values that grant trust by default. */
 export const DEFAULT_TRUSTED_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+/** The colour every state label gets (GitHub's format: hex, no leading '#'). */
+export const STATE_LABEL_COLOR = '1f6feb';
+
+/** The subset of GitHub's label JSON this adapter reads. */
+interface GitHubLabel {
+  name?: string;
+  color?: string;
+}
 
 interface GitHubIssue {
   number?: number;
@@ -133,11 +149,26 @@ export class GitHubBoardProvider implements TaskBoardProvider {
       // GitHub cannot add/remove a label conditionally: the claim is verified by
       // a re-read instead, and the adapter says so rather than implying more.
       atomicClaim: false,
+      // GitHub labels are creatable through the API, so a fresh repository can be
+      // made ready by takumi itself instead of by hand.
+      canBootstrapStates: true,
+      // Issues are creatable. Filing is how a failure becomes work instead of a comment.
+      canCreateWork: true,
+      // Search is what lets a caller scope a tick to an epic or a component without
+      // takumi inventing an epic model (ADR-012).
+      canTextSearch: true,
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
   }
 
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
+    // A text scope goes through the SEARCH API, not the issue list: the list endpoint
+    // has no free-text parameter, and a filter that cannot be expressed is not one this
+    // adapter may quietly drop (an ignored scope means working on excluded items).
+    if (query.query !== undefined) {
+      return await this.searchWork(query, query.query);
+    }
+
     // One label-filtered request per requested state: GitHub's `labels` query
     // parameter means AND, not OR, so asking for two states at once would return
     // nothing. Cross-state work has to be assembled here.
@@ -168,6 +199,98 @@ export class GitHubBoardProvider implements TaskBoardProvider {
 
   async getWork(id: string): Promise<BoardWorkItem> {
     return this.toWorkItem(await this.fetchIssue(id));
+  }
+
+  /**
+   * A search-API listing, filtered to the states the caller asked for.
+   *
+   * GitHub's search has its own query syntax, so the term is passed as a quoted phrase
+   * and the repository scope is added by this adapter — never by the caller, who should
+   * not have to know which board they are talking to. Search matches issue text, which
+   * is what "this epic" means in practice; the state filter is applied HERE because
+   * search knows nothing about takumi's labels.
+   */
+  private async searchWork(query: BoardWorkQuery, term: string): Promise<BoardWorkItem[]> {
+    // The term travels inside a quoted phrase, so a quote in it would close the phrase and
+    // change the query's meaning. Stripping it searched for something the operator did not
+    // write (a difference nobody sees until the wrong items run), so it is REFUSED with the
+    // fix in the message — the same choice every other adapter makes (ADR-012).
+    const safe = assertScopeQuery(term) ?? '';
+    if (safe.includes('"')) {
+      throw new BoardError(
+        'precondition',
+        'a GitHub text scope cannot contain a double quote (the term is sent as a quoted phrase): remove the quote or search for the words around it',
+      );
+    }
+    const states: BoardWorkItemState[] = query.states === undefined ? ['ready'] : [...query.states];
+    const terms = `repo:${this.repo} is:issue "${safe}"`;
+    const params = new URLSearchParams({ q: terms, per_page: String(query.limit ?? 100) });
+    const found = await requestBoardJson<{ items?: GitHubIssue[] }>(
+      this.request,
+      { method: 'GET', url: `${this.apiBase}/search/issues?${params.toString()}` },
+      'listWork: search',
+    );
+    const items: BoardWorkItem[] = [];
+    for (const issue of found.items ?? []) {
+      if (issue.pull_request !== undefined || issue.number === undefined) continue;
+      const item = this.toWorkItemOrNull(issue);
+      if (item === null || !states.includes(item.state)) continue;
+      items.push(item);
+    }
+    return items;
+  }
+
+  /**
+   * File an issue, idempotently.
+   *
+   * The state is the label, so the new issue starts with the state's label attached —
+   * which means the label must exist: GitHub rejects an issue carrying an unknown label
+   * with a 422. That failure is re-thrown with the fix in it (run `takumi board
+   * --bootstrap`), because the raw "Validation Failed" tells an operator nothing.
+   *
+   * Deduplication goes through the search API rather than a scan of the issue list: a
+   * scan is one page wide (the same limitation `listWork` documents), and a duplicate
+   * filed because the first page did not contain it is exactly what this prevents.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    const state = spec.state ?? 'ready';
+    const marker = spec.idempotencyKey === undefined ? null : renderCreateMarker(spec.idempotencyKey);
+
+    if (marker !== null) {
+      const query = encodeURIComponent(`repo:${this.repo} "${marker}"`);
+      const found = await requestBoardJson<{ items?: GitHubIssue[] }>(
+        this.request,
+        { method: 'GET', url: `${this.apiBase}/search/issues?q=${query}&per_page=10` },
+        'createWork: search',
+      );
+      const hit = (found.items ?? []).find((issue) => (issue.body ?? '').includes(marker));
+      if (hit !== undefined) return { item: this.toWorkItem(hit), created: false };
+    }
+
+    const body = marker === null ? (spec.body ?? '') : `${spec.body ?? ''}\n\n${marker}`;
+    const labels = [...(spec.labels ?? []), this.labelFor(state)];
+    try {
+      const created = await requestBoardJson<GitHubIssue>(
+        this.request,
+        {
+          method: 'POST',
+          url: `${this.apiBase}/repos/${this.repo}/issues`,
+          body: { title: spec.title, body, labels },
+        },
+        'createWork',
+      );
+      return { item: this.toWorkItem(created), created: true };
+    } catch (e) {
+      if (e instanceof BoardError && e.kind === 'precondition' && /label/i.test(e.message)) {
+        throw new BoardError(
+          'precondition',
+          `${e.message} — the state label ${JSON.stringify(this.labelFor(state))} may not exist on ${this.repo}; run \`takumi board --bootstrap\` to create the state labels`,
+          { item: this.repo },
+        );
+      }
+      throw e;
+    }
   }
 
   async claim(id: string, runId: string): Promise<ClaimResult> {
@@ -295,6 +418,67 @@ export class GitHubBoardProvider implements TaskBoardProvider {
   /** The label a state maps to. */
   labelFor(state: BoardWorkItemState): string {
     return `${this.labelPrefix}${GITHUB_STATE_LABELS[state]}`;
+  }
+
+  /**
+   * Create the six state labels if the repository does not have them yet.
+   *
+   * This is the first minute of a real deployment: without these labels the adapter
+   * cannot claim anything, and "no such label" teaches an operator nothing. Labels
+   * are creatable through the API, so takumi does it rather than printing advice.
+   *
+   * Idempotent by construction (an existing label is reported, never re-created),
+   * and the same reasoning as orbi's `align_labels`: the board's own state set is
+   * infrastructure, not a manual prerequisite.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts: { dryRun?: boolean } = {},
+  ): Promise<BoardBootstrapReport> {
+    const present = new Map<string, string>();
+    const existing = await requestBoardJson<GitHubLabel[]>(
+      this.request,
+      { method: 'GET', url: `${this.apiBase}/repos/${this.repo}/labels?per_page=100` },
+      'bootstrapStates: list labels',
+    );
+    for (const label of existing) {
+      if (typeof label.name === 'string') present.set(label.name.toLowerCase(), label.color ?? '');
+    }
+
+    const actions: BoardBootstrapAction[] = [];
+    let applied = false;
+    for (const state of desired) {
+      const name = this.labelFor(state);
+      if (present.has(name.toLowerCase())) {
+        actions.push({ state, name, outcome: 'exists' });
+        continue;
+      }
+      if (opts.dryRun === true) {
+        actions.push({ state, name, outcome: 'would-create' });
+        continue;
+      }
+      await requestBoardJson<GitHubLabel>(
+        this.request,
+        {
+          method: 'POST',
+          url: `${this.apiBase}/repos/${this.repo}/labels`,
+          // GitHub wants a hex colour without '#', so the six states share one:
+          // the state is in the NAME, and six colours would imply a priority or a
+          // category that takumi does not mean.
+          body: { name, color: STATE_LABEL_COLOR, description: 'takumi delivery state' },
+        },
+        `bootstrapStates: create ${name}`,
+      );
+      present.set(name.toLowerCase(), STATE_LABEL_COLOR);
+      applied = true;
+      actions.push({ state, name, outcome: 'created' });
+    }
+    return {
+      provider: this.metadata().id,
+      applied,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((state) => !this.capabilities().states.includes(state)),
+    };
   }
 
   private async fetchIssue(id: string): Promise<GitHubIssue> {

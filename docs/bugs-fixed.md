@@ -19,6 +19,16 @@ note, and to whoever wonders later whether this class of bug was ever hit.
 | 4 | A delivery that could not be merged had nowhere to go: the item stayed in `pr_open` forever (review rounds exhausted, host refusing a conflicting head, base branch reconfigured) | The six-state transition table had no `pr_open → blocked` edge, so the only legal moves out of an open pull request were `merged` and `fix_needed` | The edge was added, documented in ADR-006, and the loop now blocks there when its round budget runs out | inside `c6b590f` (`feat(core): run the two ports as a delivery loop`) — **should have been its own `fix`** | `packages/core/src/test/board-state.test.ts` — "an open pull request can still be blocked" |
 | 5 | A progress comment could carry a run marker that no reader could ever find; and a malformed run id escaped as a bare `Error` | Five adapters each had their own copy of the marker string, none of which validated the id, while the reader matches exactly eight lowercase hex characters; core's shared implementation validated but threw an unclassified `Error` | All boards call core's `renderRunMarker`; a malformed id fails as a classified `precondition`, surfaced through each port's own error family (`BoardError`) | inside `1056445` (`refactor(boards): one run-marker implementation…`) — **should have been its own `fix`** | `packages/core/src/test/run-marker.test.ts` asserts `ProviderError` + `kind === 'precondition'`; `boards/*/src/test/*` assert the marker string through the port |
 
+| 6 | Every event was stored TWICE in the trail (the first test that read the trail back saw two copies of each) | The default sink appended to the same array `retain` appended to, so two mechanisms that each looked correct alone both ran | The default sink now writes nowhere; retention is the explicit push | inside `3a74c9d` (`feat(core): the pilot safety rails…`) — **should have been its own `fix`** | `packages/core/src/test/events.test.ts` — "records a known event with its timestamp, run id and message" |
+| 7 | A message containing a newline came back from the log with an escaped backslash (`line one\\nline two` instead of a real newline) | Pre-escaping newlines before `JSON.stringify`, which escapes them anyway: the value was escaped twice and no longer round-tripped | The pre-escaping was removed; JSON guarantees the single line, and the value survives exactly | inside `3a74c9d` — **should have been its own `fix`** | `packages/core/src/test/events.test.ts` — "one line, stable key order, and a message that round-trips" |
+
+| 8 | An item could be left CLAIMED by a run that had stopped — not waiting, not retrying: invisible, because the runner only ever selects `ready` items | On a pending check the loop returned `retriable` and left the item owned; on a transport failure after the claim it did the same. The comment claimed "another tick will read it again", and no tick ever did | Checks are now WAITED for inside the tick (bounded, poll-counted), and any failure after the claim blocks the item with the instruction that resumes it — a state a human can see and act on | `e15c62b` (`fix(core): an item we own is never parked where automation cannot find it`) | `packages/core/src/test/delivery-loop.test.ts` — "pending checks are waited for INSIDE the tick", "checks that never settle block the item", "a retriable failure still refuses to strand the item" |
+| 9 | A claim held by a process that was killed stayed claimed for ever, and the item was invisible to the next ticks | Automation had no way back: nothing selects a `claimed` item, and the claim cannot be re-taken by a different run id | Each tick now SWEEPS the in-flight items: it reports them (`pilot.in_flight`), and with `blockStaleClaims` opted in it hands a stale claim back to a human — the proof being the SLOT it had to take, and the action being `blocked`, never a silent takeover | `e15c62b` (sweep), `packages/core/src/test/pilot.test.ts` — "a stale claim is handed to a human", "a fresh claim is reported but never touched", "an open pull request is never swept" |
+
+| 10 | `pilot.metricsFile` was read from takumi.yaml and never written; the pacing knobs (`checksWaitSeconds`, `blockStaleClaims`, …) were accepted and dropped on the floor | The command built a `PilotConfig` from the file field by field, and the later fields were simply not in the list — while the pilot never handed those policy fields to the loop either | Every field is now passed, and the wiring is covered by a test that drives the real command: the metrics file must EXIST, and a policy budget must appear as the number in the block message | `ada3262` (`fix(cli): the pilot command read options it never passed on`) | `apps/cli/src/test/run.test.ts` — "the pilot section of takumi.yaml is wired through, metrics included"; `packages/core/src/test/pilot.test.ts` — "the policy's pacing knobs reach the delivery loop" |
+
+| 11 | The same `pilot.policy.scopeQuery` behaved differently on each board: a whitespace-only scope was DROPPED on GitLab/Notion (returning the whole board while looking scoped), REFUSED on Jira, and a double quote in the term was silently STRIPPED on GitHub | Each adapter had decided for itself what an unrepresentable scope means, and each decision looked defensible alone; the rule was never stated once | `assertScopeQuery` in core states the rule (carry the scope faithfully or refuse it) and every adapter calls it; the contract suite now asserts, per adapter, that a blank scope fails `precondition` and that a quoted term is either refused or narrowed faithfully — never widened | `a18b7f5` (`fix(boards): one scope rule in core, enforced on every adapter`) | the shared suite's `scopeValidation: PASS` note, plus `boards/{gitlab,notion}/src/test/*` where the tests that encoded the old behaviour now assert the refusal |
+
 ## Classes worth remembering
 
 - **Silent drop** (#3): a filter that cannot be honoured must fail, not shrink the
@@ -31,3 +41,23 @@ note, and to whoever wonders later whether this class of bug was ever hit.
   marker, because it looks like evidence.
 - **Swallowed failure** (#2): a helper that returns a normal-looking result after
   failing is how four manifests went missing while five reports said "written".
+- **Two mechanisms, one effect** (#6): a default and an explicit path that both do
+  the same thing look correct in isolation and duplicate in practice. Make one of
+  them a no-op instead of assuming they are mutually exclusive.
+- **Escaping twice** (#7): hand-rolling an escape that the serialiser already
+  applies silently corrupts the value. Round-trip the value in a test, or do not
+  escape at all.
+- **A comment describing behaviour nobody implements** (#8): "another tick will read
+  it again" was true of no code path. A comment is not a mechanism; if a state is
+  meant to be picked up later, the test must show the pick-up happening.
+- **A state automation cannot return from** (#9): before adding a state, ask which
+  code path selects it. `claimed` was selected by nothing, so a claim left by a dead
+  process was indistinguishable from a claim being worked on.
+- **Configuration with no reader** (#10): a field parsed from a config file and never
+  used is silence, not a default. Test the EFFECT of a setting (a file that must exist,
+  a number that must appear), because a test that asserts the object was passed along
+  passes whether or not anything downstream looks at it.
+- **N implementations, N semantics** (#11): when an abstraction has several adapters, any
+  rule left to each adapter drifts — and the drift is invisible until the same
+  configuration meets two different boards. Put the rule in the shared layer and assert it
+  per adapter in the contract suite.

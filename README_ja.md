@@ -167,6 +167,11 @@ takumi/
 | Read-only board view: `takumi board --provider <id>` | Done |
 | Delivery providers: fake / GitHub / GitLab — plain push、PR 1 本、レビュー済み commit のみ merge | Done |
 | Runnable board -> delivery -> merge demo (in-memory、認証情報不要): `node scripts/board-delivery-demo.mjs` | Done |
+| Pilot safety rails (ADR-008): 排他 slot lock、閉じた event registry、state bootstrap (`takumi board --check/--bootstrap`) | Done |
+| Pilot tick (ADR-009): `takumi pilot --once` — select / lock / worktree / agent / deliver / review。systemd・cron で駆動 | Done |
+| Pilot metrics (ADR-010): JSON カウンタ + Prometheus textfile、progress 書き込みの throttle | Done |
+| Filing work (ADR-011): 全 board の `createWork`（marker で冪等）、赤い CI が自分で item を立てる | Done |
+| Scoping a tick (ADR-012): 各 board 自身の検索による `query` スコープ、検索できない board では fail-closed | Done |
 | Agent Eval with 保留検証テスト and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |

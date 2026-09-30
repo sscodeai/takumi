@@ -1,5 +1,10 @@
 import { BOARD_WORK_ITEM_STATES } from '@takumi/core';
-import type { BoardCapabilities, TaskBoardProvider, BoardWorkItemState } from '@takumi/core';
+import type {
+  BoardBootstrapReport,
+  BoardCapabilities,
+  TaskBoardProvider,
+  BoardWorkItemState,
+} from '@takumi/core';
 
 /**
  * `takumi board` — a READ-ONLY view of a task board through the provider layer.
@@ -24,13 +29,51 @@ export interface BoardCommandOptions {
   statusMap?: Record<string, string>;
   /** Emit JSON instead of the text board. */
   json: boolean;
+  /**
+   * Report (or apply) the board's state bootstrap. `--check` reports what is
+   * missing without changing anything; `--bootstrap` creates what the board allows.
+   */
+  bootstrap?: 'check' | 'apply';
 }
 
 /** Parse `takumi board` arguments. Unknown flags are rejected, never ignored. */
+/** Parse the fake board's `items` option: a JSON array of work-item seeds. */
+function parseBoardItems(raw: string): Array<{ id: string; title?: string; body?: string; state?: BoardWorkItemState }> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`--items must be a JSON array of {id,title,body,state}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error('--items must be a JSON array');
+  return parsed.map((entry, index) => {
+    const item = (entry ?? {}) as Record<string, unknown>;
+    const id = item['id'];
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new Error(`--items[${index}] needs a non-empty string id`);
+    }
+    const state = item['state'];
+    if (state !== undefined && !(BOARD_WORK_ITEM_STATES as readonly unknown[]).includes(state)) {
+      // Fail closed: a typo in a seeded state would otherwise park the item in a state no
+      // runner reads, and the tick would look idle for no visible reason.
+      throw new Error(
+        `--items[${index}] state ${JSON.stringify(state)} is not one of ${BOARD_WORK_ITEM_STATES.join(', ')}`,
+      );
+    }
+    return {
+      id,
+      ...(typeof item['title'] === 'string' ? { title: item['title'] } : {}),
+      ...(typeof item['body'] === 'string' ? { body: item['body'] } : {}),
+      ...(state === undefined ? {} : { state: state as BoardWorkItemState }),
+    };
+  });
+}
+
 export function parseBoardArgs(rest: string[]): BoardCommandOptions {
   const providerOptions: Record<string, string> = {};
   let providerId = 'fake';
   let json = false;
+  let bootstrap: 'check' | 'apply' | undefined;
   let states: string[] | undefined;
   let statusMap: Record<string, string> | undefined;
 
@@ -63,6 +106,9 @@ export function parseBoardArgs(rest: string[]): BoardCommandOptions {
       case '--api-base':
         providerOptions['apiBase'] = next();
         break;
+      case '--items':
+        providerOptions['items'] = next();
+        break;
       case '--states':
         states = next()
           .split(',')
@@ -74,6 +120,12 @@ export function parseBoardArgs(rest: string[]): BoardCommandOptions {
         break;
       case '--json':
         json = true;
+        break;
+      case '--check':
+        bootstrap = 'check';
+        break;
+      case '--bootstrap':
+        bootstrap = 'apply';
         break;
       case '':
         break;
@@ -88,7 +140,39 @@ export function parseBoardArgs(rest: string[]): BoardCommandOptions {
     json,
     ...(states === undefined ? {} : { states }),
     ...(statusMap === undefined ? {} : { statusMap }),
+    ...(bootstrap === undefined ? {} : { bootstrap }),
   };
+}
+
+/**
+ * Render a bootstrap report for a human.
+ *
+ * The whole point of the report is the LAST column: when a board cannot create a
+ * state, the operator must be told exactly what to do. A report that says only
+ * "missing" is the "no such label" error with extra steps.
+ */
+export function renderBootstrapReport(report: BoardBootstrapReport): string {
+  const lines: string[] = [];
+  lines.push(
+    `Takumi board bootstrap — ${report.provider} ` +
+      `(${report.applied ? 'applied changes' : 'no changes made'})`,
+  );
+  lines.push('');
+  const width = Math.max(...report.actions.map((a) => a.state.length), 5);
+  for (const action of report.actions) {
+    lines.push(`  ${pad(action.state, width)}  ${pad(action.outcome, 13)}  ${action.name}`);
+    if (action.instruction !== undefined) lines.push(`  ${' '.repeat(width)}  ${' '.repeat(13)}  -> ${action.instruction}`);
+  }
+  if (report.unsupported.length > 0) {
+    lines.push('');
+    lines.push(`  this board cannot express: ${report.unsupported.join(', ')}`);
+  }
+  const missing = report.actions.filter((a) => a.outcome === 'not-creatable');
+  if (missing.length > 0) {
+    lines.push('');
+    lines.push(`  ${missing.length} state(s) need a human. The instructions above are the whole fix.`);
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -102,11 +186,19 @@ export async function createBoardProvider(options: BoardCommandOptions): Promise
   switch (options.providerId) {
     case 'fake': {
       const { FakeBoardProvider } = await import('@takumi/board-fake');
+      // A demo board is only useful if the demo can be REAL: `items` lets a caller seed
+      // actual work (a JSON array of {id,title,body,state}), which is what a pilot tick
+      // with a real agent needs — a hardcoded "A ready item" title hands the agent a task
+      // that says nothing. Without `items` the built-in demo pair stands.
+      const seeded = options.providerOptions['items'];
       return new FakeBoardProvider({
-        items: [
-          { id: 'DEMO-1', state: 'ready', title: 'A ready item (the fake board is a demo)' },
-          { id: 'DEMO-2', state: 'pr_open', title: 'An item awaiting review' },
-        ],
+        items:
+          seeded === undefined
+            ? [
+                { id: 'DEMO-1', state: 'ready', title: 'A ready item (the fake board is a demo)' },
+                { id: 'DEMO-2', state: 'pr_open', title: 'An item awaiting review' },
+              ]
+            : parseBoardItems(seeded),
       });
     }
     case 'github': {
@@ -270,6 +362,8 @@ export async function runBoardCommand(rest: string[]): Promise<number> {
         '  --states ready,claimed          limit the states shown',
         '  --status-map "ready=New,pr_open=In Progress"  delivery state -> board status name',
         '  --json                          print work items as JSON',
+        '  --check                         report the states this board is missing (read-only)',
+        '  --bootstrap                     create the missing states where the board allows it',
         '',
         'Read-only: takumi never claims, transitions or comments from this command.',
         'Credentials come from the environment (GITHUB_TOKEN, GITLAB_TOKEN,',
@@ -283,6 +377,23 @@ export async function runBoardCommand(rest: string[]): Promise<number> {
 
   const options = parseBoardArgs(rest);
   const provider = await createBoardProvider(options);
+
+  if (options.bootstrap !== undefined) {
+    const caps0 = provider.capabilities();
+    // A dry run goes through the SAME call with dryRun set, so what an operator
+    // reviews is exactly what `--bootstrap` will do, not a second implementation.
+    const report = await provider.bootstrapStates(caps0.states, { dryRun: options.bootstrap === 'check' });
+    if (options.json) {
+      console.log(JSON.stringify(report, null, 2));
+    } else {
+      console.log(renderBootstrapReport(report));
+      if (options.bootstrap === 'check' && report.actions.some((a) => a.outcome !== 'exists')) {
+        console.log('\nRe-run with --bootstrap to create what this board allows.');
+      }
+    }
+    return report.actions.every((a) => a.outcome !== 'not-creatable') ? 0 : 1;
+  }
+
   const caps = provider.capabilities();
   const wanted = options.states === undefined ? caps.states : validateStates(options.states, caps.states);
   const items = await provider.listWork({ states: wanted });

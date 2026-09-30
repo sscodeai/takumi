@@ -37,6 +37,15 @@
  *    no merge, so `delivery` is all false and a caller that needs those is told so
  *    instead of discovering it in production.
  *
+ * WHAT `createWork` FILES, AND WHAT IT REFUSES TO GUESS: an issue is created through
+ * `POST /issues.json` in the status the requested state maps to, with the idempotency
+ * marker written into the DESCRIPTION (Redmine's issue query exposes a `description`
+ * text filter, so the marker is findable server-side before a second create is sent —
+ * see `createWork`). The project must be the NUMERIC id Redmine's `project_id` really
+ * is, and a state whose status this installation does not have fails naming the state
+ * rather than filing work into the wrong status. Labels are refused, not dropped,
+ * because a core Redmine issue has nowhere to put them.
+ *
  * WHY A JOURNAL CANNOT FORGE THE RUN STATE: the record is addressed by CUSTOM
  * FIELD ID/NAME, not by scanning text. A commenter (or a bot with comment rights)
  * can paste `<!-- takumi:boardstate:v1 {...} -->` into a journal and `readState`
@@ -47,17 +56,21 @@
 
 import {
   assertBoardCapability,
+  renderCreateMarker,
   assertBoardHttpOk,
   assertTransition,
   BoardError,
   BOARD_WORK_ITEM_STATES,
   createCurlRequestFn,
+  createKeyOf,
   parseBoardStateRecord,
   renderBoardStateRecord,
   requestBoardJson,
   unconfiguredRequestFn,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -66,9 +79,11 @@ import type {
   BoardStateRecord,
   BoardTransitionEvidence,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkItemState,
   BoardWorkQuery,
   ClaimResult,
+  CreateWorkResult,
   CurlRequestFnOptions,
   TaskBoardProvider,
 } from '@takumi/core';
@@ -81,6 +96,15 @@ const API_KEY_ENV = 'REDMINE_API_KEY';
 
 /** Redmine's own default page size; also the pagination step of `listWork`. */
 const DEFAULT_PAGE_SIZE = 100;
+
+/**
+ * The most results a single `/search.json` page may carry.
+ *
+ * Redmine caps the search `limit` at 100 (Rest_Search), and this adapter will not ask
+ * for more than the API will give: a page that silently came back short would look like
+ * a complete answer.
+ */
+const MAX_SEARCH_LIMIT = 100;
 
 /**
  * The delivery state a Redmine STATUS NAME represents.
@@ -115,6 +139,10 @@ export interface RedmineBoardOptions {
    * so a slug here yields Redmine's own (empty) answer rather than a client-side
    * guess. Callers that only hold an identifier should look the numeric id up with
    * `GET /projects/<identifier>.json`.
+   *
+   * `createWork` is stricter for the same reason, because filing is a WRITE: a create
+   * with a non-numeric project FAILS closed (naming the id to look up) rather than
+   * filing work wherever Redmine would resolve an identifier to.
    */
   project?: string;
   /** API key for `X-Redmine-API-Key`; falls back to `process.env.REDMINE_API_KEY`. */
@@ -173,12 +201,29 @@ interface RedmineIssuePayload {
   allowed_statuses?: Array<{ id?: number; name?: string }>;
 }
 
-/** The envelope `/issues.json` answers with. */
+/** What `POST /issues.json` answers with: `{ issue: {...} }`. */
+interface RedmineIssueEnvelope {
+  issue?: RedmineIssuePayload;
+}
+
 interface RedmineIssuePage {
   issues?: RedmineIssuePayload[];
   total_count?: number;
   offset?: number;
   limit?: number;
+}
+
+/**
+ * One hit of `GET /search.json?issues=1`.
+ *
+ * It carries `{id, type, title}` and — this is the whole reason the scoped search costs
+ * an extra read per candidate — NO status, so a hit can never be mapped to a delivery
+ * state on its own (Rest_Search).
+ */
+interface RedmineSearchHit {
+  id?: number;
+  type?: string;
+  title?: string;
 }
 
 export class RedmineBoardProvider implements TaskBoardProvider {
@@ -192,6 +237,8 @@ export class RedmineBoardProvider implements TaskBoardProvider {
   private readonly request: BoardRequestFn;
   /** `/issue_statuses.json` is resolved once per provider (see `statuses()`). */
   private statusListPromise: Promise<RedmineStatusPayload[]> | undefined;
+  /** The configured project's numeric id, resolved once per provider (see `projectId()`). */
+  private resolvedProjectId: Promise<string> | undefined;
 
   constructor(opts: RedmineBoardOptions) {
     this.baseUrl = normaliseBaseUrl(opts.baseUrl);
@@ -238,6 +285,19 @@ export class RedmineBoardProvider implements TaskBoardProvider {
       // Redmine cannot write conditionally, so the claim is read-then-write plus a
       // re-read verification (see the header note 3).
       atomicClaim: false,
+      // Redmine issue statuses are administration data: `/issue_statuses.json` is
+      // read-only, so a status cannot be created through this API. The honest
+      // answer is false, and `bootstrapStates()` only REPORTS.
+      canBootstrapStates: false,
+      // `POST /issues.json` files an issue. The idempotency marker goes into the
+      // DESCRIPTION, because that is both where a human expects the reason and what
+      // Redmine's `description` text filter can search BEFORE a second create is sent
+      // (the state custom field already has exactly one writer: the run record).
+      canCreateWork: true,
+      // Redmine's issue LIST has no free-text parameter, but `/search.json` — the endpoint
+      // `createWork` already dedupes through — is this instance's own text index, so a
+      // caller's `query` really is scoped by the board rather than by takumi.
+      canTextSearch: true,
       delivery: { canOpenPullRequest: false, canRunChecks: false, canMerge: false },
     };
   }
@@ -249,6 +309,10 @@ export class RedmineBoardProvider implements TaskBoardProvider {
    * truncate work: offsets advance by the number of issues actually returned until
    * `total_count` is covered (or `query.limit` is reached). `status_id=open` means
    * all open statuses, which is Redmine's own vocabulary for "still available".
+   *
+   * A free-text `query` cannot be expressed by this list at all (see `searchWork`), so
+   * it takes the SEARCH path instead. It is never ignored: a scope this board dropped
+   * would leave a runner working on exactly the items the operator excluded.
    */
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
     // Redmine core issues have no labels. Refusing beats returning unfiltered work
@@ -259,6 +323,8 @@ export class RedmineBoardProvider implements TaskBoardProvider {
         'Redmine core issues carry no labels, so a label filter cannot be honoured (refusing instead of returning unfiltered work)',
       );
     }
+
+    if (query.query !== undefined) return await this.searchWork(query, query.query);
 
     const wanted = new Set<BoardWorkItemState>(query.states ?? BOARD_WORK_ITEM_STATES);
     const max = query.limit ?? Number.POSITIVE_INFINITY;
@@ -279,12 +345,142 @@ export class RedmineBoardProvider implements TaskBoardProvider {
       if (typeof total === 'number' && Number.isFinite(total) && offset >= total) break;
     }
 
+    return await this.mapWantedIssues(collected, wanted, max);
+  }
+
+  /**
+   * A free-text scope: `GET /search.json?issues=1&open_issues=1&q=<term>`, then one read
+   * per candidate so the answer is still a real `BoardWorkItem[]`.
+   *
+   * WHY THE SEARCH ENDPOINT: it is the only text index this adapter can reach — a
+   * Redmine core issue carries no labels and the issue list exposes no free-text filter
+   * (Rest_Issues), while `createWork` already dedupes through exactly this endpoint.
+   *
+   * THE HONEST COST OF `states`, since it decides the shape of this method: the search
+   * answers `{id, type, title}` and NO status (Rest_Search), so `states` CANNOT be
+   * honoured in one pass — and a hit is not work until the state the delivery hangs on
+   * has been read. Every candidate is therefore fetched and mapped by the SAME code the
+   * list path uses, which costs ONE EXTRA REQUEST PER CANDIDATE. The alternative is
+   * returning hits whose state the caller asked to filter on without ever having read
+   * it, which is the class of lie this port exists to prevent. `query.limit` bounds both
+   * the search page and the reads, so a tightly scoped query ("this epic") stays cheap.
+   *
+   * WHAT A HIT MUST SURVIVE, in order: it must be an issue (a global search also answers
+   * news, documents, wiki pages and changesets), it must belong to the configured
+   * project (the documented search has no project parameter — only
+   * `scope=all|my_project|subprojects` — so the check happens here, see
+   * `inScopedProject`), and it must map onto a state the caller asked for. A hit whose
+   * status maps to NO delivery state is reported through the same aggregated
+   * `precondition` error the list path uses: a scoped query must not turn a
+   * configuration gap into "no work".
+   */
+  private async searchWork(query: BoardWorkQuery, term: string): Promise<BoardWorkItem[]> {
+    assertSearchableTerm(term);
+    const max = query.limit ?? Number.POSITIVE_INFINITY;
+    const wanted = new Set<BoardWorkItemState>(query.states ?? BOARD_WORK_ITEM_STATES);
+    const found = await requestBoardJson<{ results?: RedmineSearchHit[] }>(
+      this.request,
+      { method: 'GET', url: this.searchUrl(term, max) },
+      'listWork: search',
+    );
+
+    const collected: RedmineIssuePayload[] = [];
+    for (const hit of found.results ?? []) {
+      if (collected.length >= max) break;
+      // A non-issue hit, or one Redmine answered without an id, cannot be read back and
+      // is therefore not work this board can hand to a runner.
+      if (hit.type !== 'issue' || typeof hit.id !== 'number') continue;
+      // Read exactly like any other issue — the SAME reader `getWork` uses, so a candidate
+      // cannot be described by a second, thinner code path that disagrees about what an
+      // issue is. The project this reader returns is what `inScopedProject` checks.
+      const issue = await this.fetchIssue(String(hit.id));
+      if (!(await this.inScopedProject(issue))) continue;
+      collected.push(issue);
+    }
+    return await this.mapWantedIssues(collected, wanted, max);
+  }
+
+  /**
+   * Is this search hit one of THIS board's issues?
+   *
+   * The search endpoint is GLOBAL: its documented parameters offer `scope=all|my_project|
+   * subprojects` and no project-id filter, whereas the list path is scoped server-side by
+   * `project_id`. Without this check a board configured for one project would answer a
+   * scoped query with another project's issues — a widened scope, which is the one thing
+   * a scope must never do. The check uses the NUMERIC id Redmine reports on an issue
+   * (`project.id`) because a slug cannot be compared to it; `projectId()` resolves a
+   * slug through the documented `GET /projects/<id-or-identifier>.json` lookup.
+   *
+   * An issue that arrives without a project block cannot be placed, so it is not returned:
+   * that is the same filter `/issues.json?project_id=` performs on the list path (a
+   * foreign item is simply not this board's work), and `getWork(id)` can still read any
+   * issue by id when a caller really wants it.
+   */
+  private async inScopedProject(issue: RedmineIssuePayload): Promise<boolean> {
+    const wanted = await this.projectId();
+    if (wanted === undefined) return true;
+    const project = issue.project;
+    return project !== null && project !== undefined && String(project.id) === wanted;
+  }
+
+  /**
+   * The configured project as the NUMERIC id Redmine's `project_id` really is, resolved
+   * once per provider.
+   *
+   * Needed because the search path has to place a candidate itself (see
+   * `inScopedProject`), and the `project` option is documented as accepting an identifier
+   * as well as a number. The lookup is the one this adapter's own option doc tells a
+   * caller to make when they hold only an identifier, so it is done here instead of being
+   * left as a configuration trap. A failed lookup is never cached: one transport blip
+   * must not poison every later call.
+   */
+  private async projectId(): Promise<string | undefined> {
+    const configured = this.project;
+    if (configured === undefined) return undefined;
+    if (/^\d+$/.test(configured)) return configured;
+    this.resolvedProjectId ??= requestBoardJson<{ project?: { id?: number } }>(
+      this.request,
+      { method: 'GET', url: `${this.baseUrl}/projects/${encodeURIComponent(configured)}.json` },
+      `project ${configured}`,
+    )
+      .then((body) => {
+        const id = body.project?.id;
+        if (typeof id !== 'number') {
+          throw new BoardError(
+            'precondition',
+            `Redmine answered ${JSON.stringify(configured)} without a project id, so a scoped search cannot tell this ` +
+              "board's issues from another project's — pass the numeric project id to the `project` option",
+            { item: configured },
+          );
+        }
+        return String(id);
+      })
+      .catch((error: unknown) => {
+        this.resolvedProjectId = undefined;
+        throw error;
+      });
+    return this.resolvedProjectId;
+  }
+
+  /**
+   * Map already-collected issue payloads into work items: drop what the caller did not
+   * ask for, and REFUSE to hide a status this adapter cannot map.
+   *
+   * An issue whose Redmine status maps to NO delivery state is a configuration gap, not a
+   * filter outcome. Skipping it would make a board that is missing its statusMap look
+   * exactly like a board with no work — an unattended runner would then sit idle forever
+   * while its queue is full. So the status names are collected and reported together,
+   * once, with the fix in the message.
+   *
+   * Shared by the issue LIST and the SEARCH path on purpose: a scoped query cannot be
+   * allowed to report the same gap differently from an unscoped one.
+   */
+  private async mapWantedIssues(
+    collected: readonly RedmineIssuePayload[],
+    wanted: ReadonlySet<BoardWorkItemState>,
+    max: number,
+  ): Promise<BoardWorkItem[]> {
     const items: BoardWorkItem[] = [];
-    // An issue whose Redmine status maps to NO delivery state is a configuration
-    // gap, not a filter outcome. Skipping it would make a board that is missing
-    // its statusMap look exactly like a board with no work — an unattended runner
-    // would then sit idle forever while its queue is full. So the status names are
-    // collected and reported together, once, with the fix in the message.
     const unmapped = new Map<string, string>();
     for (const issue of collected.slice(0, max)) {
       let item: BoardWorkItem;
@@ -329,6 +525,83 @@ export class RedmineBoardProvider implements TaskBoardProvider {
 
   async getWork(id: string): Promise<BoardWorkItem> {
     return this.toWorkItem(await this.fetchIssue(id));
+  }
+
+  /**
+   * File an issue in the status the requested state maps to.
+   *
+   * Three things this refuses to guess, because each of them would put work in the wrong
+   * place: an unmapped state (no `statusMap` entry, or a status this instance does not
+   * have) fails naming the available statuses rather than filing something in the wrong
+   * one; a `labels` request fails because Redmine core issues have no labels; and a
+   * project is used exactly as the adapter already uses it (the numeric id), never
+   * resolved from a name.
+   *
+   * Deduplication: the marker is written into the DESCRIPTION and looked for with
+   * Redmine's full-text search first, then VERIFIED locally by fetching the candidates and
+   * parsing the description with `createKeyOf`. The search is a prefilter, the local check
+   * is authoritative — Redmine's search index can lag behind a write by seconds, and a
+   * duplicate filed because the index had not caught up is the thing this prevents. That
+   * lag is the known limit here; it is stated rather than hidden.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    if (spec.labels !== undefined && spec.labels.length > 0) {
+      throw new BoardError(
+        'unsupported',
+        'Redmine core issues carry no labels, so a create with labels cannot be honoured (refusing instead of dropping them)',
+      );
+    }
+
+    const state = spec.state ?? 'ready';
+    const marker = spec.idempotencyKey === undefined ? null : renderCreateMarker(spec.idempotencyKey);
+
+    if (marker !== null) {
+      const search = await requestBoardJson<{ results?: Array<{ id?: number; type?: string }> }>(
+        this.request,
+        {
+          method: 'GET',
+          url: `${this.baseUrl}/search.json?issues=1&limit=100&q=${encodeURIComponent(spec.idempotencyKey ?? '')}`,
+        },
+        'createWork: search',
+      );
+      const candidates = (search.results ?? []).filter((r) => r.type === 'issue' && typeof r.id === 'number');
+      for (const candidate of candidates) {
+        const issue = await this.fetchIssue(String(candidate.id));
+        if (Object.values(this.issueDescription(issue)).some((text) => text.includes(marker))) {
+          return { item: this.toWorkItem(issue), created: false };
+        }
+      }
+    }
+
+    const statusId = await this.resolveStatusId(this.statusMap[state]);
+    const description = marker === null ? (spec.body ?? '') : `${spec.body ?? ''}\n\n${marker}`;
+    const created = await requestBoardJson<RedmineIssueEnvelope>(
+      this.request,
+      {
+        method: 'POST',
+        url: `${this.baseUrl}/issues.json`,
+        body: {
+          issue: {
+            ...(this.project === undefined ? {} : { project_id: this.project }),
+            subject: spec.title,
+            description,
+            status_id: statusId,
+          },
+        },
+      },
+      'createWork',
+    );
+    const issue = created.issue;
+    if (issue === undefined) {
+      throw new BoardError('precondition', 'Redmine accepted the create but returned no issue');
+    }
+    return { item: this.toWorkItem(issue), created: true };
+  }
+
+  /** The description as this adapter sees it: one field today, and one place to look. */
+  private issueDescription(issue: RedmineIssuePayload): Record<string, string> {
+    return typeof issue.description === 'string' ? { description: issue.description } : {};
   }
 
   /**
@@ -522,6 +795,62 @@ export class RedmineBoardProvider implements TaskBoardProvider {
     await this.putIssue(id, { custom_fields: [entry] }, `writeState ${id}`);
   }
 
+  /**
+   * Report which of the delivery states this Redmine INSTALLATION can express.
+   *
+   * Redmine issue statuses live in ADMINISTRATION — `/issue_statuses.json` is a
+   * read-only resource — so `canBootstrapStates` is false and this is a READ-ONLY
+   * report, never a write. It answers, before any work is claimed, exactly the pain
+   * this adapter already documents: a `statusMap` naming a status nobody created
+   * makes every claim fail as `unsupported` with a list to compare against. Here the
+   * same fact is reported with the two steps that fix it.
+   *
+   * The status name comes from the adapter's OWN `statusMap` (a second mapping would
+   * drift), and the comparison is case-insensitive on purpose: that is the very rule
+   * `resolveStatusId` uses, so a status this report calls `exists` is a status this
+   * adapter can really resolve to an id.
+   *
+   * A status the installation has but NO state names (say `Triage`) is not an action
+   * here — `actions` is exactly one entry per desired state — it is the
+   * configuration gap `listWork` refuses to hide.
+   *
+   * A dry run is deliberately the SAME call: a report cannot change the
+   * installation, so `applied` is false either way.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    _opts?: { dryRun?: boolean },
+  ): Promise<BoardBootstrapReport> {
+    const available = new Set(
+      (await this.statuses())
+        .map((status) => status.name)
+        .filter((name): name is string => typeof name === 'string' && name.length > 0)
+        .map((name) => name.toLowerCase()),
+    );
+    const actions: BoardBootstrapAction[] = desired.map((state) => {
+      const name = this.statusMap[state];
+      if (available.has(name.toLowerCase())) return { state, name, outcome: 'exists' };
+      return {
+        state,
+        name,
+        outcome: 'not-creatable',
+        instruction:
+          `this Redmine has no issue status named ${JSON.stringify(name)}, so state ${JSON.stringify(state)} ` +
+          `cannot be represented: create that status in Redmine administration (Administration → Issue statuses) ` +
+          `and pass statusMap/--status-map "<delivery state>=<Status Name>" (here "${state}=${name}") so this ` +
+          `adapter can resolve it to an id — the REST API cannot create issue statuses`,
+      };
+    });
+    return {
+      provider: PROVIDER_ID,
+      // A report never changes the installation, so a real call and a dry run are
+      // the same read — and neither is `applied`.
+      applied: false,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((state) => !this.capabilities().states.includes(state)),
+    };
+  }
+
   // --- URLs ---------------------------------------------------------------
 
   /**
@@ -533,6 +862,25 @@ export class RedmineBoardProvider implements TaskBoardProvider {
     if (this.project !== undefined) params.push(`project_id=${encodeURIComponent(this.project)}`);
     params.push('status_id=open', `limit=${this.pageSize}`, `offset=${offset}`);
     return `${this.baseUrl}/issues.json?${params.join('&')}`;
+  }
+
+  /**
+   * The search URL for a free-text scope.
+   *
+   * `issues=1` asks for issues only (a global search also answers news, documents, wiki
+   * pages, changesets and messages), and `open_issues=1` keeps the SAME "open work" scope
+   * the list path gets from `status_id=open` — without it a scoped query would answer
+   * closed issues that `listWork()` never returns. The term is URL-encoded, so no term can
+   * alter the query itself, and `limit` is capped at what the search API will honour.
+   */
+  private searchUrl(term: string, max: number): string {
+    const limit = Number.isFinite(max)
+      ? Math.min(Math.max(Math.trunc(max), 1), MAX_SEARCH_LIMIT)
+      : DEFAULT_PAGE_SIZE;
+    return (
+      `${this.baseUrl}/search.json?issues=1&open_issues=1&q=${encodeURIComponent(term)}` +
+      `&limit=${limit}&offset=0`
+    );
   }
 
   /** The issue API resource (`.json`). */
@@ -777,6 +1125,27 @@ export function runMarker(runId: string): string {
 /** Append the hidden marker unless the text already carries it. */
 function withMarker(text: string, marker: string): string {
   return text.includes(marker) ? text : `${text}\n\n${marker}`;
+}
+
+/**
+ * Refuse a term that names no scope.
+ *
+ * WHY AN EMPTY TERM IS REFUSED: Redmine reads a blank `q` as "everything" (every issue's
+ * text contains the empty string), so honouring `query: ''` would answer with every open
+ * issue in the project — the exact widening a scope exists to prevent. The refusal names
+ * the problem instead. Any OTHER term is safe to send: it travels in the URL query string
+ * through `encodeURIComponent`, so no term can add a parameter to the search or change
+ * which endpoint is called — which is why this adapter escapes (URL encoding, the API's
+ * own grammar) where the Jira one has to reject characters that would rewrite the JQL.
+ */
+function assertSearchableTerm(term: string): void {
+  if (term.trim().length === 0) {
+    throw new BoardError(
+      'precondition',
+      'a text scope must contain at least one non-whitespace character: an empty term names no scope, and Redmine ' +
+        'reads a blank q as "everything" — sending it would widen the search to every open issue the caller meant to exclude',
+    );
+  }
 }
 
 /** A journal's notes as a string (Redmine may answer with `null`). */

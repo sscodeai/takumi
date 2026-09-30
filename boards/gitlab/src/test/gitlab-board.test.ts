@@ -42,6 +42,27 @@ const TRUSTED = 'takumi-bot';
 
 const PROJECT_ID = encodeURIComponent(PROJECT);
 const ISSUES = `${API}/projects/${PROJECT_ID}/issues`;
+const LABELS = `${API}/projects/${PROJECT_ID}/labels`;
+
+/**
+ * Every state label the default vocabulary writes, in `BOARD_WORK_ITEM_STATES`
+ * order — declared as LITERALS on purpose: a list derived from the adapter's own
+ * constant could not notice that constant changing.
+ */
+const STATE_LABELS = [
+  'takumi-ready',
+  'takumi-claimed',
+  'takumi-pr-open',
+  'takumi-fix-needed',
+  'takumi-merged',
+  'takumi-blocked',
+];
+
+/** A predicate for the error taxonomy: an adapter failure is classified, never a bare Error. */
+function boardError(kind: string, re?: RegExp) {
+  return (e: unknown): boolean =>
+    e instanceof BoardError && e.kind === kind && (re === undefined || re.test(e.message));
+}
 
 /** A provider wired to the in-process board, with the trust allowlist configured. */
 function board(
@@ -118,6 +139,25 @@ test('GitLabBoardProvider: passes the shared task-board contract suite (injected
   assert.ok(
     fake.calls().every((call) => call.includes(API)),
     'no request may address anything but the injected apiBase',
+  );
+  // The suite now bootstraps the state vocabulary itself, and this project had no
+  // label at all: the report must say the six were CREATED, not merely hoped for.
+  assert.ok(
+    out.notes.some((note) => note.startsWith('bootstrapStates: PASS (canCreate=true created=6 exists=0 notCreatable=0')),
+    out.notes.join('\n'),
+  );
+  // ...and it files an issue of its own: `canCreateWork: true` is a promise, and the
+  // suite checks the hard part of it (one item per idempotency key, claimable after).
+  assert.ok(
+    out.notes.some((note) => note.startsWith('createWork: PASS')),
+    out.notes.join('\n'),
+  );
+  // The suite searches FOR REAL now: it files a probe whose title carries a distinctive
+  // term and requires the adapter to find it, then requires a term nothing carries to
+  // find nothing. An adapter that ignored `query` could not pass that pair.
+  assert.ok(
+    out.notes.some((note) => note.startsWith('query: PASS')),
+    out.notes.join('\n'),
   );
 });
 
@@ -251,6 +291,234 @@ test('GitLabBoardProvider: the exact request shape of every port method', async 
   const read = await provider.readState('7');
   assert.deepEqual(fake.calls(), [`GET ${notes}`]);
   assert.deepEqual(read, { ...run2, note: 'second write' }, 'the newest trusted record is the one read back');
+});
+
+// --- listWork: the free-text scope is GitLab's search, not a local filter ----
+
+test('listWork: a text scope reaches the request as GitLab `search`, and a term nothing carries finds nothing', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  fake.seedIssue({
+    iid: 1,
+    title: 'Epic alpha: ship the intake',
+    description: 'the milestone this belongs to is takuepicalpha',
+    labels: ['takumi-ready'],
+  });
+  fake.seedIssue({ iid: 2, title: 'Unrelated chore', description: 'nothing to see here', labels: ['takumi-ready'] });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+
+  // (1) the term REACHES the request. This is the whole point of the capability: the
+  // BOARD searches, so a scope finds work beyond the first page too — filtering this
+  // page locally would only ever find what `per_page` had already returned.
+  fake.clear();
+  const hit = await provider.listWork({ states: ['ready'], query: 'takuepicalpha' });
+  assert.deepEqual(fake.calls(), [`GET ${ISSUES}?state=opened&per_page=100&search=takuepicalpha`]);
+  assert.deepEqual(hit.map((item) => item.id), ['1'], 'the item whose text carries the term is returned');
+
+  // (2) a term NOTHING carries returns nothing — and, just as important, it did not
+  // silently degrade into "no filter at all" (the failure mode the shared suite checks).
+  fake.clear();
+  const miss = await provider.listWork({ states: ['ready'], query: 'takunothingcarriesthis' });
+  assert.deepEqual(fake.calls(), [`GET ${ISSUES}?state=opened&per_page=100&search=takunothingcarriesthis`]);
+  assert.deepEqual(miss, [], 'a term no issue carries must find nothing, never everything');
+
+  // (3) the search reads the DESCRIPTION as well as the title: GitLab greps both, so a
+  // scope does not depend on where the operator put the epic's name.
+  fake.clear();
+  const inBody = await provider.listWork({ query: 'milestone' });
+  assert.deepEqual(fake.calls(), [`GET ${ISSUES}?state=opened&per_page=100&search=milestone`]);
+  assert.deepEqual(inBody.map((item) => item.id), ['1']);
+
+  // (4) several terms are an AND, and it is GitLab's to apply: no single issue carries
+  // both of these, so a hit would mean the adapter had loosened the operator's scope.
+  assert.deepEqual(
+    await provider.listWork({ query: 'takuepicalpha unrelated' }),
+    [],
+    'every term must appear in the ONE item; a term only another issue carries is not a hit',
+  );
+
+  // (5) the scope composes with the label filter, and the local state/limit filters
+  // still apply to what came back.
+  fake.clear();
+  const scoped = await provider.listWork({ labels: ['takumi-ready'], limit: 1, query: 'Epic alpha' });
+  assert.deepEqual(fake.calls(), [
+    `GET ${ISSUES}?state=opened&per_page=100&labels=takumi-ready&search=Epic%20alpha`,
+  ]);
+  assert.deepEqual(scoped.map((item) => item.id), ['1']);
+
+  // (6) a BLANK term is REFUSED, not turned into an unscoped request. This test used to
+  // assert the opposite — "a blank term is absent, so no `search=` is sent" — which is the
+  // silent widening the core rule forbids: the caller asked to narrow and got the whole
+  // board back, with nothing to show the scope had been dropped. The request is what proves
+  // it: a refused scope never reaches the host at all.
+  fake.clear();
+  await assert.rejects(
+    () => provider.listWork({ query: '   ' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'precondition');
+      return true;
+    },
+  );
+  assert.deepEqual(fake.calls(), [], 'a refused scope must not be sent');
+
+  assert.equal(provider.capabilities().canTextSearch, true);
+});
+
+// --- createWork: filing a failure as work, exactly once ---------------------
+
+/**
+ * The create-search URL the adapter uses: all states, the API's page ceiling, and the
+ * KEY as GitLab's `search` parameter. It is built by the SAME URL builder as the work
+ * list (one shape to keep correct), so the parameter order here is that builder's.
+ */
+function createSearch(key: string): string {
+  return `${ISSUES}?state=all&per_page=100&search=${encodeURIComponent(key)}`;
+}
+
+test('createWork: the exact create request, the hidden marker, and a second call that files nothing', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request, trustedAuthors: [TRUSTED] });
+  const KEY = 'ci:red:481';
+
+  const first = await provider.createWork({
+    title: 'Pipeline red on main',
+    body: 'job test failed on retry 2',
+    labels: ['ci'],
+    idempotencyKey: KEY,
+  });
+
+  // --- the request shape: search FIRST, then one create ---
+  assert.deepEqual(fake.calls(), [`GET ${createSearch(KEY)}`, `POST ${ISSUES}`]);
+  assert.deepEqual(fake.bodies()[1], {
+    title: 'Pipeline red on main',
+    // The marker rides in the description, where the reader greps for it.
+    description: `job test failed on retry 2\n\n<!-- takumi:created=${KEY} -->`,
+    // The state comes from the adapter's own vocabulary, and the caller's labels ride along.
+    labels: ['ci', 'takumi-ready'],
+  });
+
+  // --- the result: a real, ready, claimable work item ---
+  assert.equal(first.created, true);
+  assert.equal(first.item.id, '1', 'the created issue is addressed by its iid');
+  assert.equal(first.item.state, 'ready', 'the state label IS the delivery state, so a filed item starts ready');
+  assert.equal(first.item.body, `job test failed on retry 2\n\n<!-- takumi:created=${KEY} -->`);
+  assert.deepEqual(fake.labelsOf(1), ['ci', 'takumi-ready']);
+
+  fake.clear();
+  const ready = await provider.listWork({ states: ['ready'] });
+  assert.equal(ready.filter((item) => item.id === first.item.id).length, 1, 'the filed item appears exactly once');
+
+  // --- the retry: the search decides, and nothing is filed twice ---
+  fake.clear();
+  const second = await provider.createWork({
+    title: 'Pipeline red on main',
+    body: 'job test failed on retry 2',
+    labels: ['ci'],
+    idempotencyKey: KEY,
+  });
+  assert.equal(second.created, false, 'a repeated key must not report a creation');
+  assert.equal(second.item.id, first.item.id, 'and must return the FIRST item');
+  assert.deepEqual(second.item.labels, ['ci', 'takumi-ready']);
+  assert.deepEqual(fake.calls(), [`GET ${createSearch(KEY)}`], 'the search alone answers the retry');
+});
+
+test('createWork: the key is found after the item moved on (a retried tick must not re-file delivered work)', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request, trustedAuthors: [TRUSTED] });
+  const KEY = 'flake:timeout:9';
+
+  const filed = await provider.createWork({ title: 'Flaky test', idempotencyKey: KEY });
+  // The work happens: the item is claimed and a merge request is opened.
+  assert.equal((await provider.claim(filed.item.id, 'c0ffee01')).claimed, true);
+  await provider.transition(filed.item.id, 'pr_open', { runId: 'c0ffee01', note: 'opened MR !4' });
+
+  fake.clear();
+  const again = await provider.createWork({ title: 'Flaky test', idempotencyKey: KEY });
+  assert.equal(again.created, false);
+  assert.equal(again.item.id, filed.item.id);
+  assert.equal(again.item.state, 'pr_open', "the returned item is the board's CURRENT view of it");
+  // `state=all` in the search is what makes this work: the label has changed, so an
+  // open-issues-only search would have filed a second copy of finished work.
+  assert.deepEqual(fake.calls(), [`GET ${createSearch(KEY)}`]);
+});
+
+test('createWork: the title is the search result, the MARKER is the proof', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  // A person happened to write the key into a description, and GitLab's full-text
+  // search returns that issue for it. Only the marker can tell the two apart.
+  fake.seedIssue({ iid: 1, title: 'Discussion', description: 'we hit ci:red:481 yesterday' });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+
+  const filed = await provider.createWork({ title: 'Pipeline red', idempotencyKey: 'ci:red:481' });
+  assert.equal(filed.created, true, 'a search hit without the create marker is not our item');
+  assert.equal(filed.item.id, '2');
+  assert.deepEqual(fake.calls(), [`GET ${createSearch('ci:red:481')}`, `POST ${ISSUES}`]);
+});
+
+test('createWork: the requested state is the label it is filed under, and no key means no marker', async () => {
+  const fake = new FakeGitLab({ project: 'team/app', username: TRUSTED });
+  const provider = new GitLabBoardProvider({
+    project: 'team/app',
+    labelPrefix: 'ship-',
+    apiBase: API,
+    request: fake.request,
+  });
+
+  // Without a key there is nothing to search for: one create, and the description is
+  // exactly what the caller wrote (no stray blank line, no empty marker).
+  const filed = await provider.createWork({ title: 'Blocked intake', body: 'needs a human', state: 'blocked' });
+  assert.deepEqual(fake.calls(), [`POST ${API}/projects/team%2Fapp/issues`]);
+  assert.deepEqual(fake.bodies()[0], { title: 'Blocked intake', description: 'needs a human', labels: ['ship-blocked'] });
+  assert.equal(filed.item.state, 'blocked', 'a filed item can start in any state this adapter can express');
+  assert.equal(filed.created, true);
+  assert.deepEqual((await provider.listWork({ states: ['blocked'] })).map((item) => item.id), [filed.item.id]);
+
+  // The same through the ready default, with an empty body: the marker alone.
+  fake.clear();
+  const ready = await provider.createWork({ title: 'No body', idempotencyKey: 'k:1' });
+  assert.deepEqual(fake.bodies()[1], {
+    title: 'No body',
+    description: '<!-- takumi:created=k:1 -->',
+    labels: ['ship-ready'],
+  });
+  assert.equal(ready.item.state, 'ready');
+});
+
+test('createWork: a create the host rejects is classified, and the message names the fix', async () => {
+  const { fake, provider } = board({ iid: 1, labels: ['takumi-ready'] });
+  // GitLab's real answer for a label the project does not have.
+  fake.failWhen(
+    (req) => req.method === 'POST' && req.url.endsWith('/issues'),
+    400,
+    '{"message":"Label(s) not allowed for this project: takumi-ready"}',
+  );
+
+  await assert.rejects(
+    () => provider.createWork({ title: 'will not be filed', idempotencyKey: 'ci:red:2' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError, 'a rejected create must be a classified board error');
+      assert.equal(e.kind, 'precondition', 'retrying a refused create changes nothing');
+      assert.equal(e.retriable, false);
+      assert.match(e.message, /Label\(s\) not allowed/);
+      assert.match(e.message, /"takumi-ready"/, 'the label that caused it is named');
+      assert.match(e.message, /takumi board --bootstrap/, 'and so is the command that creates it');
+      return true;
+    },
+  );
+  // Nothing was filed, and nothing is pretended to have been.
+  assert.deepEqual(fake.calls(), [`GET ${createSearch('ci:red:2')}`, `POST ${ISSUES}`]);
+  assert.equal((await provider.listWork()).length, 1, 'the board still holds only the seeded issue');
+});
+
+test('createWork: a malformed idempotency key fails before any request', async () => {
+  const { fake, provider } = board({ iid: 1, labels: ['takumi-ready'] });
+  await assert.rejects(
+    () => provider.createWork({ title: 'x', idempotencyKey: 'not a key!' }),
+    boardError('precondition', /invalid idempotency key/),
+  );
+  // A marker nothing can find again would file a duplicate on every retry, so the
+  // key is rejected before the search rather than after the create.
+  assert.deepEqual(fake.calls(), []);
 });
 
 test('readState: control flow only ever follows a TRUSTED author', async () => {
@@ -465,6 +733,9 @@ test('capabilities(): GitLab declares its real limits instead of an idealised bo
   assert.equal(caps.machineReadableState, true);
   assert.equal(caps.atomicClaim, false, 'GitLab cannot update labels conditionally');
   assert.equal(caps.trustedAuthorFilter, false, 'no allowlist was configured');
+  assert.equal(caps.canBootstrapStates, true, 'GitLab labels are creatable through the API, so the adapter says it can');
+  assert.equal(caps.canCreateWork, true, 'GitLab issues are creatable, so a failure can be filed as work');
+  assert.equal(caps.canTextSearch, true, 'the issue list takes GitLab\'s own `search` parameter, so free text is the board\'s job');
   assert.deepEqual(caps.delivery, { canOpenPullRequest: true, canRunChecks: true, canMerge: true });
   assert.equal(provider.metadata().id, 'gitlab');
 
@@ -521,6 +792,32 @@ test('gated operations fail closed BEFORE any request', async () => {
   assert.equal((await stateOf(provider, '7')), 'ready');
 });
 
+/** A provider that declares it cannot file items: `createWork` must fail closed. */
+class NoCreateGitLabBoard extends GitLabBoardProvider {
+  override capabilities(): BoardCapabilities {
+    return { ...super.capabilities(), canCreateWork: false };
+  }
+}
+
+test('createWork: a board that declares it cannot file work refuses it, before any request', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  fake.seedIssue({ iid: 7, labels: ['takumi-ready'] });
+  const provider = new NoCreateGitLabBoard({ project: PROJECT, apiBase: API, request: fake.request });
+
+  await assert.rejects(
+    () => provider.createWork({ title: 'must be refused', idempotencyKey: 'ci:red:3' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardUnsupportedError);
+      assert.equal(e.capability, 'canCreateWork');
+      assert.equal(e.kind, 'unsupported');
+      return true;
+    },
+  );
+  // Refusing is the honest answer; quietly filing anyway (or returning a fabricated
+  // item) would hand the caller an id nothing backs.
+  assert.deepEqual(fake.calls(), []);
+});
+
 test('the state-label vocabulary is explicit: intake, precedence and custom prefixes', async () => {
   const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
   fake.seedIssue({ iid: 1, title: 'filed by a human' }); // no labels at all
@@ -560,6 +857,144 @@ test('the state-label vocabulary is explicit: intake, precedence and custom pref
   custom.clear();
   await customProvider.listWork({ labels: ['team a', 'ready'] });
   assert.deepEqual(custom.calls(), [`GET ${API}/projects/team%2Fapp/issues?state=opened&per_page=100&labels=team%20a,ready`]);
+});
+
+// --- state bootstrapping ----------------------------------------------------
+
+test('bootstrapStates: a dry run changes nothing, the real call creates every missing label, a second call is a no-op', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  fake.seedIssue({ iid: 1 });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+  fake.clear();
+
+  // --- dry run: ONE read, a promise per missing label, no write ---
+  const dry = await provider.bootstrapStates([...BOARD_WORK_ITEM_STATES], { dryRun: true });
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`], 'a dry run must only read');
+  assert.equal(dry.provider, 'gitlab', 'the report names the provider the suite checked');
+  assert.equal(dry.applied, false);
+  assert.deepEqual(dry.unsupported, []);
+  assert.deepEqual(
+    dry.actions,
+    [...BOARD_WORK_ITEM_STATES].map((state, index) => ({ state, name: STATE_LABELS[index], outcome: 'would-create' })),
+  );
+  assert.deepEqual(fake.labelsOnBoard(), [], 'the dry run must not have created anything');
+
+  // --- the real call creates exactly the labels the dry run promised ---
+  fake.clear();
+  const applied = await provider.bootstrapStates([...BOARD_WORK_ITEM_STATES]);
+  assert.equal(applied.applied, true);
+  assert.deepEqual(
+    applied.actions,
+    [...BOARD_WORK_ITEM_STATES].map((state, index) => ({ state, name: STATE_LABELS[index], outcome: 'created' })),
+  );
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`, ...STATE_LABELS.map(() => `POST ${LABELS}`)]);
+  // GitLab 400s on a label without a colour, so the create carries one; the name
+  // is the one THIS instance writes (`<prefix><suffix>`), and nothing else rides along.
+  assert.deepEqual(
+    fake.bodies().slice(1),
+    STATE_LABELS.map((name) => ({ name, color: '#1f6feb' })),
+  );
+  assert.deepEqual(fake.labelsOnBoard().map((label) => label.name), STATE_LABELS);
+  // The labels are not only created but USABLE: the state they encode is now readable.
+  assert.equal(await stateOf(provider, '1'), 'ready');
+
+  // --- idempotence: reading is enough now ---
+  fake.clear();
+  const again = await provider.bootstrapStates([...BOARD_WORK_ITEM_STATES]);
+  assert.equal(again.applied, false, 'a second bootstrap changes nothing');
+  assert.deepEqual(
+    again.actions,
+    [...BOARD_WORK_ITEM_STATES].map((state, index) => ({ state, name: STATE_LABELS[index], outcome: 'exists' })),
+  );
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`], 'a second call must not write');
+});
+
+test('bootstrapStates: a custom prefix is honoured, and colour drift is reported `exists`, never rewritten', async () => {
+  const fake = new FakeGitLab({ project: 'team/app', username: TRUSTED });
+  // A human made this label by hand, in their own colour: a bootstrap is not a
+  // licence to repaint somebody else's label.
+  fake.seedLabel('ship-claimed', '#ff0000');
+  fake.seedLabel('unrelated');
+  const provider = new GitLabBoardProvider({ project: 'team/app', labelPrefix: 'ship-', apiBase: API, request: fake.request });
+  fake.clear();
+
+  const report = await provider.bootstrapStates(['ready', 'claimed']);
+  assert.deepEqual(report.actions, [
+    { state: 'ready', name: 'ship-ready', outcome: 'created' },
+    { state: 'claimed', name: 'ship-claimed', outcome: 'exists' },
+  ]);
+  assert.deepEqual(fake.calls(), [
+    `GET ${API}/projects/team%2Fapp/labels?per_page=100&page=1`,
+    `POST ${API}/projects/team%2Fapp/labels`,
+  ]);
+  assert.deepEqual(fake.bodies()[1], { name: 'ship-ready', color: '#1f6feb' });
+  assert.deepEqual(fake.labelsOnBoard(), [
+    { name: 'ship-claimed', color: '#ff0000' },
+    { name: 'unrelated', color: '#ededed' },
+    { name: 'ship-ready', color: '#1f6feb' },
+  ]);
+});
+
+test('bootstrapStates: every label page is read, so a label on page 2 is found (a re-create would be a 409)', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  // 100 unrelated labels fill page one EXACTLY. The seam exposes no response
+  // headers, so a page shorter than `per_page` is the only end-of-list signal —
+  // and this proves the walk reaches page 2 before deciding what is missing.
+  for (let index = 0; index < 100; index += 1) fake.seedLabel(`filler-${String(index).padStart(3, '0')}`);
+  for (const name of STATE_LABELS) fake.seedLabel(name);
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+  fake.clear();
+
+  const report = await provider.bootstrapStates([...BOARD_WORK_ITEM_STATES]);
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`, `GET ${LABELS}?per_page=100&page=2`]);
+  assert.equal(report.applied, false, 'everything was already there');
+  assert.ok(report.actions.every((action) => action.outcome === 'exists'));
+});
+
+/** A provider that declares only part of the vocabulary: the fail-closed report path. */
+class PartialVocabularyGitLabBoard extends GitLabBoardProvider {
+  override capabilities(): BoardCapabilities {
+    const caps = super.capabilities();
+    return { ...caps, states: caps.states.filter((state) => state !== 'merged') };
+  }
+}
+
+test('bootstrapStates: a state this adapter cannot express is reported with an instruction, never created', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  const provider = new PartialVocabularyGitLabBoard({ project: PROJECT, apiBase: API, request: fake.request });
+
+  const report = await provider.bootstrapStates(['ready', 'merged']);
+  assert.deepEqual(report.unsupported, ['merged'], 'the complement of capabilities().states is named');
+  assert.deepEqual(report.actions[0], { state: 'ready', name: 'takumi-ready', outcome: 'created' });
+  const merged = report.actions[1];
+  assert.equal(merged?.state, 'merged');
+  assert.equal(merged?.outcome, 'not-creatable');
+  assert.match(merged?.instruction ?? '', /cannot express "merged" as a label/);
+  assert.match(merged?.instruction ?? '', /takumi board --check/, 'an instruction must say what to do next');
+  // Only the expressible state was written.
+  assert.deepEqual(fake.calls(), [`GET ${LABELS}?per_page=100&page=1`, `POST ${LABELS}`]);
+  assert.deepEqual(fake.labelsOnBoard().map((label) => label.name), ['takumi-ready']);
+});
+
+test('bootstrapStates: a refused label create is classified, never reported as success', async () => {
+  const fake = new FakeGitLab({ project: PROJECT, username: TRUSTED });
+  const provider = new GitLabBoardProvider({ project: PROJECT, apiBase: API, request: fake.request });
+
+  fake.failWhen((req) => req.method === 'POST' && req.url.endsWith('/labels'), 403);
+  await assert.rejects(
+    () => provider.bootstrapStates(['ready']),
+    boardError('auth', /createLabel takumi-ready failed with HTTP 403/),
+  );
+  assert.deepEqual(fake.labelsOnBoard(), [], 'a failed bootstrap must not look like it worked');
+
+  // A 409 (somebody created the label between our read and our write) is a
+  // precondition: retrying it changes nothing, so it must not be retriable.
+  fake.clearFaults();
+  fake.failWhen((req) => req.method === 'POST' && req.url.endsWith('/labels'), 409, '{"message":"Label already exists"}');
+  await assert.rejects(
+    () => provider.bootstrapStates(['ready']),
+    (e: unknown) => boardError('precondition', /already exists/)(e) && (e as BoardError).retriable === false,
+  );
 });
 
 test('writeState: a record naming another item is refused before any request', async () => {

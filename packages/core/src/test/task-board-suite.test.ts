@@ -2,21 +2,28 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertBoardCapability,
+  assertScopeQuery,
   assertTransition,
+  BOARD_WORK_ITEM_STATES,
   BoardError,
   BoardUnsupportedError,
+  renderCreateMarker,
   runTaskBoardProviderContractSuite,
   validateBoardCapabilities,
 } from '../index.js';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
   BoardStateRecord,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkItemState,
   BoardWorkQuery,
   ClaimResult,
+  CreateWorkResult,
   TaskBoardProvider,
 } from '../index.js';
 
@@ -30,12 +37,15 @@ class ProbeProvider implements TaskBoardProvider {
   private readonly items = new Map<string, { item: BoardWorkItem; claim?: string }>();
   private readonly comments = new Map<string, { body: string; seq: number }>();
   private readonly records = new Map<string, { record: BoardStateRecord; trusted: boolean }>();
+  /** States this probe has already created (bootstrap is idempotent). */
+  private readonly bootstrapped = new Set<BoardWorkItemState>();
   private seq = 0;
 
   constructor(
     private readonly opts: {
       id?: string;
       breakSilentReclaim?: boolean;
+      breakTextSearch?: boolean;
       breakSilentCommentUpdate?: boolean;
       caps?: Omit<Partial<BoardCapabilities>, 'delivery'> & { delivery?: Partial<BoardCapabilities['delivery']> };
     } = {},
@@ -60,8 +70,41 @@ class ProbeProvider implements TaskBoardProvider {
     trustedAuthorFilter: true,
     machineReadableState: true,
     atomicClaim: true,
+    canBootstrapStates: true,
+    canCreateWork: true,
+    canTextSearch: true,
     delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
   };
+
+  /**
+   * The probe's createWork: idempotent on the marker, exactly as an adapter must be. The
+   * suite's createWork assertions run against THIS, so a suite that stopped checking the
+   * key would be visible here rather than at an adapter.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    const finding = (): { item: BoardWorkItem; claim?: string } | undefined =>
+      spec.idempotencyKey === undefined
+        ? undefined
+        : [...this.items.values()].find((entry) => entry.item.body.includes(renderCreateMarker(spec.idempotencyKey ?? '')));
+    const existing = finding();
+    if (existing !== undefined) return { item: { ...existing.item }, created: false };
+    this.seq += 1;
+    const id = `T-${this.seq + 1}`;
+    const marker = spec.idempotencyKey === undefined ? '' : `\n\n${renderCreateMarker(spec.idempotencyKey)}`;
+    const item: BoardWorkItem = {
+      id,
+      title: spec.title,
+      body: `${spec.body ?? ''}${marker}`,
+      url: `https://board.example/${id}`,
+      state: spec.state ?? 'ready',
+      labels: [...(spec.labels ?? [])],
+      assignees: [],
+      updatedAt: '2026-09-15T00:00:00.000Z',
+    };
+    this.items.set(id, { item });
+    return { item: { ...item }, created: true };
+  }
 
   metadata() {
     return { id: this.opts.id ?? 'probe', name: 'Probe Board', version: '0.1.0' };
@@ -77,7 +120,19 @@ class ProbeProvider implements TaskBoardProvider {
     return entry;
   }
 
-  async listWork(query?: BoardWorkQuery): Promise<BoardWorkItem[]> {
+  async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
+    if (query.query !== undefined) assertScopeQuery(query.query);
+    if (query.query !== undefined && !this.opts.breakTextSearch) {
+      const needle = query.query.toLowerCase();
+      return [...this.items.values()]
+        .map((entry) => entry.item)
+        .filter((item) => `${item.title}\n${item.body}`.toLowerCase().includes(needle))
+        .filter((item) => query.states === undefined || query.states.includes(item.state));
+    }
+    if (query.query !== undefined) {
+      // A probe that cannot search must FAIL, which is what the suite asserts.
+      throw new BoardUnsupportedError('canTextSearch', this.metadata().id);
+    }
     const limit = query?.limit ?? Number.POSITIVE_INFINITY;
     return [...this.items.values()].slice(0, limit).map((e) => e.item);
   }
@@ -141,6 +196,37 @@ class ProbeProvider implements TaskBoardProvider {
     assertBoardCapability(this, 'machineReadableState');
     this.must(id);
     this.records.set(id, { record, trusted: opts?.author?.trusted !== false });
+  }
+
+  /**
+   * The probe can create its own states (it owns them), so the suite exercises the
+   * creation path here: dry run says would-create, the real call creates, the second
+   * call reports exists.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts: { dryRun?: boolean } = {},
+  ): Promise<BoardBootstrapReport> {
+    const actions: BoardBootstrapAction[] = [];
+    let created = false;
+    for (const state of desired) {
+      const name = `state:${state}`;
+      if (this.bootstrapped.has(state)) {
+        actions.push({ state, name, outcome: 'exists' });
+      } else if (opts.dryRun === true) {
+        actions.push({ state, name, outcome: 'would-create' });
+      } else {
+        this.bootstrapped.add(state);
+        created = true;
+        actions.push({ state, name, outcome: 'created' });
+      }
+    }
+    return {
+      provider: this.metadata().id,
+      applied: created,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((s) => !this.capabilities().states.includes(s)),
+    };
   }
 }
 

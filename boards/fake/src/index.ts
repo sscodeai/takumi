@@ -1,12 +1,19 @@
 import {
   assertBoardCapability,
+  assertScopeQuery,
+  BOARD_WORK_ITEM_STATES,
   BoardError,
+  renderCreateMarker,
   assertTransition,
   parseBoardStateRecord,
   renderBoardStateRecord,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
+  BoardWorkItemSpec,
+  CreateWorkResult,
   BoardCommentAuthor,
   BoardCommentRef,
   BoardDeliveryCapabilities,
@@ -58,6 +65,9 @@ const DEFAULT_CAPABILITIES: BoardCapabilities = {
   trustedAuthorFilter: true,
   machineReadableState: true,
   atomicClaim: true,
+  canBootstrapStates: true,
+  canCreateWork: true,
+  canTextSearch: true,
   delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
 };
 
@@ -76,7 +86,10 @@ interface FakeComment {
 export class FakeBoardProvider implements TaskBoardProvider {
   private readonly items = new Map<string, FakeItem>();
   private readonly comments = new Map<string, FakeComment>();
+  private itemSeq = 0;
   private readonly records = new Map<string, Array<{ record: BoardStateRecord; trusted: boolean }>>();
+  /** States this board has already created (so bootstrap is idempotent). */
+  private readonly bootstrapStates_ = new Set<BoardWorkItemState>();
   private readonly capabilities_: BoardCapabilities;
   private readonly clock: () => number;
   private commentSeq = 0;
@@ -129,9 +142,46 @@ export class FakeBoardProvider implements TaskBoardProvider {
     return this.capabilities_;
   }
 
+  /**
+   * The reference `createWork`: deduplication by the marker in the body, exactly the way
+   * an adapter has to do it without a native idempotency key.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    if (spec.idempotencyKey !== undefined) {
+      const marker = renderCreateMarker(spec.idempotencyKey);
+      const existing = [...this.items.values()].find((entry) => entry.item.body.includes(marker));
+      if (existing !== undefined) return { item: { ...existing.item }, created: false };
+    }
+    this.itemSeq += 1;
+    const id = `FAKE-${this.itemSeq}`;
+    const marker = spec.idempotencyKey === undefined ? '' : `\n\n${renderCreateMarker(spec.idempotencyKey)}`;
+    const item: BoardWorkItem = {
+      id,
+      title: spec.title,
+      body: `${spec.body ?? ''}${marker}`,
+      url: `https://board.example/${id}`,
+      state: spec.state ?? 'ready',
+      labels: [...(spec.labels ?? [])],
+      assignees: [],
+      updatedAt: new Date(this.clock()).toISOString(),
+    };
+    this.items.set(id, { item });
+    return { item: { ...item }, created: true };
+  }
+
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
+    // The reference implementation follows the core rule the suite enforces: a scope that
+    // names nothing is refused, never treated as "no filter".
+    const term = assertScopeQuery(query.query);
     const limit = query.limit ?? Number.POSITIVE_INFINITY;
     return [...this.items.values()]
+      .filter((e) => {
+        if (term === undefined) return true;
+        // A substring search over the text a person would look at, case-insensitively:
+        // the reference behaviour the real boards' own searches are measured against.
+        return `${e.item.title}\n${e.item.body}`.toLowerCase().includes(term.toLowerCase());
+      })
       .filter((e) => (query.states === undefined ? true : query.states.includes(e.item.state)))
       .filter((e) =>
         query.labels === undefined ? true : query.labels.every((label) => e.item.labels.includes(label)),
@@ -201,6 +251,37 @@ export class FakeBoardProvider implements TaskBoardProvider {
     return trusted.reduce((newest, e) =>
       Date.parse(e.record.updatedAt) >= Date.parse(newest.record.updatedAt) ? e : newest,
     ).record;
+  }
+
+  /**
+   * The fake board owns its states, so it can create them — the reference
+   * behaviour the real adapters are measured against: a dry run reports what it
+   * would do, the real call creates, a second call reports `exists`.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts: { dryRun?: boolean } = {},
+  ): Promise<BoardBootstrapReport> {
+    const actions: BoardBootstrapAction[] = [];
+    let applied = false;
+    for (const state of desired) {
+      const name = `takumi-${state}`;
+      if (this.bootstrapStates_.has(state)) {
+        actions.push({ state, name, outcome: 'exists' });
+      } else if (opts.dryRun === true) {
+        actions.push({ state, name, outcome: 'would-create' });
+      } else {
+        this.bootstrapStates_.add(state);
+        applied = true;
+        actions.push({ state, name, outcome: 'created' });
+      }
+    }
+    return {
+      provider: this.metadata().id,
+      applied,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((state) => !this.capabilities().states.includes(state)),
+    };
   }
 
   async writeState(id: string, record: BoardStateRecord, opts?: { author?: BoardCommentAuthor }): Promise<void> {

@@ -73,15 +73,20 @@ export {
   BoardUnsupportedError,
   validateBoardCapabilities,
   assertBoardCapability,
+  assertScopeQuery,
   runTaskBoardProviderContractSuite,
 } from './task-board.js';
 export type {
   TaskBoardProvider,
   BoardProviderMetadata,
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardDeliveryCapabilities,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkQuery,
+  CreateWorkResult,
   BoardCommentRef,
   BoardCommentAuthor,
   ClaimResult,
@@ -101,10 +106,58 @@ export {
 } from './board-transport.js';
 export type { BoardHttpRequest, BoardHttpResponse, BoardRequestFn, CurlRequestFnOptions } from './board-transport.js';
 
+// The pilot safety rails (ADR-008): one runner per slot, a closed event
+// vocabulary, and a report on whether the board can even express the six states.
+export { acquireSlot, isProcessAlive, slotLockPath, withSlot } from './slot-lock.js';
+export type { SlotAcquisition, SlotHandle, SlotLockOptions, SlotOwner, SlotRunResult } from './slot-lock.js';
+export {
+  EVENT_KINDS,
+  createEventLog,
+  formatEventLine,
+  isEventKind,
+  lineSink,
+  arraySink,
+  nullEventLog,
+} from './events.js';
+export type { EventKind, EventLog, EventLogOptions, EventSink, EventValue, RunEvent } from './events.js';
+
 // The git seam and the run marker: shared by every delivery adapter.
 export { createGitRunner, unconfiguredGitRunner, gitFailure } from './git-runner.js';
 export type { GitRunner, GitResult, GitRunnerOptions } from './git-runner.js';
 export { renderRunMarker, parseRunMarkers, hasRunMarker } from './run-marker.js';
+export { createKeyOf, hasCreateMarker, parseCreateMarkers, renderCreateMarker } from './create-marker.js';
+
+// Pilot metrics: counters a scheduler's monitoring can scrape.
+export {
+  bumpMetrics,
+  emptyMetrics,
+  readMetricsFile,
+  renderPrometheus,
+  writeMetricsFile,
+} from './metrics.js';
+export type { PilotMetrics, PilotOutcomeCounters } from './metrics.js';
+
+// The pilot: one tick of an unattended runner, and the worktrees it uses.
+export { runPilotTick, pilotRunId } from './pilot.js';
+export type { PilotPolicy, PilotTickDeps, PilotTickOutcome, PilotTickResult } from './pilot.js';
+export {
+  createTaskWorktree,
+  currentBranch,
+  currentHead,
+  pruneTaskWorktrees,
+  readFrozenBase,
+  removeTaskWorktree,
+  resolveRef,
+  worktreeBranchName,
+  worktreeDirName,
+} from './worktree.js';
+export type {
+  PruneOptions,
+  PruneResult,
+  WorktreeHandle,
+  WorktreeManagerOptions,
+  WorktreeRequest,
+} from './worktree.js';
 
 // The delivery loop: claim -> agent -> deliver -> review -> merge, in order.
 export { runDeliveryLoop } from './delivery-loop.js';

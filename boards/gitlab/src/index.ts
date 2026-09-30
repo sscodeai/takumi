@@ -28,23 +28,49 @@
  *    note from a maintainer's, and says so. With an allowlist, only those
  *    usernames may drive control flow.
  * 3. One page per list call: the request seam exposes a status and a body but
- *    no response headers, so `X-Next-Page` pagination cannot be followed. Lists
- *    are therefore capped at 100 items per call (`per_page=100`).
+ *    no response headers, so `X-Next-Page` pagination cannot be followed. Issue
+ *    lists are therefore capped at 100 items per call (`per_page=100`).
+ * 4. `bootstrapStates()` CREATES the states it needs (`canBootstrapStates: true`)
+ *    instead of only printing a to-do list, because a project's labels are
+ *    writable through the API and a runner that dies with GitLab's "no such
+ *    label" teaches the operator nothing. It reads the label list by walking
+ *    pages until one comes back short (note 3 applies to any list endpoint) and
+ *    creates what is missing, with one shared colour; a label that already
+ *    exists is reported `exists` and never rewritten.
+ * 5. `createWork()` files issues, and is idempotent through a MARKER rather than a
+ *    native key: GitLab has none, so the item carries CORE's create marker in its
+ *    description and a create SEARCHES for it before writing (see `createWork`).
+ *    The search is one page wide (note 3), which is the honest reach of the
+ *    guarantee — the failure mode is described where it is made, never hidden.
+ * 6. `canTextSearch: true`, and WHY it is the board that searches: a
+ *    `BoardWorkQuery.query` is sent to GitLab's own `search` parameter on the
+ *    issue list (`search=<term>`), never applied by filtering one page here —
+ *    a local filter could only find what `per_page` already returned, which is
+ *    a search that silently misses work. What GitLab's basic (non-Elastic)
+ *    search matches is TEXT: the issue title and description, term by term, with
+ *    no stemming guarantee — so an issue that merely MENTIONS the term in prose
+ *    is a hit. That is exactly why the create path confirms its search hit with
+ *    the marker (note 5) instead of trusting the hit.
  */
 
 import {
   assertBoardHttpOk,
   assertBoardCapability,
+  assertScopeQuery,
   assertTransition,
   BoardError,
   BOARD_WORK_ITEM_STATES,
+  createKeyOf,
   createCurlRequestFn,
   newestBoardStateRecord,
   parseBoardStateRecord,
+  renderCreateMarker,
   renderBoardStateRecord,
   unconfiguredRequestFn,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -54,9 +80,11 @@ import type {
   BoardStateRecord,
   BoardTransitionEvidence,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkItemState,
   BoardWorkQuery,
   ClaimResult,
+  CreateWorkResult,
   TaskBoardProvider,
 } from '@takumi/core';
 
@@ -67,6 +95,19 @@ const DEFAULT_LABEL_PREFIX = 'takumi-';
 
 /** GitLab's own page limit; also the ceiling of what this adapter can see (see header note 3). */
 const PAGE_SIZE = 100;
+
+/**
+ * The colour every state label this adapter creates gets.
+ *
+ * GitLab REFUSES a label without a colour, but takumi never reads a colour back
+ * (the delivery state comes from the label NAME alone), so one shared colour is
+ * enough — a six-colour palette would imply a meaning the adapter does not have.
+ * A label that already exists with a different colour is reported `exists` and
+ * left untouched: the colour is decoration, and rewriting a label takumi did not
+ * create is a change the report never promised. That drift belongs in a future
+ * `BoardBootstrapAction` field, not smuggled into `name`.
+ */
+const STATE_LABEL_COLOR = '#1f6feb';
 
 /** Environment variable holding the personal/project access token. */
 const TOKEN_ENV = 'GITLAB_TOKEN';
@@ -124,6 +165,39 @@ function runMarker(runId: string): string {
   }
 }
 
+/**
+ * The create marker is CORE's (`renderCreateMarker`): one grammar for one thing
+ * and — because the reader greps for exactly this spelling — the only thing that
+ * makes a retried create find what the first one filed.
+ *
+ * A malformed key fails HERE, as this port's own `precondition`, and before any
+ * request: a marker nothing can find again is a duplicate generator, which is the
+ * one outcome this whole mechanism exists to prevent.
+ */
+function markerFor(key: string): string {
+  try {
+    return renderCreateMarker(key);
+  } catch (e) {
+    throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
+  }
+}
+
+/**
+ * The term to send as GitLab's `search` parameter, or `undefined` for "no text scope".
+ *
+ * A blank (whitespace-only) term is treated as ABSENT rather than sent as `search=`:
+ * an empty search value is not a narrower scope, it is an unrequested narrowing that
+ * GitLab answers with everything — i.e. a filter that looks applied and is not, which
+ * is the silent widening this contract exists to forbid.
+ */
+function textSearchTerm(value: string | undefined): string | undefined {
+  // Core owns the rule (carry the scope faithfully or refuse it). This used to return
+  // `undefined` for a blank term — which sent no filter at all and returned the whole
+  // board, the exact silent widening the rule forbids, hidden behind a comment that
+  // claimed to be avoiding it.
+  return assertScopeQuery(value);
+}
+
 /** The subset of GitLab's issue JSON this adapter reads/writes. */
 interface GitLabIssuePayload {
   iid?: number;
@@ -142,6 +216,17 @@ interface GitLabNotePayload {
   body?: string | null;
   author?: { username?: string | null } | null;
   created_at?: string | null;
+}
+
+/**
+ * The subset of GitLab's label JSON this adapter reads.
+ *
+ * `color` is deliberately ABSENT: the adapter only ever asks whether a label
+ * exists, and reading a colour would invite "correcting" a human's label (see
+ * {@link STATE_LABEL_COLOR}).
+ */
+interface GitLabLabelPayload {
+  name?: string | null;
 }
 
 /** Construction options for {@link GitLabBoardProvider}. */
@@ -268,6 +353,17 @@ export class GitLabBoardProvider implements TaskBoardProvider {
       machineReadableState: true,
       // GitLab label updates are not conditional; see the class doc note 1.
       atomicClaim: false,
+      // Labels are free text the API can create, so this adapter can bootstrap
+      // its own vocabulary instead of asking a human to click six labels first
+      // (see the class doc note 4).
+      canBootstrapStates: true,
+      // Issues are creatable, so a failure that has to become work CAN become work
+      // here instead of only being commented on (see the class doc note 5).
+      canCreateWork: true,
+      // Free-text scope is a first-class GitLab parameter on the issue list
+      // (`search=`), so a caller can say "only this epic" without takumi inventing
+      // an epic model (see the class doc note 6 for what the search actually reads).
+      canTextSearch: true,
       // GitLab has merge requests and pipelines, so the delivery side is real.
       delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
     };
@@ -276,13 +372,16 @@ export class GitLabBoardProvider implements TaskBoardProvider {
   /**
    * List open issues. `query.labels` is passed straight to GitLab's `labels`
    * parameter (comma-separated = AND, every listed label must be present);
-   * `query.states` is applied locally because six states map onto six labels
-   * and GitLab's parameter cannot express OR without also matching unrelated
-   * issues. At most `per_page=100` items are visible per call (see class note 3).
+   * `query.query` becomes GitLab's `search` parameter, so the TEXT scope is
+   * applied by the BOARD and not by filtering this page here — a local filter can
+   * only find what `per_page` already returned, i.e. a search that silently misses
+   * work (class note 6). `query.states` is applied locally because six states map
+   * onto six labels and GitLab's parameter cannot express OR without also matching
+   * unrelated issues. At most `per_page=100` items are visible per call (note 3).
    */
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
     const issues = await this.send<GitLabIssuePayload[]>(
-      { method: 'GET', url: this.issuesUrl('opened', query.labels) },
+      { method: 'GET', url: this.issuesUrl('opened', query.labels, textSearchTerm(query.query)) },
       'listIssues',
     );
     const items = asArray(issues).map((issue) => this.toWorkItem(issue));
@@ -294,6 +393,69 @@ export class GitLabBoardProvider implements TaskBoardProvider {
   /** Read one issue; an unknown iid is GitLab's 404 → `BoardError('not_found')`. */
   async getWork(id: string): Promise<BoardWorkItem> {
     return this.toWorkItem(await this.fetchIssue(id));
+  }
+
+  /**
+   * File a new issue — idempotently, or not at all.
+   *
+   * The delivery state IS a label, so the issue is filed carrying the state's label
+   * (plus any `spec.labels`) and is therefore immediately a normal work item: it
+   * lists, claims and transitions like any other. That also means the state label
+   * has to exist before this can succeed, which is why a refusal is translated into
+   * an instruction rather than passed through (see `createFailure`).
+   *
+   * WHY a search and not a `listWork` scan: no board here has a native idempotency
+   * key, so the key is rendered by CORE (`renderCreateMarker`) into the issue's
+   * description and looked for BEFORE writing anything. A scan of the issue list
+   * would be one page wide and would miss a delivered item (whose state label no
+   * longer matches) — and a duplicate filed because the first page did not contain
+   * the item is exactly the outcome this prevents.
+   *
+   * HOW FAR the guarantee reaches, stated plainly: the search endpoint answers one
+   * page (100 items, class doc note 3 — the seam exposes no `X-Next-Page`), and a
+   * `search` index can lag behind a write on installations backed by advanced
+   * search. If the search cannot SEE the item, this method files a second one and
+   * reports `created: true`; the caller should expect that, and the marker makes the
+   * duplicate findable by hand. It is not silently skipped: every create searches.
+   * The alternative — trusting the search and returning a fabricated item — would be
+   * worse: a caller that gets `created: true` must be able to believe it.
+   *
+   * The adoption test is the marker itself (`createKeyOf`), never the search hit: an
+   * issue that merely MENTIONS the key in prose was not created for it and must not
+   * be adopted, or a retry would silently point at somebody else's issue.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    const state = spec.state ?? 'ready';
+    const key = spec.idempotencyKey;
+    const marker = key === undefined ? null : markerFor(key);
+
+    if (key !== undefined && marker !== null) {
+      const existing = await this.findByCreateKey(key);
+      if (existing !== null) return { item: this.toWorkItem(existing), created: false };
+    }
+
+    const labels = [...(spec.labels ?? []), this.labelFor(state)];
+    try {
+      const created = await this.send<GitLabIssuePayload>(
+        {
+          method: 'POST',
+          url: this.issuesPath,
+          body: { title: spec.title, description: withCreateMarker(spec.body ?? '', marker), labels },
+        },
+        'createWork',
+      );
+      if (created.iid === undefined || created.iid === null) {
+        // A 2xx without an iid is not a filed item: reporting one would hand the
+        // caller an id that addresses nothing.
+        throw new BoardError('transport', `createWork filed ${JSON.stringify(spec.title)} but GitLab returned no iid`, {
+          item: this.projectId,
+        });
+      }
+      return { item: this.toWorkItem(created), created: true };
+    } catch (e) {
+      throw this.createFailure(e, state);
+    }
   }
 
   /**
@@ -526,6 +688,75 @@ export class GitLabBoardProvider implements TaskBoardProvider {
     );
   }
 
+  /**
+   * Report — and, since GitLab allows it, CREATE — the state labels this adapter
+   * needs. `canBootstrapStates: true` is a promise this method keeps.
+   *
+   * WHY it exists: the first minute of a real deployment. Until every
+   * `takumi-*` state label exists, `transition()` cannot express what it did, and
+   * a runner that failed with GitLab's own "no such label" told the operator
+   * nothing actionable. Here the missing label IS the answer, and the label is
+   * simply made.
+   *
+   * Order of operations: read the project's labels ONCE (walking every page, see
+   * `fetchLabelNames`), then create what is missing. A dry run stops after the
+   * read, so it cannot change anything — which is exactly the promise the report
+   * makes when it says `would-create`.
+   *
+   * NOT capability-gated, on purpose: the port requires a REPORT from every
+   * adapter, so this never throws for a state it cannot create — it reports
+   * `not-creatable` with the step that would fix it. A failed REQUEST is a
+   * different thing and stays loud (a classified `BoardError`), because a
+   * bootstrap that cannot read the board must not claim the labels are missing.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts: { dryRun?: boolean } = {},
+  ): Promise<BoardBootstrapReport> {
+    const dryRun = opts.dryRun === true;
+    const supported = this.capabilities().states;
+    const present = await this.fetchLabelNames();
+    const actions: BoardBootstrapAction[] = [];
+    let applied = false;
+
+    for (const state of desired) {
+      const name = this.labelFor(state);
+      if (!supported.includes(state)) {
+        actions.push({
+          state,
+          name,
+          outcome: 'not-creatable',
+          instruction:
+            `this adapter cannot express ${JSON.stringify(state)} as a label (capabilities().states is ` +
+            `${supported.join(', ')}); add it to STATE_LABEL_SUFFIX in boards/gitlab/src/index.ts, then re-run ` +
+            '`takumi board --check`',
+        });
+        continue;
+      }
+      if (present.has(name)) {
+        actions.push({ state, name, outcome: 'exists' });
+        continue;
+      }
+      if (dryRun) {
+        actions.push({ state, name, outcome: 'would-create' });
+        continue;
+      }
+      await this.createLabel(name);
+      // Track it locally too, so a `desired` list that names one state twice
+      // cannot create the same label twice in one call.
+      present.add(name);
+      applied = true;
+      actions.push({ state, name, outcome: 'created' });
+    }
+
+    return {
+      provider: PROVIDER_ID,
+      applied,
+      actions,
+      unsupported: BOARD_WORK_ITEM_STATES.filter((state) => !supported.includes(state)),
+    };
+  }
+
   // --- URL building -------------------------------------------------------
 
   private get issuesPath(): string {
@@ -533,13 +764,23 @@ export class GitLabBoardProvider implements TaskBoardProvider {
     return `${this.apiBase}/projects/${this.projectId}/issues`;
   }
 
-  private issuesUrl(state: 'opened' | 'closed' | 'all', labels?: readonly string[]): string {
+  /**
+   * The issue-list URL: ONE builder for every issue list this adapter asks for
+   * (the work list, and the create-key search, which is the same endpoint).
+   *
+   * `search` is GitLab's own free-text parameter, percent-encoded but otherwise
+   * sent as the caller wrote it: escaping a human's words would search for
+   * something they did not ask for, and GitLab is the one that decides how a term
+   * matches (class note 6).
+   */
+  private issuesUrl(state: 'opened' | 'closed' | 'all', labels?: readonly string[], search?: string): string {
     const params = [`state=${state}`, `per_page=${PAGE_SIZE}`];
     if (labels !== undefined && labels.length > 0) {
       // Comma-separated on purpose: GitLab reads `labels=a,b` as AND (all must
       // be present), which is the only filter shape it offers.
       params.push(`labels=${labels.map((label) => encodeURIComponent(label)).join(',')}`);
     }
+    if (search !== undefined) params.push(`search=${encodeURIComponent(search)}`);
     return `${this.issuesPath}?${params.join('&')}`;
   }
 
@@ -560,6 +801,16 @@ export class GitLabBoardProvider implements TaskBoardProvider {
 
   private noteUrl(id: string, noteId: string): string {
     return `${this.issueUrl(id)}/notes/${encodeURIComponent(noteId)}`;
+  }
+
+  /** The project's label collection (state bootstrapping reads and writes HERE). */
+  private get labelsPath(): string {
+    return `${this.apiBase}/projects/${this.projectId}/labels`;
+  }
+
+  /** One page of the label list. `page` is explicit: the walk needs to ask for page 2. */
+  private labelsUrl(page: number): string {
+    return `${this.labelsPath}?per_page=${PAGE_SIZE}&page=${page}`;
   }
 
   // --- I/O ----------------------------------------------------------------
@@ -593,6 +844,38 @@ export class GitLabBoardProvider implements TaskBoardProvider {
   }
 
   /**
+   * The issue a create key already filed, or `null`.
+   *
+   * `state=all` on purpose: an item filed by a previous tick may since have been
+   * claimed, delivered or closed, and a search that only looked at open issues
+   * would file a SECOND copy of work that is already done.
+   *
+   * The KEY is what gets searched for (a plain token an index can match), but a
+   * search hit is not proof: GitLab's full-text search also returns an issue that
+   * merely MENTIONS the key. The hit is therefore confirmed with `createKeyOf`,
+   * which only answers for an item that carries the real marker.
+   */
+  private async findByCreateKey(key: string): Promise<GitLabIssuePayload | null> {
+    const issues = asArray(
+      await this.send<GitLabIssuePayload[]>({ method: 'GET', url: this.searchUrl(key) }, `searchIssues ${key}`),
+    );
+    return issues.find((issue) => createKeyOf(issue.description ?? undefined) === key) ?? null;
+  }
+
+  /**
+   * The create-search URL. `per_page` sits at the API ceiling because one page is
+   * all this seam can follow (class doc note 3): the limit is real, and the comment
+   * on `createWork` says what a caller should expect when it is hit.
+   *
+   * It goes through the SAME builder as the work list on purpose — the create key is
+   * searched with the very same endpoint and `search` parameter a caller's epic scope
+   * uses, so there is one URL shape to keep correct instead of two that can drift.
+   */
+  private searchUrl(key: string): string {
+    return this.issuesUrl('all', undefined, key);
+  }
+
+  /**
    * Replace the issue's state label: add the target and drop every OTHER state
    * label the issue physically carries (see `transition`). Both keys are always
    * sent so the request shape is stable and one write is enough.
@@ -605,6 +888,66 @@ export class GitLabBoardProvider implements TaskBoardProvider {
       `updateLabels ${id}`,
       id,
     );
+  }
+
+  /**
+   * Every label NAME on the project, walking pages until one comes back short.
+   *
+   * The end of the list is a page SHORTER than `per_page`, because GitLab reports
+   * the counts in response HEADERS and the request seam exposes a status and a
+   * body only (class doc note 3). A project whose label count is an exact
+   * multiple of 100 therefore pays one extra, empty request — the cheapest honest
+   * way to be sure no existing label was missed (and so no duplicate create is
+   * attempted, which GitLab answers with a 409).
+   */
+  private async fetchLabelNames(): Promise<Set<string>> {
+    const names = new Set<string>();
+    for (let page = 1; ; page += 1) {
+      const batch = asArray(
+        await this.send<GitLabLabelPayload[]>(
+          { method: 'GET', url: this.labelsUrl(page) },
+          `listLabels page=${page}`,
+        ),
+      );
+      for (const label of batch) {
+        if (typeof label.name === 'string' && label.name.length > 0) names.add(label.name);
+      }
+      if (batch.length < PAGE_SIZE) return names;
+    }
+  }
+
+  /** Create one state label. GitLab requires a colour; see {@link STATE_LABEL_COLOR}. */
+  private async createLabel(name: string): Promise<void> {
+    await this.sendVoid(
+      { method: 'POST', url: this.labelsPath, body: { name, color: STATE_LABEL_COLOR } },
+      `createLabel ${name}`,
+    );
+  }
+
+  /**
+   * Translate a rejected create into this port's classified error, naming the fix.
+   *
+   * GitLab's own answer for an issue carrying a label the project does not have is
+   * `400 {"message":"Label(s) not allowed for this project: ..."}` — true, classified
+   * by the shared status table as `precondition` (retrying changes nothing), and
+   * useless to an operator. The adapter therefore adds the state label it tried to
+   * attach and the command that creates it; `canBootstrapStates` is true on this
+   * board, so that instruction is a real answer, not hand-waving.
+   *
+   * Anything else (an `auth` or `transport` failure) is returned untouched: the
+   * taxonomy already said what it was, and inventing a second message for it would
+   * hide the status.
+   */
+  private createFailure(e: unknown, state: BoardWorkItemState): unknown {
+    if (e instanceof BoardError && e.kind === 'precondition' && /label/i.test(e.message)) {
+      return new BoardError(
+        'precondition',
+        `${e.message} — nothing was filed: the state label ${JSON.stringify(this.labelFor(state))} may not exist in ` +
+          `project ${decodeURIComponent(this.projectId)}; run \`takumi board --bootstrap\` to create the state labels`,
+        { item: this.projectId, cause: e },
+      );
+    }
+    return e;
   }
 
   // --- vocabulary ---------------------------------------------------------
@@ -767,6 +1110,17 @@ function bodyOf(note: GitLabNotePayload): string {
 /** Append the hidden run marker unless the text already carries it. */
 function withMarker(text: string, marker: string): string {
   return text.includes(marker) ? text : `${text}\n\n${marker}`;
+}
+
+/**
+ * The description a create writes: the caller's body plus the hidden create marker.
+ *
+ * No marker (no idempotency key) means the description is exactly the caller's body —
+ * never a stray blank line, because the description is also what a human reads.
+ */
+function withCreateMarker(body: string, marker: string | null): string {
+  if (marker === null) return body;
+  return body.length === 0 ? marker : `${body}\n\n${marker}`;
 }
 
 /** GitLab list endpoints return `[]`; anything else (e.g. an error object) is treated as empty. */
