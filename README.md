@@ -213,8 +213,10 @@ TAKUMI_EVAL_HARNESS=pi node eval/scripts/run-eval.mjs
 
 See [docs/bugs-fixed.md](./docs/bugs-fixed.md) for every defect found in the board
 and delivery layers — symptom, root cause, the commit that fixed it and the test
-that pins it — and [docs/evaluation.md](./docs/evaluation.md) for methodology, raw caveats,
-and limitations.
+that pins it — [docs/evaluation.md](./docs/evaluation.md) for methodology, raw caveats,
+and [docs/acceptance-report.md](./docs/acceptance-report.md) for the acceptance gates
+(what each guard claims, the test that pins it, and which layers have run against a
+real host).
 
 ## MEA Loop
 
