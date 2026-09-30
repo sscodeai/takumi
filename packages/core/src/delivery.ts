@@ -99,11 +99,40 @@ export interface DeliveryPushRecord {
 }
 
 export interface DeliveryOutcome {
-  /** True when this call created the pull request; false when an open one was reused. */
+  /** True when this call created the review surface; false when an existing one was reused. */
   created: boolean;
-  pr: PullRequestRef;
+  /**
+   * The review surface, when the delivery has one.
+   *
+   * A pull request is how every host so far models "here is a change to review", but it is not
+   * the only shape a delivery can take: a bare git remote has a pushed branch and nothing to open.
+   * Such a provider reports NO reference here and `canOpenPullRequest: false`, and the delivery
+   * step is driven by `push` alone (`deliveryRefFor` below is what the loop uses either way).
+   * Making this optional is what lets the port describe a delivery that has no review surface
+   * WITHOUT inventing a fake pull request for it — the events and the board state must not claim
+   * a pull request that does not exist.
+   */
+  pr?: PullRequestRef;
   push: DeliveryPushRecord;
   notes: string[];
+}
+
+/**
+ * The reference the delivery steps work against: the pull request when there is one, and the
+ * pushed branch when there is not.
+ *
+ * `status`, `checks` and `merge` all take this, so a provider with no review surface is never
+ * asked to invent one at the call site — it receives the branch it just pushed, which is exactly
+ * what it can answer about.
+ */
+export function deliveryRefFor(outcome: DeliveryOutcome, baseSha: string): PullRequestRef {
+  if (outcome.pr !== undefined) return outcome.pr;
+  return {
+    number: outcome.push.branch,
+    url: '',
+    headSha: outcome.push.head,
+    baseSha,
+  };
 }
 
 export type DeliveryMergeMethod = 'merge' | 'squash' | 'rebase';
@@ -289,48 +318,68 @@ export async function runDeliveryProviderContractSuite(
 
   // --- rule 2 + the happy path: exactly one PR, plain push ---
   const first = await provider.deliver(request(), base);
-  if (first.created !== true) throw new Error('the first deliver must create the pull request');
-  if (first.pr.number.length === 0 || first.pr.url.length === 0) {
-    throw new Error(`the pull request ref must carry a number and a url: ${JSON.stringify(first.pr)}`);
+  const hasPr = caps.canOpenPullRequest;
+  const firstRef = deliveryRefFor(first, opts.fixture.baseSha);
+  if (!hasPr && first.pr !== undefined) {
+    throw new Error(
+      'a provider that reports canOpenPullRequest=false must NOT report a pull request: the events and the board state would then claim one that does not exist',
+    );
+  }
+  if (hasPr && first.pr === undefined) {
+    throw new Error('a provider that reports canOpenPullRequest=true must report the pull request it opened');
+  }
+  if (hasPr) {
+    if (first.created !== true) throw new Error('the first deliver must create the pull request');
+    if (first.pr === undefined || first.pr.number.length === 0 || first.pr.url.length === 0) {
+      throw new Error(`the pull request ref must carry a number and a url: ${JSON.stringify(first.pr)}`);
+    }
   }
   if (first.push.mode !== 'plain') {
     throw new Error(`the push must be plain, never '${first.push.mode}' — a forced push rewrites reviewed history`);
   }
-  if (first.push.head.length === 0 || first.pr.headSha !== first.push.head) {
-    throw new Error(`the pull request must point at the pushed head (pushed=${first.push.head}, pr=${first.pr.headSha})`);
+  if (first.push.head.length === 0) throw new Error('a delivery must report the head it pushed');
+  if (first.pr !== undefined && firstRef.headSha !== first.push.head) {
+    throw new Error(`the pull request must point at the pushed head (pushed=${first.push.head}, pr=${firstRef.headSha})`);
   }
   if (first.push.branch !== opts.fixture.branch) {
     throw new Error(`the pushed branch must be the task branch (${opts.fixture.branch}), got ${first.push.branch}`);
   }
 
   const second = await provider.deliver(request(), base);
-  if (second.created !== false) throw new Error('a second deliver must REUSE the open pull request, not open another');
-  if (second.pr.number !== first.pr.number) {
-    throw new Error(`exactly one pull request per delivery (first=${first.pr.number}, second=${second.pr.number})`);
+  if (first.pr !== undefined) {
+    if (second.created !== false) throw new Error('a second deliver must REUSE the open pull request, not open another');
+    if (second.pr === undefined || second.pr.number !== first.pr.number) {
+      throw new Error(`exactly one pull request per delivery (first=${first.pr.number}, second=${String(second.pr?.number)})`);
+    }
+  } else if (second.created !== false) {
+    throw new Error('a delivery with no review surface still must not report that it created one on a repeat call');
   }
   if (opts.inspect !== undefined) {
     const seen = await opts.inspect(provider);
-    if (seen.prs !== 1) throw new Error(`exactly one pull request must exist (prs=${seen.prs})`);
+    if (hasPr && seen.prs !== 1) throw new Error(`exactly one pull request must exist (prs=${seen.prs})`);
+    if (!hasPr && seen.prs !== 0) throw new Error(`no pull request may exist for this provider (prs=${seen.prs})`);
     // A second deliver MAY push again: in the review/fix loop the branch carries
     // NEW commits that must reach the SAME pull request. What must never happen is
     // a second pull request, or a forced push.
     if (seen.pushes < 1) throw new Error(`a delivery must push the task branch (pushes=${seen.pushes})`);
     if (seen.forcePushes !== 0) throw new Error(`no force push is allowed (forcePushes=${seen.forcePushes})`);
     notes.push(
-      `deliver: PASS (plain push of ${opts.fixture.branch}, one pull request (${first.pr.number}), second call reused it and ` +
-        `pushed only the newer head; pushes=${seen.pushes} forcePushes=${seen.forcePushes} prs=${seen.prs})`,
+      `deliver: PASS (plain push of ${opts.fixture.branch}, ${hasPr ? `one pull request (${first.pr?.number})` : 'no review surface'}, ` +
+        `second call reused it and pushed only the newer head; pushes=${seen.pushes} forcePushes=${seen.forcePushes} prs=${seen.prs})`,
     );
   } else {
-    notes.push(`deliver: PASS (plain push, one pull request (${first.pr.number}), reused on the second call)`);
+    notes.push(
+      `deliver: PASS (plain push, ${hasPr ? `one pull request (${first.pr?.number})` : 'no review surface (canOpenPullRequest=false)'}, reused on the second call)`,
+    );
   }
 
   // --- status + checks ---
-  const status = await provider.status(first.pr);
+  const status = await provider.status(firstRef);
   if (!['open', 'closed', 'merged'].includes(status.state)) {
     throw new Error(`status.state must be open|closed|merged, got ${String(status.state)}`);
   }
   if (status.headSha.length === 0) throw new Error('status must report the head sha');
-  const checks = await provider.checks(first.pr);
+  const checks = await provider.checks(firstRef);
   if (!Array.isArray(checks)) throw new Error('checks must resolve an array');
   const allowed: CheckConclusion[] = ['success', 'failure', 'pending', 'neutral', 'unknown'];
   for (const check of checks) {
@@ -356,7 +405,7 @@ export async function runDeliveryProviderContractSuite(
   // --- rule 3: never merge a head other than the one that was reviewed ---
   const staleHead = `${opts.fixture.baseSha.slice(0, 12)}0deadbeef0`;
   await assertDeliveryError(
-    () => provider.merge(first.pr, { expectedHeadSha: staleHead }),
+    () => provider.merge(firstRef, { expectedHeadSha: staleHead }),
     'precondition',
     'merge with a head that is not the reviewed head',
   );
@@ -370,7 +419,7 @@ export async function runDeliveryProviderContractSuite(
     if (opts.makeUnmergeable !== undefined && opts.reset !== undefined) {
       await opts.makeUnmergeable(provider);
       await assertDeliveryError(
-        () => provider.merge(first.pr, { expectedHeadSha: first.pr.headSha }),
+        () => provider.merge(firstRef, { expectedHeadSha: firstRef.headSha }),
         'precondition',
         'merge of a conflicting pull request',
       );
@@ -381,18 +430,18 @@ export async function runDeliveryProviderContractSuite(
       notes.push('unmergeable: NOT_RUN (needs both makeUnmergeable and reset hooks)');
     }
 
-    const merged = await provider.merge(first.pr, { expectedHeadSha: first.pr.headSha, method: 'merge' });
+    const merged = await provider.merge(firstRef, { expectedHeadSha: firstRef.headSha, method: 'merge' });
     if (merged.merged !== true) throw new Error('merging the reviewed head must report merged=true');
-    if (merged.headSha !== first.pr.headSha) {
-      throw new Error(`the merged commit must be the reviewed head (${first.pr.headSha}), got ${merged.headSha}`);
+    if (merged.headSha !== firstRef.headSha) {
+      throw new Error(`the merged commit must be the reviewed head (${firstRef.headSha}), got ${merged.headSha}`);
     }
     if (merged.method !== 'merge') throw new Error(`the merge method must be echoed, got ${merged.method}`);
-    const after = await provider.status(first.pr);
+    const after = await provider.status(firstRef);
     if (after.state !== 'merged') throw new Error(`status after the merge must be 'merged', got ${after.state}`);
-    notes.push(`merge: PASS (merged exactly ${first.pr.headSha}, method=merge)`);
+    notes.push(`merge: PASS (merged exactly ${firstRef.headSha}, method=merge)`);
   } else {
     await assertDeliveryError(
-      () => provider.merge(first.pr, { expectedHeadSha: first.pr.headSha }),
+      () => provider.merge(firstRef, { expectedHeadSha: firstRef.headSha }),
       'unsupported',
       'merge on a provider without canMerge',
     );

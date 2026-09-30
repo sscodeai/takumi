@@ -22,8 +22,16 @@
  */
 
 import type { BoardWorkItemState } from './board-state.js';
-import { DeliveryError, type DeliveryProvider, type PullRequestRef } from './delivery.js';
+import {
+  DeliveryError,
+  deliveryRefFor,
+  type CheckSummary,
+  type DeliveryProvider,
+  type PullRequestRef,
+} from './delivery.js';
+import { createEventLog, nullEventLog, type EventLog } from './events.js';
 import { ProviderError } from './provider-error.js';
+import { acquireSlot, type SlotHandle } from './slot-lock.js';
 import type { TaskBoardProvider } from './task-board.js';
 import type { BoardStateRecord } from './board-state-record.js';
 
@@ -42,17 +50,82 @@ export interface DeliveryLoopPlan {
   body?: string;
   /** Bounded review/fix rounds. Default 3. */
   maxReviewRounds?: number;
+  /**
+   * File a work item when the checks stay red after every fix round. Default false.
+   *
+   * A red pipeline that nobody owns is how a repository rots: the item blocks, a comment
+   * says why, and the failure never becomes anyone's task. Filing it (idempotently, so a
+   * retried tick cannot duplicate it) turns the failure into work.
+   */
+  fileIssueOnExhaustedChecks?: boolean;
+  /**
+   * How long to WAIT for the host's checks before giving up on them, in seconds.
+   * Default 300.
+   *
+   * Checks are the slowest part of a delivery and the most common reason a run ends
+   * "fine but not finished". Returning immediately left the item owned by a run that
+   * would never come back; waiting inside the tick is what makes the common case
+   * finish in one pass.
+   */
+  checksWaitSeconds?: number;
+  /** Poll interval while waiting for checks. Default 15. */
+  checksPollSeconds?: number;
+  /** How many times to re-read mergeability before it counts as unknown (default 5). */
+  mergeabilityReads?: number;
+  /** Seconds between mergeability re-reads (default 3). */
+  mergeabilityReadSeconds?: number;
+  /**
+   * Rewrite the board's progress record at most this often when nothing material
+   * changed, in seconds. Default 30. Every write is an API call against a host that
+   * rate-limits, and a record that says the same thing twice is pure cost.
+   */
+  progressIntervalSeconds?: number;
+  /**
+   * Serialise this delivery against other runners (ADR-008).
+   *
+   * Every board here declares `atomicClaim: false`, so two runners sharing one
+   * account can both believe they own an item. Passing a slot directory makes the
+   * loop take an exclusive per-item lock before it claims anything and report
+   * `busy` instead of racing. Omitting it keeps the old behaviour, and the caller
+   * then owns that exclusion itself.
+   */
+  slot?: { dir: string; key?: string; staleAfterSeconds?: number };
 }
 
 export interface ReviewContext {
   round: number;
-  pr: PullRequestRef;
+  /** The review surface, when the delivery has one (a bare branch has none). */
+  pr?: PullRequestRef;
   /** The exact head the review must cover — the only head that may later merge. */
   headSha: string;
   changedFiles: string[];
+  /**
+   * The worktree and the frozen base, so a reviewer can read the change itself.
+   *
+   * `changedFiles` alone is a list of names: enough to say "the CI config changed", not
+   * enough to say "this test lost three assertions". A reviewer that has to reconstruct the
+   * base from somewhere else is a reviewer with a second source of truth, so the loop hands
+   * over the two things it already knows.
+   */
+  worktree: string;
+  baseSha: string;
 }
 
-export type ReviewOutcome = { verdict: 'clean' } | { verdict: 'findings'; note?: string };
+export type ReviewOutcome =
+  /**
+   * `clean` unlocks the merge. A NOTE is allowed on a clean verdict because an observation
+   * is not a defect: "only the tests changed" belongs on the record, and forcing it into
+   * `findings` would spend a fix round on work that may be exactly what the item asked for.
+   */
+  | { verdict: 'clean'; note?: string }
+  | { verdict: 'findings'; note?: string }
+  /**
+   * The change is ready but a HUMAN has not approved it yet (orbi's human review).
+   * Deliberately distinct from `findings`: waiting is not a defect, so it must not
+   * consume a review round, must not move the item to `fix_needed`, and must not
+   * merge. The item stays in review for a later tick.
+   */
+  | { verdict: 'awaiting-human'; note?: string };
 
 export interface DeliveryLoopHooks {
   /**
@@ -73,10 +146,12 @@ export interface LoopStep {
   at: string;
 }
 
-export type DeliveryLoopOutcome = 'merged' | 'blocked' | 'retriable' | 'not_claimed';
+export type DeliveryLoopOutcome = 'merged' | 'blocked' | 'retriable' | 'not_claimed' | 'busy' | 'awaiting_review';
 
 export interface DeliveryLoopResult {
   outcome: DeliveryLoopOutcome;
+  /** Seconds spent waiting for the host's checks, when the run had to wait at all. */
+  checksWaitedSeconds?: number;
   itemId: string;
   pr?: PullRequestRef;
   /** Rounds actually used. */
@@ -92,6 +167,13 @@ export interface DeliveryLoopDeps {
   hooks: DeliveryLoopHooks;
   /** Injectable clock so the recorded timeline is deterministic in tests. */
   now?: () => number;
+  /** Injectable sleep, so a test that waits for checks does not wait in real time. */
+  sleep?: (seconds: number) => Promise<void>;
+  /**
+   * Where the run's events go (ADR-008). Omitting it keeps nothing, so wiring the
+   * loop up never forces an audit trail on a caller that does not want one.
+   */
+  events?: EventLog;
 }
 
 /**
@@ -105,21 +187,92 @@ export interface DeliveryLoopDeps {
 export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryLoopResult> {
   const { board, delivery, plan, hooks } = deps;
   const clock = deps.now ?? (() => Date.now());
+  const events = deps.events ?? nullEventLog();
   const steps: LoopStep[] = [];
   const record = (step: string, detail: string): void => {
     steps.push({ step, detail, at: new Date(clock()).toISOString() });
   };
   const maxRounds = plan.maxReviewRounds ?? 3;
+  const waitSeconds = plan.checksWaitSeconds ?? 300;
+  let checksWaited = 0;
+  const pollSeconds = plan.checksPollSeconds ?? 15;
+  // A fresh merge request can answer "mergeability unknown" for a moment (GitLab computes it
+  // asynchronously), and that moment is not a verdict. Bounded on purpose: the window is a
+  // courtesy to an asynchronous host, not a license to wait forever for a yes.
+  const mergeabilityReads = plan.mergeabilityReads ?? 5;
+  const mergeabilityReadSeconds = plan.mergeabilityReadSeconds ?? 3;
+  const sleep = deps.sleep ?? ((seconds: number) => new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000)));
   let rounds = 0;
   let pr: PullRequestRef | undefined;
+  /**
+   * The reference every delivery step works against: the pull request when the delivery has one
+   * and the pushed branch when it does not. Port calls go through this, so a provider with no
+   * review surface is never asked to invent one.
+   */
+  let ref: PullRequestRef | undefined;
+  // The branch this run delivers on: the plan's branch until the delivery confirms it, and the
+  // delivered branch afterwards (a resumed run adopts the branch it is finishing).
+  let deliveredBranch: string | undefined;
+
+  // The exclusion rail, before anything is claimed: every board here is
+  // non-atomic, so a second runner must be turned away before it can believe it
+  // owns the item. `busy` is an outcome, not an error — a scheduled runner
+  // journals it and exits 0.
+  let slot: SlotHandle | undefined;
+  if (plan.slot !== undefined) {
+    const acquisition = acquireSlot({
+      dir: plan.slot.dir,
+      key: plan.slot.key ?? plan.itemId,
+      owner: { runId: plan.runId, itemId: plan.itemId },
+      ...(plan.slot.staleAfterSeconds === undefined ? {} : { staleAfterSeconds: plan.slot.staleAfterSeconds }),
+    });
+    if (!acquisition.acquired || acquisition.handle === undefined) {
+      const reason = acquisition.reason ?? 'another runner holds this slot';
+      events.emit({ kind: 'slot.busy', runId: plan.runId, itemId: plan.itemId, message: reason });
+      record('slot', `busy: ${reason}`);
+      return { outcome: 'busy', itemId: plan.itemId, rounds: 0, steps, error: reason };
+    }
+    slot = acquisition.handle;
+    slot.startHeartbeat();
+    events.emit({
+      kind: 'slot.acquired',
+      runId: plan.runId,
+      itemId: plan.itemId,
+      message: `slot ${plan.slot.key ?? plan.itemId} acquired`,
+      fields: { path: slot.path },
+    });
+    record('slot', `acquired ${slot.path}`);
+  }
 
   /** Move the item, tolerating a board that cannot express the target state. */
   const transition = async (to: BoardWorkItemState, note: string): Promise<void> => {
     await board.transition(plan.itemId, to, { runId: plan.runId, note });
+    events.emit({
+      kind: to === 'blocked' ? 'board.blocked' : 'board.transitioned',
+      runId: plan.runId,
+      itemId: plan.itemId,
+      ...(pr === undefined ? {} : { pr: pr.number }),
+      message: `${plan.itemId} → ${to}`,
+      fields: { note },
+    });
     record('transition', `${plan.itemId} → ${to} (${note})`);
   };
 
+  let lastProgressAt = 0;
+  let lastProgressSignature = '';
   const writeRecord = async (reviewRound: number): Promise<void> => {
+    const signature = `${plan.runId}|${reviewRound}|${pr === undefined ? '-' : pr.number}`;
+    const nowMs = clock();
+    const interval = (plan.progressIntervalSeconds ?? 30) * 1000;
+    if (signature === lastProgressSignature && nowMs - lastProgressAt < interval) {
+      // Nothing material changed and we wrote recently: the host does not need to hear
+      // it twice. The FIRST write of a signature is never skipped, so the record on
+      // the board always reflects the latest round.
+      record('progress', `throttled (unchanged, ${Math.round((nowMs - lastProgressAt) / 1000)}s since the last write)`);
+      return;
+    }
+    lastProgressAt = nowMs;
+    lastProgressSignature = signature;
     const record_: BoardStateRecord = {
       schema: 1,
       runId: plan.runId,
@@ -128,17 +281,129 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       updatedAt: new Date(clock()).toISOString(),
       baseBranch: plan.baseBranch,
       ...(pr === undefined ? {} : { deliveryRef: `#${pr.number}` }),
+      branch: deliveredBranch ?? plan.branch,
     };
     await board.writeState(plan.itemId, record_);
   };
 
+  /**
+   * Wait for the host's checks to settle, INSIDE the tick.
+   *
+   * Returns the seconds waited when no check is pending any more, or `null` when the
+   * budget ran out. The loop is deliberately deterministic about time — elapsed is
+   * counted in polls, not read from a clock — so a test drives it with an instant
+   * sleep and gets the same answer the real thing would after `polls * pollSeconds`.
+   */
+  const waitForChecks = async (
+    prRef: PullRequestRef,
+    roundRef: number,
+  ): Promise<{ waitedSeconds: number; checks: CheckSummary[] } | null> => {
+    for (let waited = 0; waited + pollSeconds <= waitSeconds; waited += pollSeconds) {
+      await sleep(pollSeconds);
+      const now = await delivery.checks(prRef);
+      const stillPending = now.filter((c) => c.conclusion === 'pending');
+      // A human watching the board should see that we are still here. The throttle in
+      // `writeRecord` is what keeps that from being one API call per poll — this is the
+      // churn the throttle exists for, so the two are tested together.
+      await writeRecord(roundRef);
+      // The settled list is RETURNED, not re-read: the caller already has the answer,
+      // and a second read would be one more API call for information we hold.
+      if (stillPending.length === 0) {
+        checksWaited += waited + pollSeconds;
+        return { waitedSeconds: waited + pollSeconds, checks: now };
+      }
+      // Only the WAITING is reported here; the settlement is reported by the caller,
+      // which is the one that knows which checks settled. Two emits for one fact is the
+      // duplication the ledger already names.
+      events.emit({
+        kind: 'checks.waited',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        pr: prRef.number,
+        message: `still pending after ${waited + pollSeconds}s: ${stillPending.map((c) => c.name).join(', ')}`,
+        fields: { seconds: waited + pollSeconds, pending: stillPending.length },
+      });
+    }
+    return null;
+  };
+
+  // Ownership matters in the failure path: an item WE claimed must never be left in a
+  // state automation cannot pick up again (the pilot only ever selects `ready`).
+  let owned = false;
+  /**
+   * Block the item AND file the failure as work — best effort, like the event trail.
+   *
+   * The rule from ADR-008 applies to this too: a side channel must never change the
+   * delivery's conclusion. A board that cannot file, or a filing that fails, leaves the
+   * item blocked with the reason in the step timeline; it does not fail the run, and it
+   * does not quietly succeed either.
+   */
+  const blockOnRedChecks = async (detail: string, failing: readonly CheckSummary[]): Promise<DeliveryLoopResult> => {
+    await transition('blocked', detail);
+    if (plan.fileIssueOnExhaustedChecks !== true) return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+
+    if (!board.capabilities().canCreateWork) {
+      events.emit({
+        kind: 'issue.skipped',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: 'fileIssueOnExhaustedChecks is on, but this board cannot file work items',
+      });
+      record('issue', 'not filed: this board declares canCreateWork=false');
+      return { outcome: 'blocked', itemId: plan.itemId, ...(pr === undefined ? {} : { pr }), rounds, steps, error: detail };
+    }
+
+    const names = failing.map((c) => c.name).join(', ');
+    // The key is derived from the ITEM and the DELIVERY, not from the clock or the run:
+    // that is what makes the second attempt return the first issue instead of a copy.
+    const key = `ci-red:${plan.itemId}:${pr?.number ?? 'none'}`;
+    try {
+      const filed = await board.createWork({
+        title: `CI is red: ${plan.itemId}${names.length === 0 ? '' : ` (${names})`}`,
+        body:
+          `${detail}\n\n` +
+          `${pr === undefined ? 'No pull request was opened.' : `Pull request: ${pr.url}`}\n` +
+          `Failing checks: ${names.length === 0 ? '(none named)' : names}\n` +
+          `Detected by run ${plan.runId}. Filed so the failure becomes work instead of a comment.`,
+        state: 'ready',
+        idempotencyKey: key,
+      });
+      events.emit({
+        kind: 'issue.filed',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: filed.created ? `filed ${filed.item.id}: CI is red` : `${filed.item.id} already filed for this delivery`,
+        fields: { key, created: filed.created },
+      });
+      record('issue', filed.created ? `filed ${filed.item.id} for the red checks` : `already filed as ${filed.item.id}`);
+    } catch (e) {
+      events.emit({
+        kind: 'issue.skipped',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: `could not file the failure: ${e instanceof Error ? e.message : String(e)}`,
+        fields: { key },
+      });
+      record('issue', `not filed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+  };
+
+  const run = async (): Promise<DeliveryLoopResult> => {
   try {
     // --- 1. claim -------------------------------------------------------------
     const claim = await board.claim(plan.itemId, plan.runId);
     if (!claim.claimed) {
-      record('claim', `refused: ${claim.reason ?? 'no reason given'}`);
+      const reason = claim.reason ?? 'no reason given';
+      events.emit({ kind: 'claim.refused', runId: plan.runId, itemId: plan.itemId, message: reason });
+      record('claim', `refused: ${reason}`);
       return { outcome: 'not_claimed', itemId: plan.itemId, rounds: 0, steps };
     }
+    owned = true;
+    events.emit({ kind: 'claim.acquired', runId: plan.runId, itemId: plan.itemId, message: `${plan.itemId} claimed` });
     record('claim', `${plan.itemId} claimed by run ${plan.runId}`);
     await writeRecord(0);
 
@@ -146,7 +411,20 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     for (let round = 0; round < maxRounds; round++) {
       rounds = round + 1;
 
+      events.emit({
+        kind: 'agent.started',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        message: `round ${round + 1} starting`,
+        fields: { worktree: plan.worktree },
+      });
       await hooks.agent({ round, worktree: plan.worktree, branch: plan.branch });
+      events.emit({
+        kind: 'agent.finished',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        message: `round ${round + 1} finished; a commit is expected`,
+      });
       record('agent', `round ${round + 1} finished; expecting a commit in ${plan.worktree}`);
 
       const delivered = await delivery.deliver(
@@ -163,47 +441,129 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         { baseSha: plan.baseSha },
       );
       pr = delivered.pr;
+      ref = deliveryRefFor(delivered, plan.baseSha);
+      // Narrowed once for the rest of this round: every delivery step below works against the
+      // reference (the pull request, or the pushed branch when the delivery has no review surface).
+      const thisRef: PullRequestRef = ref;
+      deliveredBranch = delivered.push.branch;
       record(
         'deliver',
-        `round ${round + 1}: ${delivered.created ? 'opened' : 'reused'} PR #${pr.number} ` +
-          `push=${delivered.push.mode} head=${pr.headSha.slice(0, 12)}` +
+        `round ${round + 1}: ${
+          pr === undefined ? 'pushed' : delivered.created ? 'opened' : 'reused'
+        } ${pr === undefined ? delivered.push.branch : `PR #${pr.number}`} ` +
+          `push=${delivered.push.mode} head=${ref.headSha.slice(0, 12)}` +
           (delivered.notes.length === 0 ? '' : ` (${delivered.notes.join('; ')})`),
       );
       // The item returns to review after every round: on the first one it enters
       // pr_open, and after a fix round it leaves fix_needed — without this move a
       // fixed delivery could never legally reach merged.
+      events.emit({
+        kind: 'deliver.pushed',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: `pushed ${delivered.push.mode} ${delivered.push.branch} at ${ref.headSha.slice(0, 12)}`,
+        fields: { mode: delivered.push.mode, head: thisRef.headSha },
+      });
+      // A delivery with no review surface has no pull request to announce: emitting an event that
+      // claims one would put a pull request in the trail that does not exist.
+      if (pr !== undefined) {
+        events.emit({
+          kind: delivered.created ? 'deliver.pr_opened' : 'deliver.pr_reused',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          pr: pr.number,
+          message: delivered.created ? `opened PR #${pr.number}` : `reused PR #${pr.number}`,
+        });
+      }
+      // After delivering, the item is DELIVERED AND UNDER REVIEW — the state must say so.
+      // Reading it off `delivered.created` instead was wrong for a REUSED delivery in round 0: a
+      // resumed delivery (its branch and pull request already exist) would stay in `claimed`, and
+      // `claimed → merged` is not a legal move — so finishing an interrupted delivery blocked on
+      // the state machine rather than on anything real.
       const current = (await board.getWork(plan.itemId)).state;
-      if (current === 'fix_needed' || (round === 0 && delivered.created)) {
-        await transition('pr_open', `PR #${pr.number} ready for review${round === 0 ? '' : ` (round ${round + 1})`}`);
+      if (current !== 'pr_open') {
+        await transition(
+          'pr_open',
+          pr === undefined
+            ? `branch ${delivered.push.branch} pushed for review${round === 0 ? '' : ` (round ${round + 1})`}`
+            : `PR #${pr.number} ready for review${round === 0 ? '' : ` (round ${round + 1})`}`,
+        );
       }
       await writeRecord(round);
 
       // --- checks: a failure blocks, a pending waits, and neither is a success --
-      const checks = await delivery.checks(pr);
+      const checks = await delivery.checks(thisRef);
       const failed = checks.filter((c) => c.conclusion === 'failure');
       const pending = checks.filter((c) => c.conclusion === 'pending');
+      events.emit({
+        kind: 'checks.read',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: checks.length === 0 ? 'no checks reported' : checks.map((c) => `${c.name}=${c.conclusion}`).join(' '),
+        fields: { total: checks.length, failed: failed.length, pending: pending.length },
+      });
+      for (const check of failed) {
+        events.emit({
+          kind: 'check.failed',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          ...(pr === undefined ? {} : { pr: pr.number }),
+          message: `check ${check.name} failed`,
+          fields: { check: check.name },
+        });
+      }
       record('checks', checks.length === 0 ? 'none reported' : checks.map((c) => `${c.name}=${c.conclusion}`).join(' '));
       if (failed.length > 0) {
         // A failing check is work, not a verdict: the agent gets the remaining
         // rounds to fix it, and only an exhausted budget is a human decision.
         const detail = `check(s) failed: ${failed.map((c) => c.name).join(', ')}`;
         if (round + 1 >= maxRounds) {
-          await transition('blocked', `${detail} and no fix round left`);
-          return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: `${detail} and no fix round left` };
+          return await blockOnRedChecks(`${detail} and no fix round left`, failed);
         }
         await transition('fix_needed', detail);
         continue;
       }
       if (pending.length > 0) {
-        // Not a failure: the host has not finished. Another tick will read it again.
-        return {
-          outcome: 'retriable',
+        // Not a failure: the host has not finished. Wait for it INSIDE this tick —
+        // returning here used to leave the item owned by a run that never came back,
+        // because the runner only ever selects `ready` items (the comment that used to
+        // sit here claimed "another tick will read it again"; no tick ever did).
+        const waited = await waitForChecks(thisRef, round);
+        if (waited === null) {
+          const detail = `check(s) still pending after ${waitSeconds}s: ${pending.map((c) => c.name).join(', ')}`;
+          await transition('blocked', detail);
+          return {
+            outcome: 'blocked',
+            itemId: plan.itemId,
+            pr,
+            rounds,
+            steps,
+            error: `${detail} — raise checksWaitSeconds or look at the pipeline`,
+          };
+        }
+        // The waiting check finished: either it passed (the review path continues with
+        // a re-read below) or it failed, and the failure branch is the same test.
+        events.emit({
+          kind: 'checks.waited',
+          runId: plan.runId,
           itemId: plan.itemId,
-          pr,
-          rounds,
-          steps,
-          error: `check(s) still pending: ${pending.map((c) => c.name).join(', ')}`,
-        };
+          ...(pr === undefined ? {} : { pr: pr.number }),
+          message: `checks settled after ${waited.waitedSeconds}s: ${waited.checks.map((c) => `${c.name}=${c.conclusion}`).join(' ')}`,
+          fields: { seconds: waited.waitedSeconds },
+        });
+        record('checks', `waited ${waited.waitedSeconds}s for the host to settle the checks`);
+        const nowFailed = waited.checks.filter((c) => c.conclusion === 'failure');
+        if (nowFailed.length > 0) {
+          const detail = `check(s) failed: ${nowFailed.map((c) => c.name).join(', ')}`;
+          await writeRecord(round);
+          if (round + 1 >= maxRounds) {
+            return await blockOnRedChecks(`${detail} and no fix round left`, nowFailed);
+          }
+          await transition('fix_needed', detail);
+          continue;
+        }
       }
 
       // --- review: the only verdict that unlocks the merge ----------------------
@@ -211,14 +571,56 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         hooks.changedFiles === undefined
           ? []
           : await hooks.changedFiles({ worktree: plan.worktree, baseSha: plan.baseSha });
-      const review = await hooks.review({ round, pr, headSha: pr.headSha, changedFiles });
-      record('review', `round ${round + 1}: ${review.verdict}${review.verdict === 'findings' && review.note ? ` — ${review.note}` : ''}`);
+      // The reviewer works against the delivered HEAD; the pull request, when there is one, is
+      // context it may use (the rules reviewer reads the diff instead, which is why a delivery
+      // with no review surface can still be reviewed).
+      const review = await hooks.review({
+        round,
+        ...(pr === undefined ? {} : { pr }),
+        headSha: thisRef.headSha,
+        changedFiles,
+        worktree: plan.worktree,
+        baseSha: plan.baseSha,
+      });
+      if (review.verdict === 'awaiting-human') {
+        events.emit({
+          kind: 'review.awaiting_human',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          ...(pr === undefined ? {} : { pr: pr.number }),
+          message: `round ${round + 1}: waiting for a human${review.note === undefined ? '' : ` — ${review.note}`}`,
+          fields: { round, head: thisRef.headSha },
+        });
+        record('review', `round ${round + 1}: awaiting a human${review.note === undefined ? '' : ` — ${review.note}`}`);
+        return {
+          outcome: 'awaiting_review',
+          itemId: plan.itemId,
+          pr,
+          rounds,
+          steps,
+          error: review.note ?? 'waiting for a human approval',
+        };
+      }
+      events.emit({
+        kind: review.verdict === 'clean' ? 'review.clean' : 'review.findings',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message:
+          review.verdict === 'clean'
+            ? // A note on a clean verdict is an observation ("only the tests changed"), and
+              // dropping it here would lose the one place a human would have seen it.
+              `round ${round + 1}: clean at ${thisRef.headSha.slice(0, 12)}${review.note === undefined ? '' : ` — note: ${review.note}`}`
+            : `round ${round + 1}: findings${review.note === undefined ? '' : ` — ${review.note}`}`,
+        fields: { round, head: thisRef.headSha },
+      });
+      record('review', `round ${round + 1}: ${review.verdict}${review.note ? ` — ${review.note}` : ''}`);
 
       if (review.verdict === 'findings') {
         if (round + 1 >= maxRounds) {
           const detail = `review found issues in ${maxRounds} consecutive rounds; a human must decide`;
           await transition('blocked', detail);
-          return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+          return { outcome: 'blocked', itemId: plan.itemId, ...(pr === undefined ? {} : { pr }), rounds, steps, error: detail };
         }
         await transition('fix_needed', review.note ?? 'review findings');
         continue; // the next round's agent hook fixes them in the same worktree/PR
@@ -227,32 +629,86 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       // --- merge EXACTLY the reviewed head -------------------------------------
       // Re-read first: if the branch moved after the review, the reviewed head is
       // no longer what would land, and merging would be merging unreviewed code.
-      const status = await delivery.status(pr);
-      if (status.headSha !== pr.headSha) {
-        const detail = `the head moved after the review (reviewed ${pr.headSha.slice(0, 12)}, now ${status.headSha.slice(0, 12)}); re-review required`;
+      // GitLab computes mergeability ASYNCHRONOUSLY: a merge request that was just opened
+      // legitimately answers "unknown" for a moment, and reading that as a verdict stranded a
+      // real item in `pr_open` — where no later tick would look at it again, because the pilot
+      // selects `ready` work. So the unknown is given a BOUNDED window to become an answer.
+      //
+      // It is still never read as a yes: once the window is spent the item is handed on as
+      // `retriable` exactly as before, only later, and the message says how long we looked.
+      // The head is re-read on every attempt, because a head that moves is a decision rather
+      // than a transient — it ends the window and falls through to the check below.
+      let status = await delivery.status(thisRef);
+      for (
+        let attempt = 1;
+        attempt < mergeabilityReads && status.mergeable === null;
+        attempt += 1
+      ) {
+        await sleep(mergeabilityReadSeconds);
+        status = await delivery.status(thisRef);
+        if (status.headSha !== thisRef.headSha) break;
+        events.emit({
+          kind: 'merge.mergeability_waited',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          ...(pr === undefined ? {} : { pr: pr.number }),
+          message: `mergeability still unknown after ${attempt * mergeabilityReadSeconds}s (attempt ${attempt + 1}/${mergeabilityReads})`,
+          fields: { attempt: attempt + 1, reads: mergeabilityReads },
+        });
+      }
+      if (status.headSha !== thisRef.headSha) {
+        const detail = `the head moved after the review (reviewed ${thisRef.headSha.slice(0, 12)}, now ${status.headSha.slice(0, 12)}); re-review required`;
         await transition('fix_needed', detail);
         if (round + 1 >= maxRounds) {
           await transition('blocked', detail);
-          return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+          return { outcome: 'blocked', itemId: plan.itemId, ...(pr === undefined ? {} : { pr }), rounds, steps, error: detail };
         }
         continue;
       }
       if (status.mergeable === null) {
-        return {
-          outcome: 'retriable',
-          itemId: plan.itemId,
-          pr,
-          rounds,
-          steps,
-          error: 'mergeability is not known yet — an unknown is not a yes',
-        };
+        // BLOCKED, not `retriable`. The window above already gave the host its chance, and
+        // nothing re-selects an item left in `pr_open`: returning `retriable` would strand the
+        // item exactly the way the pending-checks budget refuses to (see the note on that
+        // path). A block is visible — the watchdog reports it, a human sees it — and the
+        // message carries the way back, which the claim rule now actually honours.
+        const detail = `mergeability is still unknown after ${mergeabilityReads} reads over ${(mergeabilityReads - 1) * mergeabilityReadSeconds}s — an unknown is not a yes`;
+        await transition('blocked', detail);
+        await board.comment(
+          plan.itemId,
+          `Could not merge: ${detail}. The branch and merge request are untouched — move the item back to \`ready\` to have a runner finish the delivery.`,
+          { runId: plan.runId },
+        );
+        return { outcome: 'blocked', itemId: plan.itemId, ...(pr === undefined ? {} : { pr }), rounds, steps, error: detail };
       }
 
-      const merged = await delivery.merge(pr, { expectedHeadSha: pr.headSha, method: 'merge' });
-      record('merge', `PR #${pr.number} merged at ${merged.headSha.slice(0, 12)} (${merged.method})`);
+      // One name for the thing that was merged, so the trail reads the same for a pull request
+      // and for a bare branch.
+      const what = pr === undefined ? `branch ${delivered.push.branch}` : `PR #${pr.number}`;
+      const merged = await delivery.merge(thisRef, { expectedHeadSha: thisRef.headSha, method: 'merge' });
+      events.emit({
+        kind: 'merge.done',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: `${what} merged at ${merged.headSha.slice(0, 12)}`,
+        fields: { method: merged.method, head: merged.headSha },
+      });
+      record('merge', `${what} merged at ${merged.headSha.slice(0, 12)} (${merged.method})`);
       await transition('merged', `merged ${merged.headSha.slice(0, 8)}`);
-      await board.comment(plan.itemId, `Delivered and merged: ${pr.url}`, { runId: plan.runId });
-      return { outcome: 'merged', itemId: plan.itemId, pr, rounds, steps };
+      await board.comment(
+        plan.itemId,
+        pr === undefined
+          ? `Delivered and merged onto the base branch: branch ${delivered.push.branch}, commit ${merged.headSha} (this delivery has no review surface).`
+          : `Delivered and merged: ${pr.url}`,
+        { runId: plan.runId },
+      );
+      return {
+        outcome: 'merged',
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr }),
+        rounds,
+        steps,
+      };
     }
 
     // The loop only reaches here when every round ended in `continue`.
@@ -265,11 +721,27 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
     // worth another tick; anything else is a human decision.
     const retriable = e instanceof ProviderError && e.retriable;
     const kind = e instanceof ProviderError ? e.kind : 'unknown';
+    events.emit({
+      kind: retriable ? 'run.retriable' : 'run.failed',
+      runId: plan.runId,
+      itemId: plan.itemId,
+      ...(pr === undefined ? {} : { pr: pr.number }),
+      message,
+      fields: { kind, retriable },
+    });
     record('failed', `${kind}: ${message}`);
-    if (!retriable) {
+    // AN ITEM WE OWN IS NEVER LEFT WHERE AUTOMATION CANNOT FIND IT AGAIN. The runner
+    // only ever selects `ready` items, so a claim held by a run that has stopped is
+    // invisible — not "waiting", not "retrying": invisible. A retriable failure we
+    // cannot finish therefore blocks the item with the one instruction that resumes it.
+    const resumeNote = `${kind}: ${message}`;
+    if (!retriable || owned) {
       // Best effort: record the block even when the board itself was the failure.
       try {
-        await transition('blocked', `${kind}: ${message}`);
+        await transition(
+          'blocked',
+          retriable ? `${resumeNote} (retriable, but no runner can resume a held claim — move back to ready)` : resumeNote,
+        );
       } catch {
         // The board is unreachable; the caller still sees the classification.
       }
@@ -282,6 +754,26 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       steps,
       error: message,
     };
+  }
+  };
+
+  try {
+    const outcome = await run();
+    // Reported as a FIELD, not parsed out of a step's text: a counter that depends on a
+    // human-readable string breaking is a counter that silently goes to zero.
+    return checksWaited === 0 ? outcome : { ...outcome, checksWaitedSeconds: checksWaited };
+  } finally {
+    // Released whatever happened: a crashed or failed delivery must not wedge the
+    // slot until the stale window expires.
+    if (slot !== undefined) {
+      slot.release();
+      events.emit({
+        kind: 'slot.released',
+        runId: plan.runId,
+        itemId: plan.itemId,
+        message: `slot ${plan.slot?.key ?? plan.itemId} released`,
+      });
+    }
   }
 }
 

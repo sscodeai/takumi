@@ -67,7 +67,112 @@ export interface BoardCapabilities {
   machineReadableState: boolean;
   /** `claim` is decided by the provider itself (not read-then-write by us). */
   atomicClaim: boolean;
+  /**
+   * The adapter can CREATE the states it needs (labels, statuses) rather than only
+   * reporting them. False is honest and common: a Jira workflow and a Redmine
+   * installation keep their statuses in administration, out of the API's reach.
+   * `bootstrapStates()` reports either way.
+   */
+  canBootstrapStates: boolean;
+  /**
+   * The adapter can FILE a new item. False is honest for a board whose API cannot, and
+   * a caller that needs to file something must check this rather than assume: a failure
+   * that cannot be filed is a failure a human has to read somewhere else.
+   */
+  canCreateWork: boolean;
+  /**
+   * The adapter can search its items by free text (`BoardWorkQuery.query`).
+   *
+   * False is honest for a board whose API has no text search. What a `true` board
+   * searches is the board's business, and the adapter must say what that is when it is
+   * narrower than "everything" (e.g. a title-only search).
+   */
+  canTextSearch: boolean;
   delivery: BoardDeliveryCapabilities;
+}
+
+/**
+ * Validate a text scope, and state the rule every adapter must follow.
+ *
+ * A scope is carried FAITHFULLY or REFUSED — never quietly turned into a different query:
+ *
+ * - **Empty or whitespace-only** names nothing. Sending no filter (or an empty one) returns
+ *   the whole board while LOOKING like a filter, which is the silent widening a scope exists
+ *   to prevent, so it is a `precondition` failure.
+ * - **A term the board's search syntax cannot carry** (a quote inside a phrase, say) must be
+ *   refused with the fix in the message. Silently stripping it searches for something the
+ *   operator did not write, and the difference is invisible until the wrong items run.
+ *
+ * Returns the term, so an adapter can use the validated value rather than re-trimming it.
+ */
+export function assertScopeQuery(query: string | undefined): string | undefined {
+  if (query === undefined) return undefined;
+  const trimmed = query.trim();
+  if (trimmed.length === 0) {
+    throw new BoardError(
+      'precondition',
+      'a text scope must name something: an empty scope would return the whole board while looking like a filter',
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * What is needed to file a new work item.
+ *
+ * `idempotencyKey` is not optional in spirit: no board here offers a native idempotency
+ * guarantee, so the key is written into the item as a machine-readable marker and looked
+ * for BEFORE creating. Without it, a retried tick files a second issue for the same
+ * failure — which is how a board fills with duplicates nobody dares close.
+ */
+export interface BoardWorkItemSpec {
+  title: string;
+  body?: string;
+  /** Extra labels, if the board has labels. The state label comes from `state`. */
+  labels?: string[];
+  /** The state the new item starts in. Default `ready`. */
+  state?: BoardWorkItemState;
+  /** Makes a repeated create for the same reason return the FIRST item, not a second. */
+  idempotencyKey?: string;
+}
+
+/** What `createWork` did, and the item either way. */
+export interface CreateWorkResult {
+  item: BoardWorkItem;
+  /** False when the idempotency key was already on the board. */
+  created: boolean;
+}
+
+/** One state's outcome in a bootstrap report. */
+export interface BoardBootstrapAction {
+  state: BoardWorkItemState;
+  /** What this board calls the state: label name, status name, property option. */
+  name: string;
+  /**
+   * `exists` (already there), `created` (this call made it), `would-create` (a dry
+   * run), or `not-creatable` (the operator must do it — see `instruction`).
+   */
+  outcome: 'exists' | 'created' | 'would-create' | 'not-creatable';
+  /** For `not-creatable`: exactly what a human must do, with no hand-waving. */
+  instruction?: string;
+}
+
+/**
+ * What a board was missing, and what was done about it.
+ *
+ * This is the answer to the first minute of a real deployment: the adapter cannot
+ * claim work until the board can express the six states, and a runner that fails
+ * with "no such label" teaches nothing. The report names every state, says which
+ * are missing, and — when the adapter cannot create them — tells the operator the
+ * exact administrative step.
+ */
+export interface BoardBootstrapReport {
+  provider: string;
+  /** True when this call changed the board (a dry run never does). */
+  applied: boolean;
+  actions: BoardBootstrapAction[];
+  /** States this board cannot express at all (the complement of `capabilities().states`). */
+  unsupported: BoardWorkItemState[];
 }
 
 /** One unit of work as the board sees it. */
@@ -91,6 +196,16 @@ export interface BoardWorkQuery {
   states?: readonly BoardWorkItemState[];
   labels?: readonly string[];
   limit?: number;
+  /**
+   * Free-text scope: the board's own text search over the items it holds.
+   *
+   * This is how a caller says "only this epic / this milestone / this component" without
+   * takumi inventing an epic model: each board searches the words it already indexes.
+   * A board that cannot search must FAIL CLOSED (`unsupported`) rather than ignore the
+   * term — an ignored scope filter means the runner works on items the operator excluded,
+   * which is worse than not running at all.
+   */
+  query?: string;
 }
 
 /** Identity of an item comment, returned by `comment()` and used by `updateComment()`. */
@@ -112,6 +227,14 @@ export interface ClaimResult {
   item: string;
   runId: string;
   claimed: boolean;
+  /**
+   * Set when this claim took over an item whose state record named an EARLIER run.
+   *
+   * The board reported the item as `ready`, so that run no longer held it (a run that holds an
+   * item never leaves it there). Reported rather than silent: a takeover is a fact an operator
+   * may need to see in the trail.
+   */
+  takeoverFrom?: string;
   /** Why the claim was refused (already claimed, closed, blocked, ...). */
   reason?: string;
 }
@@ -164,6 +287,15 @@ export interface TaskBoardProvider {
   /** List work items the board considers available (the provider's own filter scope). */
   listWork(query?: BoardWorkQuery): Promise<BoardWorkItem[]>;
 
+  /**
+   * File a new item.
+   *
+   * With an `idempotencyKey`, creating twice must yield ONE item: the second call returns
+   * the first, with `created: false`. Adapters with `canCreateWork === false` must fail
+   * `BoardError('unsupported')` — never pretend, and never return a fabricated item.
+   */
+  createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult>;
+
   /** Read one item; unknown id → `BoardError('not_found')`. */
   getWork(id: string): Promise<BoardWorkItem>;
 
@@ -202,6 +334,21 @@ export interface TaskBoardProvider {
 
   /** Write the versioned state record (an upsert: one record per item). */
   writeState(id: string, record: BoardStateRecord, opts?: { author?: BoardCommentAuthor }): Promise<void>;
+
+  /**
+   * Report (and, where the board allows, create) the states this adapter needs.
+   *
+   * MUST NOT throw for a state it cannot create: `not-creatable` plus an
+   * instruction IS the answer. MUST be idempotent — a second call reports
+   * `exists` and changes nothing. A dry run MUST NOT change the board.
+   *
+   * Only boards with `canBootstrapStates === false` may fail closed here, and
+   * only as `BoardError('unsupported')` when called with nothing to report on.
+   */
+  bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    opts?: { dryRun?: boolean },
+  ): Promise<BoardBootstrapReport>;
 }
 
 /** What a caller needs from a provider before wiring it into a workflow. */
@@ -252,6 +399,9 @@ export function assertBoardCapability(
     | 'editableComment'
     | 'machineReadableState'
     | 'atomicClaim'
+    | 'canBootstrapStates'
+    | 'canCreateWork'
+    | 'canTextSearch'
     | 'delivery.canOpenPullRequest'
     | 'delivery.canRunChecks'
     | 'delivery.canMerge',
@@ -265,6 +415,18 @@ export function assertBoardCapability(
     case 'atomicClaim':
       if (caps[capability] !== true) throw new BoardUnsupportedError(capability, id);
       return;
+    case 'canBootstrapStates':
+      if (caps[capability] !== true) throw new BoardUnsupportedError(capability, id);
+      return;
+    case 'canTextSearch':
+      if (caps.canTextSearch !== true) throw new BoardUnsupportedError(capability, id);
+      return;
+    case 'canCreateWork':
+      // Its own case, NOT the fallthrough group above: grouping it there made every
+      // capability in the group check `canCreateWork` instead of its own flag, which
+      // silenced four gate checks at once. The contract suite caught it.
+      if (caps.canCreateWork !== true) throw new BoardUnsupportedError(capability, id);
+      return;
     case 'delivery.canOpenPullRequest':
       if (caps.delivery.canOpenPullRequest !== true) throw new BoardUnsupportedError(capability, id);
       return;
@@ -275,6 +437,72 @@ export function assertBoardCapability(
       if (caps.delivery.canMerge !== true) throw new BoardUnsupportedError(capability, id);
       return;
   }
+}
+
+/**
+ * Decide a claim from the two facts a board gives us: its STATE, and any state record.
+ *
+ * The rule, stated once because five adapters used to guess at it:
+ *
+ *   1. The board's STATE is the authority for whether an item is held. A run that holds an item
+ *      never leaves it at `ready`, so an item the board reports as `ready` is available — no
+ *      matter what a previous run's state record says.
+ *   2. The record is EVIDENCE ABOUT A RUN, not a lock. It answers "who worked this last" and
+ *      "what did they do", and it drives the tracing a human reads.
+ *   3. `pr_open` and `fix_needed` are IN FLIGHT, not held: a delivery exists, its review never
+ *      finished, and FINISHING IT IS WORK TOO — so such an item is claimable when its record
+ *      names another run (that run is not working any more, and the slot lock is what proves
+ *      it). A terminal state (`merged`, `blocked`) never is: those want a human decision, and
+ *      `claimed` means somebody is working it right now.
+ *   4. A refused claim must say why (a silent refusal is not a contract).
+ *
+ * Reading (2) as a lock is how an item becomes UNRECOVERABLE, and it happened on the first real
+ * run against a real instance: a run claimed the item, died of a transport failure, and blocked
+ * it. The operator did exactly what takumi's block message told them to — moved it back to
+ * `ready` — and every later run was refused, because the dead run's record named itself. The
+ * only way out was a human deleting takumi's own note through the host's API, which is not a
+ * recovery path; it is a workaround for a defect.
+ */
+export function decideClaim(opts: {
+  state: BoardWorkItemState;
+  record: { runId: string } | null;
+  runId: string;
+}): { claimed: true; takeoverFrom?: string } | { claimed: false; reason: string } {
+  const { state, record, runId } = opts;
+  if (record !== null && record.runId === runId) {
+    return {
+      claimed: false,
+      reason: `claim is not repeatable for the same run ${runId} (read the state record to resume)`,
+    };
+  }
+  if (state === 'pr_open' || state === 'fix_needed') {
+    // Rule 3: in-flight work, claimable to be FINISHED. Without this, a delivery interrupted
+    // after the push (a network blip, an answer the host had not computed yet) was unfinishable
+    // by any runner: the sweep reported it and only a human could act, and a human resetting the
+    // item re-ran the agent and pushed a second branch for work that was already reviewed.
+    if (record !== null && record.runId !== runId) {
+      return { claimed: true, takeoverFrom: record.runId };
+    }
+    return {
+      claimed: false,
+      reason:
+        record === null
+          ? `item is in state ${state} with no delivery record, so there is nothing to resume`
+          : `item is in state ${state} and its record names this run already — claim is not repeatable`,
+    };
+  }
+  if (state !== 'ready') {
+    return {
+      claimed: false,
+      reason:
+        record === null || record.runId === runId
+          ? `item is in state ${state}, not ready`
+          : `already claimed by ${record.runId} (the board reports ${state})`,
+    };
+  }
+  return record === null || record.runId === runId
+    ? { claimed: true }
+    : { claimed: true, takeoverFrom: record.runId };
 }
 
 /** The board contract suite. Any adapter must pass it unchanged. */
@@ -343,7 +571,16 @@ export async function runTaskBoardProviderContractSuite(
   for (const state of caps.states) {
     if (!isBoardWorkItemState(state)) throw new Error(`capabilities.states contains unknown state: ${String(state)}`);
   }
-  for (const key of ['comments', 'editableComment', 'trustedAuthorFilter', 'machineReadableState', 'atomicClaim'] as const) {
+  for (const key of [
+    'comments',
+    'editableComment',
+    'trustedAuthorFilter',
+    'machineReadableState',
+    'atomicClaim',
+    'canBootstrapStates',
+    'canCreateWork',
+    'canTextSearch',
+  ] as const) {
     if (typeof caps[key] !== 'boolean') throw new Error(`capabilities.${key} must be a boolean`);
   }
   for (const key of ['canOpenPullRequest', 'canRunChecks', 'canMerge'] as const) {
@@ -352,7 +589,175 @@ export async function runTaskBoardProviderContractSuite(
   notes.push(
     `capabilities: PASS (states=${caps.states.join(',')} atomicClaim=${caps.atomicClaim} ` +
       `comments=${caps.comments} editableComment=${caps.editableComment} machineReadableState=${caps.machineReadableState} ` +
-      `trustedAuthorFilter=${caps.trustedAuthorFilter} delivery=${JSON.stringify(caps.delivery)})`,
+      `trustedAuthorFilter=${caps.trustedAuthorFilter} canBootstrapStates=${caps.canBootstrapStates} ` +
+      `canCreateWork=${caps.canCreateWork} canTextSearch=${caps.canTextSearch} ` +
+      `delivery=${JSON.stringify(caps.delivery)})`,
+  );
+
+  // --- createWork: filing must be idempotent, or a retried tick duplicates ---
+  // A failure that gets filed twice is worse than one that gets filed never: the board
+  // fills with copies nobody dares close. The suite therefore requires the IDEMPOTENCY
+  // guarantee, not merely that a create succeeds — and requires an honest refusal when
+  // the adapter cannot create at all.
+  const createKey = `contract:${opts.id}:1`;
+  if (caps.canCreateWork) {
+    const first = await provider.createWork({
+      title: `${opts.id} contract probe`,
+      body: 'filed by the shared task-board contract suite',
+      state: 'ready',
+      idempotencyKey: createKey,
+    });
+    if (!first.created) throw new Error('the first create with a fresh idempotency key must report created: true');
+    if (first.item.state !== 'ready') {
+      throw new Error(`a created item must start in the requested state, got ${first.item.state}`);
+    }
+    const second = await provider.createWork({
+      title: `${opts.id} contract probe`,
+      body: 'filed by the shared task-board contract suite',
+      state: 'ready',
+      idempotencyKey: createKey,
+    });
+    if (second.created) throw new Error('the second create with the same idempotency key must NOT create again');
+    if (second.item.id !== first.item.id) {
+      throw new Error(`idempotency returned ${second.item.id}, expected ${first.item.id}`);
+    }
+    const readyNow = await provider.listWork({ states: ['ready'] });
+    const copies = readyNow.filter((item) => item.id === first.item.id).length;
+    if (copies !== 1) throw new Error(`the created item appeared ${copies} times in listWork, expected once`);
+    // A created item must be usable: the caller files work so that work can be done.
+    const claim = await provider.claim(first.item.id, runId);
+    if (!claim.claimed && !/claim/i.test(claim.reason ?? '')) {
+      throw new Error(`a freshly created item could not be claimed: ${claim.reason ?? 'no reason'}`);
+    }
+    notes.push(`createWork: PASS (idempotent on the key, claimable, ${readyNow.length} ready)`);
+  } else {
+    const refused = await provider
+      .createWork({ title: 'must be refused', idempotencyKey: createKey })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    if (refused === null) throw new Error('createWork must fail when capabilities().canCreateWork is false');
+    if (!(refused instanceof BoardError) || refused.kind !== 'unsupported') {
+      throw new Error(`createWork must fail closed as unsupported, got ${String(refused)}`);
+    }
+    notes.push('createWork: PASS (canCreateWork=false, refused as unsupported)');
+  }
+
+  // --- a scope filter that cannot be honoured must FAIL, not widen ---
+  // `query` is how a caller says "only this epic". An adapter that silently ignored it
+  // would have the runner working on exactly the items the operator excluded, so the
+  // suite requires a refusal from a board that cannot search — and a real search (found
+  // when it should be, absent when it should be) from one that can.
+  const scopeWord = `taku${String(opts.id).replace(/[^a-z0-9]/gi, '')}scope`;
+  if (!caps.canTextSearch) {
+    const widened = await provider
+      .listWork({ states: ['ready'], query: scopeWord })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    if (widened === null) {
+      throw new Error('listWork with a query must fail closed when capabilities().canTextSearch is false');
+    }
+    if (!(widened instanceof BoardError) || widened.kind !== 'unsupported') {
+      throw new Error(`a query on a non-searching board must fail as unsupported, got ${String(widened)}`);
+    }
+    notes.push('query: PASS (canTextSearch=false, refused as unsupported)');
+  } else if (caps.canCreateWork) {
+    const probe = await provider.createWork({
+      title: `scope probe ${scopeWord}`,
+      body: `created to prove the ${scopeWord} search works`,
+      state: 'ready',
+      idempotencyKey: `contract:${opts.id}:scope`,
+    });
+    const hit = await provider.listWork({ states: ['ready'], query: scopeWord });
+    if (!hit.some((item) => item.id === probe.item.id)) {
+      throw new Error(`a query for ${scopeWord} did not return the item whose title carries it`);
+    }
+    const miss = await provider.listWork({ states: ['ready'], query: `${scopeWord}nothingcarriesthis` });
+    if (miss.some((item) => item.id === probe.item.id)) {
+      throw new Error(`a query for a term nothing carries returned ${probe.item.id}`);
+    }
+    notes.push(`query: PASS (${hit.length} hit(s), no false positive)`);
+  } else {
+    notRun += 1;
+    notes.push('query: NOT_RUN (the board can search but cannot file a probe item for the suite to find)');
+  }
+
+  // --- a scope that names nothing is a configuration error, not a licence to widen ---
+  // Adapters drifted on this: two treated a blank term as "no filter" (returning the whole
+  // board while looking scoped), one refused it, and one silently stripped a quote. The
+  // rule now lives in core and is asserted here, per adapter, in both shapes.
+  const blank = await provider
+    .listWork({ states: ['ready'], query: '   ' })
+    .then(() => null)
+    .catch((e: unknown) => e);
+  if (blank === null) {
+    throw new Error('a whitespace-only query must be refused: it names no scope, and dropping it widens the search');
+  }
+  if (!(blank instanceof BoardError) || blank.kind !== 'precondition') {
+    throw new Error(`a blank query must fail as precondition, got ${String(blank)}`);
+  }
+  if (caps.canTextSearch && caps.canCreateWork) {
+    // A term whose syntax the board may not be able to carry (a quote) must be REFUSED or
+    // carried faithfully — what it must never do is come back WIDENED, which is how a
+    // runner ends up on items the operator excluded.
+    const quoted = await provider
+      .listWork({ states: ['ready'], query: `"${scopeWord}"` })
+      .then((items) => items)
+      .catch((e: unknown) => e);
+    if (Array.isArray(quoted)) {
+      const strays = quoted.filter((item) => !`${item.title}\n${item.body}`.toLowerCase().includes(scopeWord.toLowerCase()));
+      if (strays.length > 0) {
+        throw new Error(
+          `a quoted term returned ${strays.length} item(s) that do not carry the word at all — the term was not carried faithfully and not refused either`,
+        );
+      }
+    } else if (!(quoted instanceof BoardError) || quoted.kind !== 'precondition') {
+      throw new Error(`a term the board cannot carry must be refused as precondition, got ${String(quoted)}`);
+    }
+  }
+  notes.push('scopeValidation: PASS (blank refused; a quoted term is carried or refused, never widened)');
+
+  // --- state bootstrap: can this board even express the six states? ---
+  // This is the first minute of a real deployment: a board that cannot express a
+  // state, and does not say what to do about it, strands the runner before it has
+  // claimed anything. The suite therefore requires a REPORT in every case, and
+  // creation only where the adapter claims it can create.
+  const desired = [...caps.states];
+  const dry = await provider.bootstrapStates(desired, { dryRun: true });
+  assertBootstrapReport(dry, desired, caps.canBootstrapStates, opts.id, 'dry run');
+  if (dry.applied) throw new Error('a dry-run bootstrap must not report applied: true');
+  const createdInDry = dry.actions.filter((a) => a.outcome === 'created');
+  if (createdInDry.length > 0) {
+    throw new Error(`a dry run created ${createdInDry.map((a) => a.state).join(', ')} — it must change nothing`);
+  }
+
+  const applied = await provider.bootstrapStates(desired);
+  assertBootstrapReport(applied, desired, caps.canBootstrapStates, opts.id, 'bootstrap');
+  const pending = applied.actions.filter((a) => a.outcome === 'would-create');
+  if (pending.length > 0) {
+    throw new Error(
+      `a real bootstrap reported would-create for ${pending.map((a) => a.state).join(', ')} — that is a dry-run outcome`,
+    );
+  }
+  // What the dry run said it would create, the real run must have created.
+  for (const action of dry.actions) {
+    if (action.outcome !== 'would-create') continue;
+    const real = applied.actions.find((a) => a.state === action.state);
+    if (real?.outcome !== 'created') {
+      throw new Error(`the dry run promised to create ${action.state} but the real run reported ${String(real?.outcome)}`);
+    }
+  }
+
+  const again = await provider.bootstrapStates(desired);
+  if (again.applied) throw new Error('a second bootstrap changed the board: bootstrapStates must be idempotent');
+  if (again.actions.some((a) => a.outcome === 'created')) {
+    throw new Error('a second bootstrap reported created: bootstrapStates must be idempotent');
+  }
+  const notCreatable = applied.actions.filter((a) => a.outcome === 'not-creatable');
+  notes.push(
+    `bootstrapStates: PASS (canCreate=${caps.canBootstrapStates} ` +
+      `created=${applied.actions.filter((a) => a.outcome === 'created').length} ` +
+      `exists=${applied.actions.filter((a) => a.outcome === 'exists').length} ` +
+      `notCreatable=${notCreatable.length}, idempotent, dry run changed nothing)`,
   );
 
   // --- listWork ---
@@ -377,6 +782,31 @@ export async function runTaskBoardProviderContractSuite(
   );
   notes.push(`getWork: PASS (known item + not_found for unknown item), state=${item.state}`);
 
+  // --- recovery: a record from a run that DIED must not make the item unclaimable ----------
+  // The operator's documented recovery path is to move an item back to `ready` — takumi's own
+  // block message names it. That path has to work: if the record left by the dead run refused
+  // every later claim, the item would be unrecoverable without hand-editing takumi's note.
+  const diedRunId = `${runId}-died`;
+  if (!caps.machineReadableState) {
+    // No state records on this board means no record can block a claim: the defect cannot
+    // exist here, and pretending it passed would be a false positive.
+    notRun += 1;
+    notes.push('recovery: NOT_RUN (this board keeps no machine-readable state)');
+  } else {
+    await provider.writeState(opts.itemId, {
+    schema: 1,
+    runId: diedRunId,
+    item: opts.itemId,
+    reviewRound: 0,
+    updatedAt: new Date(0).toISOString(),
+    note: 'contract suite: a run that claimed this item and then died',
+  });
+    const beforeRecovery = await provider.getWork(opts.itemId);
+    if (beforeRecovery.state !== 'ready') {
+      throw new Error(`the recovery check needs a ready item, got state '${beforeRecovery.state}'`);
+    }
+  }
+
   // --- claim is NOT idempotent-by-accident ---
   const first = await provider.claim(opts.itemId, runId);
   if (first.claimed !== true) {
@@ -388,6 +818,18 @@ export async function runTaskBoardProviderContractSuite(
   }
   if (second.reason === undefined || second.reason.length === 0) {
     throw new Error('a refused claim must state a reason — a silent refusal is not a contract');
+  }
+  if (caps.machineReadableState) {
+    // Only a board that keeps records can have the defect the recovery check looks for, so the
+    // assertion travels with the check (the board without records reported NOT_RUN above).
+    if (first.takeoverFrom !== diedRunId) {
+      throw new Error(
+        `a claim of an item the board reports as ready must REPORT that it took over the record's run (${diedRunId}), got takeoverFrom=${JSON.stringify(first.takeoverFrom)}`,
+      );
+    }
+    notes.push(
+      `recovery: PASS (a record from the run ${diedRunId} does not block a claim while the board says ready; the takeover is reported)`,
+    );
   }
   notes.push(
     `claim: PASS (first claimed=true, second claimed=false reason=${JSON.stringify(second.reason)}, atomicClaim=${caps.atomicClaim})`,
@@ -547,7 +989,56 @@ function assertWorkItemShape(item: BoardWorkItem): void {
   }
 }
 
-/** Run `fn` and require a {@link BoardError} of `kind` — no bare Error, no silent success. */
+/**
+ * Validate a bootstrap report without knowing the board: the same shape rules apply
+ * to a GitHub label set, a Jira workflow and a Redmine status list.
+ */
+function assertBootstrapReport(
+  report: BoardBootstrapReport,
+  desired: readonly BoardWorkItemState[],
+  canCreate: boolean,
+  providerId: string,
+  what: string,
+): void {
+  if (report === null || typeof report !== 'object') throw new Error(`${what} must resolve a report object`);
+  if (report.provider !== providerId) {
+    throw new Error(`${what} must name its provider (${providerId}), got ${JSON.stringify(report.provider)}`);
+  }
+  if (!Array.isArray(report.actions)) throw new Error(`${what} must resolve an actions array`);
+  const seen = new Set<string>();
+  for (const action of report.actions) {
+    if (!desired.includes(action.state)) {
+      throw new Error(`${what} reported a state that was not asked for: ${action.state}`);
+    }
+    if (seen.has(action.state)) throw new Error(`${what} reported ${action.state} twice`);
+    seen.add(action.state);
+    if (typeof action.name !== 'string' || action.name.length === 0) {
+      throw new Error(`${what} reported ${action.state} without the board's own name for it`);
+    }
+    if (!['exists', 'created', 'would-create', 'not-creatable'].includes(action.outcome)) {
+      throw new Error(`${what} reported an unknown outcome for ${action.state}: ${String(action.outcome)}`);
+    }
+    if (action.outcome === 'not-creatable') {
+      if (action.instruction === undefined || action.instruction.trim().length === 0) {
+        // Without the instruction this is the "no such label" error we set out to
+        // abolish, just with a nicer name.
+        throw new Error(
+          `${what} reported ${action.state} as not-creatable without telling the operator what to do about it`,
+        );
+      }
+    }
+    if (!canCreate && (action.outcome === 'created' || action.outcome === 'would-create')) {
+      throw new Error(
+        `${what} reported ${action.outcome} for ${action.state} while capabilities().canBootstrapStates is false`,
+      );
+    }
+  }
+  for (const state of desired) {
+    if (!seen.has(state)) throw new Error(`${what} did not report on ${state}`);
+  }
+}
+
+/** Run `fn` and require a `BoardError` of `kind` — no bare Error, no silent success. */
 async function assertBoardError(
   fn: () => Promise<unknown>,
   kind: BoardErrorKind,

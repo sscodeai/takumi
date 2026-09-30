@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BOARD_WORK_ITEM_STATES,
   BoardError,
   BoardStateError,
   renderBoardStateRecord,
@@ -53,9 +54,11 @@ function issue(number: number, labels: string[], extra: Partial<SimIssue> = {}):
   };
 }
 
-function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = []) {
+function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = [], seedLabels: string[] = ['takumi-ready']) {
   const issues = seedIssues;
   const comments = seedComments;
+  /** Repository labels: what `bootstrapStates` lists and creates. */
+  const labels = seedLabels;
   const requests: BoardHttpRequest[] = [];
   let commentSeq = 1000;
 
@@ -73,6 +76,49 @@ function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = []
     const commentPatch = /^\/repos\/([^/]+)\/([^/]+)\/issues\/comments\/(\d+)$/.exec(path);
 
     if (req.method === 'GET' && path === '/user') return json({ login: 'bot-user' });
+
+    // Issue filing: the search createWork deduplicates through, and the create itself.
+    if (req.method === 'GET' && path === '/search/issues') {
+      // A real search honours `repo:`/`is:` qualifiers and quoted phrases; this double
+      // strips every qualifier, unquotes what is left, and matches it against the text a
+      // search would look at (title + body). Matching only the body hid a real bug in the
+      // double the first time round.
+      const raw = decodeURIComponent(url.searchParams.get('q') ?? '');
+      // Both call sites quote the phrase the adapter cares about (`"<marker>"`,
+      // `"<user term>"`); qualifiers are everything outside those quotes. Stripping
+      // anything that LOOKS like `word:` would eat the marker itself, which is a colon
+      // after its own prefix — the double has to read the query the way GitHub does.
+      const quoted = /"([^"]*)"/.exec(raw);
+      const term = (quoted?.[1] ?? raw.replace(/(^|\s)[a-z_]+:[^\s]+/gi, ' ')).trim();
+      const hits = issues.filter((i) => `${i.title}\n${i.body ?? ''}`.toLowerCase().includes(term.toLowerCase()));
+      return json({ total_count: hits.length, items: term.length === 0 ? [] : hits });
+    }
+    if (req.method === 'POST' && /^\/repos\/([^/]+)\/([^/]+)\/issues$/.test(path)) {
+      const wanted = (body['labels'] ?? []) as string[];
+      // A label GitHub does not have is a 422, which createWork must translate into the fix.
+      const missing = wanted.filter((label) => !labels.includes(label));
+      if (missing.length > 0) {
+        return json({ message: 'Validation Failed', errors: [{ field: 'labels', code: 'missing' }] }, 422);
+      }
+      const number = issues.length === 0 ? 1 : Math.max(...issues.map((i) => i.number)) + 1;
+      // Exactly the labels the REQUEST carried. Using the repository's whole label list
+      // here gave a new issue every label at once, so it resolved to the wrong state and
+      // the scope search could not see it — a simulator bug that hid an adapter behaviour.
+      const created = issue(number, wanted, { body: String(body['body'] ?? ''), title: String(body['title'] ?? '') });
+      issues.push(created);
+      return json(created, 201);
+    }
+
+    // Repository labels: what bootstrapStates lists and creates.
+    const repoLabels = /^\/repos\/([^/]+)\/([^/]+)\/labels$/.exec(path);
+    if (req.method === 'GET' && repoLabels) {
+      return json(labels.map((name) => ({ name, color: 'ededed' })));
+    }
+    if (req.method === 'POST' && repoLabels) {
+      const name = String(body['name'] ?? '');
+      labels.push(name);
+      return json({ name, color: body['color'] }, 201);
+    }
 
     if (req.method === 'GET' && path.endsWith('/issues')) {
       const wanted = url.searchParams.get('labels');
@@ -124,7 +170,7 @@ function githubSimulator(seedIssues: SimIssue[], seedComments: SimComment[] = []
     return notFound();
   };
 
-  return { request, requests, issues, comments };
+  return { request, requests, issues, comments, labels };
 }
 
 function provider(sim: ReturnType<typeof githubSimulator>, extra: Record<string, unknown> = {}) {
@@ -133,7 +179,53 @@ function provider(sim: ReturnType<typeof githubSimulator>, extra: Record<string,
 
 const RUN = 'c0ffee01';
 
-test('GitHubBoardProvider: shared task-board contract suite', async () => {
+test('bootstrapStates: creates the six state labels, and a dry run creates nothing', async () => {
+  const sim = githubSimulator([issue(7, [])], [], []);
+  const board = provider(sim);
+
+  const dry = await board.bootstrapStates(BOARD_WORK_ITEM_STATES, { dryRun: true });
+  assert.equal(dry.applied, false);
+  assert.deepEqual(dry.actions.map((a) => a.outcome), ['would-create', 'would-create', 'would-create', 'would-create', 'would-create', 'would-create']);
+  assert.deepEqual(dry.actions.map((a) => a.name), ['takumi-ready', 'takumi-claimed', 'takumi-pr-open', 'takumi-fix-needed', 'takumi-merged', 'takumi-blocked']);
+  assert.equal(
+    sim.requests.some((r) => r.method === 'POST'),
+    false,
+    'a dry run must not create anything',
+  );
+  assert.deepEqual(sim.labels, []);
+
+  const applied = await board.bootstrapStates(BOARD_WORK_ITEM_STATES);
+  assert.equal(applied.applied, true);
+  assert.equal(applied.actions.every((a) => a.outcome === 'created'), true);
+  assert.deepEqual(sim.labels, ['takumi-ready', 'takumi-claimed', 'takumi-pr-open', 'takumi-fix-needed', 'takumi-merged', 'takumi-blocked']);
+  const create = sim.requests.find((r) => r.method === 'POST');
+  assert.equal((create?.body as Record<string, unknown>)['color'], '1f6feb');
+
+  // Idempotent: a second call changes nothing and reports what exists.
+  const again = await board.bootstrapStates(BOARD_WORK_ITEM_STATES);
+  assert.equal(again.applied, false);
+  assert.equal(again.actions.every((a) => a.outcome === 'exists'), true);
+  assert.equal(sim.labels.length, 6, 'the second call must not duplicate labels');
+});
+
+test('bootstrapStates: reports the labels the repository already has, and honours a custom prefix', async () => {
+  const sim = githubSimulator([issue(7, [])], [], ['takumi-ready', 'unrelated']);
+  const board = provider(sim);
+  const report = await board.bootstrapStates(['ready', 'merged']);
+  assert.deepEqual(report.actions, [
+    { state: 'ready', name: 'takumi-ready', outcome: 'exists' },
+    { state: 'merged', name: 'takumi-merged', outcome: 'created' },
+  ]);
+  assert.deepEqual(sim.labels, ['takumi-ready', 'unrelated', 'takumi-merged']);
+
+  const prefixed = githubSimulator([issue(7, [])], [], []);
+  const custom = provider(prefixed, { labelPrefix: 'tk-' });
+  const customReport = await custom.bootstrapStates(['ready']);
+  assert.equal(customReport.actions[0]?.name, 'tk-ready');
+  assert.deepEqual(prefixed.labels, ['tk-ready']);
+});
+
+test('GitHubBoardProvider: the shared task-board contract suite over an injected transport', async () => {
   const sim = githubSimulator([issue(7, ['takumi-ready'])]);
   const out = await runTaskBoardProviderContractSuite(provider(sim), { id: 'github', itemId: '7' });
   assert.equal(out.gate, 'task-board-contract');
@@ -385,4 +477,93 @@ test('fail closed without a transport: a missing token is an auth error, not a h
 
 test('options: a malformed repo is rejected at construction', () => {
   assert.throws(() => new GitHubBoardProvider({ repo: 'no-slash', request: async () => ({ status: 200, body: '{}' }) }), /owner\/name/);
+});
+
+test('createWork: files an issue in `ready`, and the same key never files a second one', async () => {
+  const sim = githubSimulator([issue(7, ['takumi-ready'])]);
+  const board = provider(sim);
+
+  const first = await board.createWork({
+    title: 'CI is red on main',
+    body: 'the build failed before this run started',
+    idempotencyKey: 'ci-red:repo:main',
+  });
+  assert.equal(first.created, true);
+  assert.equal(first.item.state, 'ready', 'the new issue carries the state label, which IS the state');
+  assert.equal(first.item.title, 'CI is red on main');
+
+  const create = sim.requests.find((r) => r.method === 'POST' && r.url.endsWith('/issues'));
+  const body = create?.body as Record<string, unknown>;
+  assert.deepEqual(body['labels'], ['takumi-ready']);
+  assert.match(String(body['body']), /<!-- takumi:created=ci-red:repo:main -->/);
+
+  // The retry: the tick runs again, the search finds the first issue, nothing is filed.
+  const second = await board.createWork({ title: 'CI is red on main', idempotencyKey: 'ci-red:repo:main' });
+  assert.equal(second.created, false);
+  assert.equal(second.item.id, first.item.id);
+  assert.equal(
+    sim.requests.filter((r) => r.method === 'POST' && r.url.endsWith('/issues')).length,
+    1,
+    'exactly one create ever reached the host',
+  );
+  assert.equal(sim.issues.length, 2, 'the original issue plus one filed, not two filed');
+});
+
+test('createWork: a missing state label tells the operator to bootstrap', async () => {
+  const sim = githubSimulator([], [], []); // no labels on the repository at all
+  const board = provider(sim);
+  await assert.rejects(
+    () => board.createWork({ title: 'filed without bootstrap' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'precondition');
+      assert.match(e.message, /takumi board --bootstrap/);
+      assert.match(e.message, /takumi-ready/);
+      return true;
+    },
+  );
+});
+
+test('createWork: an unkeyed call files every time (the key is what dedupes, not the title)', async () => {
+  const sim = githubSimulator([], [], ['takumi-ready', 'other']);
+  const board = provider(sim);
+  const first = await board.createWork({ title: 'same title' });
+  const second = await board.createWork({ title: 'same title' });
+  assert.equal(first.created, true);
+  assert.equal(second.created, true);
+  assert.notEqual(first.item.id, second.item.id);
+  assert.equal(sim.requests.some((r) => r.url.includes('/search/issues')), false, 'no key means no search');
+});
+
+test('listWork: a text scope goes through search and still honours the state', async () => {
+  const sim = githubSimulator([
+    issue(7, ['takumi-ready'], { title: 'Epic: billing', body: 'part of the billing epic' }),
+    issue(8, ['takumi-ready'], { title: 'Unrelated task', body: 'nothing to do with it' }),
+    issue(9, ['takumi-claimed'], { title: 'Billing follow-up', body: 'also billing' }),
+  ]);
+  const board = provider(sim);
+
+  const hits = await board.listWork({ states: ['ready'], query: 'billing' });
+  assert.deepEqual(hits.map((i) => i.id), ['7'], 'only the ready item whose text carries the term');
+
+  const search = sim.requests.find((r) => r.url.includes('/search/issues'));
+  const query = decodeURIComponent(new URL(search?.url ?? '').searchParams.get('q') ?? '');
+  assert.equal(query, 'repo:acme/widgets is:issue "billing"', 'the repo scope and phrase are the adapter’s job');
+
+  const none = await board.listWork({ states: ['ready'], query: 'nothing-carries-this-term' });
+  assert.deepEqual(none, []);
+});
+
+test('listWork: a scope that is only quotes fails loudly instead of searching for something else', async () => {
+  const sim = githubSimulator([issue(7, ['takumi-ready'])]);
+  const board = provider(sim);
+  await assert.rejects(
+    () => board.listWork({ states: ['ready'], query: '"""' }),
+    (e: unknown) => {
+      assert.ok(e instanceof BoardError);
+      assert.equal(e.kind, 'precondition');
+      return true;
+    },
+  );
+  assert.equal(sim.requests.some((r) => r.url.includes('/search/issues')), false, 'no query was sent');
 });

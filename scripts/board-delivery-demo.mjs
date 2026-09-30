@@ -13,9 +13,20 @@
  *
  * Run: node scripts/board-delivery-demo.mjs
  */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { FakeBoardProvider } from '../boards/fake/dist/index.js';
 import { FakeDeliveryProvider } from '../deliveries/fake/dist/index.js';
-import { renderRunMarker, runDeliveryLoop } from '../packages/core/dist/index.js';
+import {
+  acquireSlot,
+  BOARD_WORK_ITEM_STATES,
+  createEventLog,
+  formatEventLine,
+  renderRunMarker,
+  runDeliveryLoop,
+} from '../packages/core/dist/index.js';
 
 const RUN_ID = 'c0ffee01';
 const BASE_SHA = 'a'.repeat(40);
@@ -186,7 +197,54 @@ async function main() {
     timeline.push({ step: 'guard:loop', detail: `the loop did not merge: ${loop.outcome}` });
   }
 
-  const failures = timeline.filter((t) => t.step.startsWith('guard:') && /NOT REFUSED|did not merge/.test(t.detail));
+  // --- the pilot safety rails (ADR-008) ---------------------------------------
+  console.log('\nThe pilot safety rails (ADR-008):\n');
+
+  // 1) State bootstrap: can this board even express the six states?
+  const bootBoard = new FakeBoardProvider({ items: [] });
+  const dry = await bootBoard.bootstrapStates(BOARD_WORK_ITEM_STATES, { dryRun: true });
+  record('bootstrap --check', `${dry.actions.filter((a) => a.outcome === 'would-create').length} would be created, ${dry.applied ? 'CHANGED (bug!)' : 'nothing changed'}`);
+  const booted = await bootBoard.bootstrapStates(BOARD_WORK_ITEM_STATES);
+  record('bootstrap --apply', `created ${booted.actions.filter((a) => a.outcome === 'created').length}, second call applied=${(await bootBoard.bootstrapStates(BOARD_WORK_ITEM_STATES)).applied}`);
+
+  // 2) The slot: one runner per item, or two runners race a non-atomic claim.
+  const slotDir = mkdtempSync(join(tmpdir(), 'takumi-demo-slots-'));
+  const other = acquireSlot({ dir: slotDir, key: 'SLOT-1', owner: { runId: 'otherrun' } });
+  const slotBoard = new FakeBoardProvider({ items: [{ id: 'SLOT-1', state: 'ready' }] });
+  const contended = await runDeliveryLoop({
+    board: slotBoard,
+    delivery: new FakeDeliveryProvider({ baseSha: BASE_SHA }),
+    plan: { worktree: '/tmp/takumi-demo-worktree', branch: 'takumi/slot-1-c0ffee03', baseBranch: 'main', itemId: 'SLOT-1', runId: 'c0ffee03', baseSha: BASE_SHA, slot: { dir: slotDir } },
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+  record('second runner', contended.outcome === 'busy' ? 'busy — refused before touching the board' : `PROBLEM: ${contended.outcome}`);
+  other.handle?.release();
+  const afterRelease = await runDeliveryLoop({
+    board: slotBoard,
+    delivery: new FakeDeliveryProvider({ baseSha: BASE_SHA }),
+    plan: { worktree: '/tmp/takumi-demo-worktree', branch: 'takumi/slot-1-c0ffee03', baseBranch: 'main', itemId: 'SLOT-1', runId: 'c0ffee04', baseSha: BASE_SHA, slot: { dir: slotDir } },
+    hooks: {
+      agent: async ({ round }) => {},
+      review: async () => ({ verdict: 'clean' }),
+    },
+  });
+  record('after release', `${afterRelease.outcome} (the slot was not wedged)`);
+  rmSync(slotDir, { recursive: true, force: true });
+
+  // 3) The event trail: one JSON line per event, greppable by run.
+  const log = createEventLog();
+  const eventBoard = new FakeBoardProvider({ items: [{ id: 'EV-1', state: 'ready' }] });
+  await runDeliveryLoop({
+    board: eventBoard,
+    delivery: new FakeDeliveryProvider({ baseSha: BASE_SHA }),
+    plan: { worktree: '/tmp/takumi-demo-worktree', branch: 'takumi/ev-1-c0ffee05', baseBranch: 'main', itemId: 'EV-1', runId: 'c0ffee05', baseSha: BASE_SHA },
+    events: log,
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+  record('event trail', `${log.events().length} events: ${log.events().map((e) => e.kind).join(' ')}`);
+  console.log(`\n  one line, exactly as a log shipper would read it:\n  ${formatEventLine(log.events()[0])}`);
+
+  const failures = timeline.filter((t) => t.step.startsWith('guard:') && /NOT REFUSED|did not merge|PROBLEM/.test(t.detail));
   console.log(`\n${timeline.length} checks, ${failures.length} that did not behave.\n`);
   return failures.length === 0 ? 0 : 1;
 }

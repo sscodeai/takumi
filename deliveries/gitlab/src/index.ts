@@ -485,12 +485,49 @@ export class GitLabDeliveryProvider implements DeliveryProvider {
         item: ref.number,
       });
     }
-    const statuses = await this.callList<GitLabCommitStatusPayload>(
-      { method: 'GET', url: `${this.projectUrl()}/commits/${encodeURIComponent(ref.headSha)}/statuses` },
-      `list the commit statuses of ${ref.headSha}`,
-      ref.number,
-    );
-    return statuses.map(toCheckFromCommitStatus);
+    return (await this.commitStatuses(ref.headSha, ref.number)).map(toCheckFromCommitStatus);
+  }
+
+  /**
+   * The head commit's published statuses, where a 404 means "none published".
+   *
+   * MEASURED on gitlab.com: `GET /commits/:sha/statuses` answers 404 for a commit that exists
+   * and has no statuses at all — a project with no CI/CD and no external CI posting results.
+   * That is a different fact from "unknown commit", and reading it as the latter blocked a
+   * real delivery and left a mergeable merge request unmerged.
+   *
+   * So the two are separated by asking the commit itself: if the commit exists, the empty
+   * list is the honest answer (the loop already treats an empty check list as "no checks
+   * reported"); if the commit is unknown too, the original not_found stands — a commit the
+   * host cannot see must never be mistaken for a quiet project.
+   */
+  private async commitStatuses(headSha: string, item: string): Promise<GitLabCommitStatusPayload[]> {
+    try {
+      return await this.callList<GitLabCommitStatusPayload>(
+        { method: 'GET', url: `${this.projectUrl()}/commits/${encodeURIComponent(headSha)}/statuses` },
+        `list the commit statuses of ${headSha}`,
+        item,
+      );
+    } catch (e) {
+      if (!(e instanceof DeliveryError) || e.kind !== 'not_found') throw e;
+      if (await this.commitExists(headSha, item)) return [];
+      throw e;
+    }
+  }
+
+  /** Does the host know this commit? Only used to disambiguate a 404 from the statuses read. */
+  private async commitExists(headSha: string, item: string): Promise<boolean> {
+    try {
+      await this.call<unknown>(
+        { method: 'GET', url: `${this.projectUrl()}/repository/commits/${encodeURIComponent(headSha)}` },
+        `read commit ${headSha}`,
+        item,
+      );
+      return true;
+    } catch (e) {
+      if (e instanceof DeliveryError && e.kind === 'not_found') return false;
+      throw e;
+    }
   }
 
   /**

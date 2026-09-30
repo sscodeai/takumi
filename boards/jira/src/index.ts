@@ -1,16 +1,22 @@
 import {
+  decideClaim,
   assertBoardCapability,
   boardErrorFromResponse,
   BoardError,
   assertTransition,
+  BOARD_WORK_ITEM_STATES,
   BoardStateError,
   createCurlRequestFn,
+  createKeyOf,
   parseBoardStateRecord,
   renderBoardStateRecord,
+  renderCreateMarker,
   requestBoardJson,
   unconfiguredRequestFn,
 } from '@takumi/core';
 import type {
+  BoardBootstrapAction,
+  BoardBootstrapReport,
   BoardCapabilities,
   BoardCommentAuthor,
   BoardCommentRef,
@@ -19,9 +25,11 @@ import type {
   BoardStateRecord,
   BoardTransitionEvidence,
   BoardWorkItem,
+  BoardWorkItemSpec,
   BoardWorkItemState,
   BoardWorkQuery,
   ClaimResult,
+  CreateWorkResult,
   CurlRequestFnOptions,
   TaskBoardProvider,
 } from '@takumi/core';
@@ -65,6 +73,16 @@ export interface JiraBoardOptions {
   bearerToken?: string;
   /** Delivery state → Jira status name. Defaults to the state name itself. */
   statusMap?: JiraStatusMap;
+  /**
+   * The ISSUE TYPE a filed item is created as, e.g. `Task` or `Bug`.
+   *
+   * Deliberately NO default. A Jira issue type is per-PROJECT administration data and
+   * this adapter never reads it: it reads the project's STATUSES, which the API happens
+   * to bucket by issue type, but a bucket name is not a decision the caller made — so
+   * any default here would file work into a queue nobody chose. Without this option
+   * `createWork` fails closed naming it, instead of sending a request Jira answers 400.
+   */
+  issueType?: string;
   /** Author accountIds or display names allowed to supply decisions. */
   trustedAuthors?: string[];
   /** Search path; Jira Cloud is migrating `/search` → `/search/jql`. Default `/rest/api/3/search`. */
@@ -84,6 +102,14 @@ const DEFAULT_STATUS_MAP: Record<BoardWorkItemState, string> = {
 
 /** The issue property that carries the run record (versioned inside the block). */
 export const JIRA_STATE_PROPERTY = 'takumi.boardstate.v1';
+
+/**
+ * How many text-search hits `createWork` inspects for an idempotency marker.
+ *
+ * Small on purpose: the marker is confirmed EXACTLY (`createKeyOf`), so the first real
+ * match wins, and the limit only bounds what a fuzzy `text ~` query drags in.
+ */
+const CREATE_SEARCH_LIMIT = 50;
 
 interface AdfNode {
   type?: string;
@@ -109,6 +135,20 @@ interface JiraTransition {
   to?: { name?: string };
 }
 
+/**
+ * The subset of `GET /rest/api/3/project/<key>/statuses` this adapter reads.
+ *
+ * Jira answers with ONE BUCKET PER ISSUE TYPE, each holding that type's statuses —
+ * which is why a status name is never at the top level of this payload. An entry
+ * without a bucket is tolerated as a flat status list, because that is what some
+ * Jira status endpoints answer.
+ */
+interface JiraProjectStatus {
+  id?: string;
+  name?: string;
+  statuses?: Array<{ id?: string; name?: string }>;
+}
+
 interface JiraComment {
   id?: string;
   body?: unknown;
@@ -120,6 +160,7 @@ export class JiraBoardProvider implements TaskBoardProvider {
   private readonly jql: string;
   private readonly projectKey: string | undefined;
   private readonly statusMap: Record<BoardWorkItemState, string>;
+  private readonly issueType: string | undefined;
   private readonly trustedAuthors: Set<string> | undefined;
   private readonly searchPath: string;
   private readonly request: BoardRequestFn;
@@ -133,6 +174,7 @@ export class JiraBoardProvider implements TaskBoardProvider {
     this.projectKey = opts.projectKey;
     this.jql = opts.jql ?? this.defaultJql();
     this.statusMap = { ...DEFAULT_STATUS_MAP, ...opts.statusMap };
+    this.issueType = opts.issueType;
     this.searchPath = opts.searchPath ?? '/rest/api/3/search';
     this.trustedAuthors = opts.trustedAuthors === undefined ? undefined : new Set(opts.trustedAuthors);
 
@@ -171,10 +213,34 @@ export class JiraBoardProvider implements TaskBoardProvider {
       // Jira transitions are not conditional on a value we control, so the claim
       // is read-then-write plus a re-read verification.
       atomicClaim: false,
+      // A Jira status belongs to a WORKFLOW, and creating one is administration
+      // (or a workflow-scheme edit), not an API call this adapter may make. So the
+      // honest answer is false, and `bootstrapStates()` only REPORTS.
+      canBootstrapStates: false,
+      // `POST /rest/api/3/issue` files an issue, so filing is possible. The
+      // idempotency marker rides in the DESCRIPTION, because only the summary and the
+      // description are in the text index a Jira search can reach before a second
+      // create is sent (a label is not text-searchable; a property is not searchable
+      // at all) — see `createWork`.
+      canCreateWork: true,
+      // `POST /rest/api/3/search` takes the WHOLE filter as one JQL query, so a
+      // free-text scope is just another clause in the query this adapter already
+      // sends: one round trip, no client-side intersection that would only be as
+      // wide as the first page fetched.
+      canTextSearch: true,
       delivery: { canOpenPullRequest: false, canRunChecks: false, canMerge: false },
     };
   }
 
+  /**
+   * Issues in the requested states, and (with a `query`) in the caller's text scope.
+   *
+   * The scope is applied by the BOARD, in the same JQL the state filter travels in:
+   * Jira's own text index decides what the words mean, which is exactly why a caller
+   * can say "only this epic" without takumi inventing an epic model. `scopedJql`
+   * refuses a term that would break the query rather than sending a search whose
+   * meaning nobody can predict (see `textScopeClause`).
+   */
   async listWork(query: BoardWorkQuery = {}): Promise<BoardWorkItem[]> {
     const states: BoardWorkItemState[] = query.states === undefined ? ['ready'] : [...query.states];
     const wanted = new Set(states);
@@ -184,7 +250,7 @@ export class JiraBoardProvider implements TaskBoardProvider {
         method: 'POST',
         url: `${this.baseUrl}${this.searchPath}`,
         body: {
-          jql: this.scopedJql(states),
+          jql: this.scopedJql(states, query.query),
           fields: ['summary', 'description', 'status', 'labels', 'assignee', 'updated'],
           maxResults: query.limit ?? 100,
         },
@@ -209,15 +275,130 @@ export class JiraBoardProvider implements TaskBoardProvider {
     return this.toWorkItem(issue);
   }
 
+  /**
+   * File an issue, idempotently.
+   *
+   * WHY THE DESCRIPTION CARRIES THE MARKER: filing has to be able to find its own item
+   * before sending a second create, and only the summary and the description are in the
+   * text index Jira's `text ~` search reads. `adfToText` flattens the ADF document, so
+   * the marker written here is exactly what the adapter's own reader finds on the way
+   * back; a label is not text-searchable and an issue property is invisible to search.
+   *
+   * Two things are never guessed:
+   *
+   * 1. the ISSUE TYPE — it comes from the `issueType` option; without it the call fails
+   *    closed naming the option instead of letting Jira answer 400;
+   * 2. the STARTING STATUS — a create answers with `{id,key,self}` and the new issue's
+   *    status is the WORKFLOW's decision, so the item is read back; when the workflow did
+   *    not start it in the status `statusMap` gives the requested state, it is moved
+   *    there through a real transition. Reporting a workflow's initial status as `ready`
+   *    is the exact lie `statusMap` exists to prevent, and a status the project does not
+   *    have at all is refused BEFORE anything is filed.
+   *
+   * RESIDUAL RISK, stated rather than hidden: Jira's text index is eventually
+   * consistent, so an item filed by a previous tick may not be searchable for a few
+   * seconds and a retry inside that window can still file a duplicate. Jira offers no
+   * native idempotency key, so this search is the whole of the guarantee the board can
+   * give; the exact marker is what keeps it from adopting a mere mention of the key.
+   */
+  async createWork(spec: BoardWorkItemSpec): Promise<CreateWorkResult> {
+    assertBoardCapability(this, 'canCreateWork');
+    const state = spec.state ?? 'ready';
+
+    const projectKey = this.projectKey;
+    if (projectKey === undefined) {
+      throw new BoardError(
+        'precondition',
+        'createWork needs a project to file into: pass the projectKey option (e.g. projectKey: "ACME") — Jira rejects an issue create without one',
+      );
+    }
+    const issueType = this.issueType;
+    if (issueType === undefined || issueType.trim().length === 0) {
+      throw new BoardError(
+        'precondition',
+        'createWork needs an issue type: pass the issueType option (e.g. issueType: "Task") — every Jira issue belongs to one, ' +
+          'and this adapter will not guess which type a project uses',
+      );
+    }
+
+    const key = spec.idempotencyKey;
+    const marker = key === undefined ? null : createMarkerFor(key);
+    if (key !== undefined) {
+      const alreadyFiled = await this.findFiledIssue(projectKey, key);
+      if (alreadyFiled !== null) return { item: this.toWorkItem(alreadyFiled), created: false };
+    }
+
+    // The status the item must START in has to exist in the project's OWN workflow:
+    // Jira resolves a new issue's status from that workflow, so a state whose status
+    // nobody added would land the item somewhere nobody asked for.
+    const target = this.statusMap[state];
+    const available = await this.projectStatusNames(projectKey);
+    if (!available.has(target.toLowerCase())) {
+      throw new BoardError(
+        'precondition',
+        `createWork cannot start an item in state ${JSON.stringify(state)}: project ${projectKey} has no workflow status named ` +
+          `${JSON.stringify(target)} (available: ${[...available].sort().join(', ') || 'none'}). Add that status to the project's ` +
+          'workflow in Jira administration and/or map the state with statusMap (delivery state -> status name) — this adapter ' +
+          'will not file work that starts in a status nobody asked for',
+      );
+    }
+
+    const body = marker === null ? (spec.body ?? '') : `${spec.body ?? ''}\n\n${marker}`;
+    const fields: Record<string, unknown> = {
+      project: { key: projectKey },
+      summary: spec.title,
+      // Jira Cloud v3 takes ADF here, not a plain string: a bare string is rejected.
+      description: textToAdf(body),
+      issuetype: { name: issueType },
+    };
+    // Jira labels are honoured when asked for, and omitted otherwise so the body stays
+    // exactly the documented create shape.
+    if (spec.labels !== undefined && spec.labels.length > 0) fields['labels'] = [...spec.labels];
+
+    const created = await requestBoardJson<JiraIssue>(
+      this.request,
+      { method: 'POST', url: `${this.baseUrl}/rest/api/3/issue`, body: { fields } },
+      'createWork',
+    );
+    if (created.key === undefined) {
+      throw new BoardError(
+        'transport',
+        `Jira accepted a create in ${projectKey} but returned no issue key, so the filed item cannot be addressed`,
+        { item: projectKey },
+      );
+    }
+
+    // A create answers with the new issue's identity, not its fields: the status the
+    // workflow gave it is read back, never assumed from the request that was sent.
+    let issue = created.fields?.status === undefined ? await this.fetchIssue(created.key) : created;
+    if ((issue.fields?.status?.name ?? '').toLowerCase() !== target.toLowerCase()) {
+      // Status names are compared case-insensitively, the way the rest of this adapter
+      // compares them. The transition is what makes "a created item starts in the
+      // requested state" true rather than hoped for.
+      await this.applyStatus(created.key, state);
+      issue = await this.fetchIssue(created.key);
+      const settled = issue.fields?.status?.name;
+      if ((settled ?? '').toLowerCase() !== target.toLowerCase()) {
+        throw new BoardError(
+          'precondition',
+          `filed ${created.key} but this workflow settled it in status ${JSON.stringify(settled ?? null)} instead of ` +
+            `${JSON.stringify(target)} (the status state ${JSON.stringify(state)} maps to)`,
+          { item: created.key },
+        );
+      }
+    }
+    return { item: this.toWorkItem(issue), created: true };
+  }
+
   async claim(id: string, runId: string): Promise<ClaimResult> {
     const issue = await this.fetchIssue(id);
+    // The rule lives in core (decideClaim): the board's STATE says whether the item is
+    // held, the record only says who worked it last. Reading the record as a lock is how an
+    // item becomes unrecoverable after the run that claimed it dies.
     const existing = await this.readState(id);
-    if (existing !== null && existing.runId !== runId) {
-      return { item: id, runId, claimed: false, reason: `already claimed by ${existing.runId}` };
-    }
-    const current = this.stateOf(issue);
-    if (current !== 'ready') {
-      return { item: id, runId, claimed: false, reason: `item is in state ${current}, not ready` };
+    const decision = decideClaim({ state: this.stateOf(issue), record: existing, runId });
+    if (!decision.claimed) {
+      return { item: id, runId, claimed: false, reason: decision.reason };
     }
 
     await this.applyStatus(id, 'claimed');
@@ -227,6 +408,11 @@ export class JiraBoardProvider implements TaskBoardProvider {
       item: id,
       reviewRound: 0,
       updatedAt: new Date().toISOString(),
+      // A takeover is written down: the record is evidence a human reads later, and "this run
+      // took the item over from one that had died" is exactly the kind of fact it exists for.
+      ...(decision.takeoverFrom === undefined
+        ? {}
+        : { note: `took over from run ${decision.takeoverFrom} (its record named itself while the board said ready)` }),
     });
 
     // Not conditional on Jira's side: verify the claim with a re-read.
@@ -239,7 +425,7 @@ export class JiraBoardProvider implements TaskBoardProvider {
         reason: `lost a concurrent claim to ${confirmed?.runId ?? 'an unknown run'}`,
       };
     }
-    return { item: id, runId, claimed: true };
+    return { item: id, runId, claimed: true, ...(decision.takeoverFrom === undefined ? {} : { takeoverFrom: decision.takeoverFrom }) };
   }
 
   async transition(id: string, to: BoardWorkItemState, evidence: BoardTransitionEvidence): Promise<void> {
@@ -340,6 +526,96 @@ export class JiraBoardProvider implements TaskBoardProvider {
     if (res.status < 200 || res.status >= 300) throw boardErrorFromResponse(res, `writeState ${id}`, id);
   }
 
+  /**
+   * Report which of the delivery states this Jira PROJECT can express.
+   *
+   * Jira keeps statuses in a WORKFLOW, and creating one is administration (or a
+   * workflow-scheme edit), not an API call this adapter may make — so
+   * `canBootstrapStates` is false and this is a READ-ONLY report, never a write.
+   * It answers the question the first minute of a deployment actually has: "which
+   * of the statuses this adapter's `statusMap` names does this project not have
+   * yet?". The status names are taken from the adapter's OWN `statusMap` (a second
+   * mapping would drift), and they are compared the way the rest of this adapter
+   * compares them — case-insensitively.
+   *
+   * Nothing here throws for a state the project is missing: `not-creatable` plus an
+   * instruction naming the exact status to add IS the answer, because the error
+   * this port exists to abolish was a runner dying with "no such status" while the
+   * operator had nothing to act on.
+   *
+   * A dry run is deliberately the SAME call: a report cannot change the project, so
+   * `applied` is false either way.
+   */
+  async bootstrapStates(
+    desired: readonly BoardWorkItemState[],
+    _opts?: { dryRun?: boolean },
+  ): Promise<BoardBootstrapReport> {
+    const provider = this.metadata().id;
+    const unsupported = BOARD_WORK_ITEM_STATES.filter((state) => !this.capabilities().states.includes(state));
+    const projectKey = this.projectKey;
+
+    // With no project configured there is no status list to read and no workflow to
+    // name, so every state is a configuration gap the operator is told about
+    // instead of a thrown error (and no request is made at all).
+    if (projectKey === undefined) {
+      const actions: BoardBootstrapAction[] = desired.map((state) => ({
+        state,
+        name: this.statusMap[state],
+        outcome: 'not-creatable',
+        instruction:
+          `no Jira project is configured, so this adapter cannot tell which statuses are available: ` +
+          `pass projectKey (and, once status ${JSON.stringify(this.statusMap[state])} exists in the project's ` +
+          `workflow, the statusMap entry for state ${JSON.stringify(state)})`,
+      }));
+      return { provider, applied: false, actions, unsupported };
+    }
+
+    const available = await this.projectStatusNames(projectKey);
+    const actions: BoardBootstrapAction[] = desired.map((state) => {
+      const name = this.statusMap[state];
+      if (available.has(name.toLowerCase())) return { state, name, outcome: 'exists' };
+      return {
+        state,
+        name,
+        outcome: 'not-creatable',
+        instruction:
+          `Jira reports no status named ${JSON.stringify(name)} in project ${projectKey}, so state ` +
+          `${JSON.stringify(state)} cannot be represented: add that status to the project's workflow in Jira ` +
+          `administration (Project settings → Issues → Workflows, or the workflow scheme the project uses), then ` +
+          `this adapter's statusMap must name it — Jira statuses cannot be created through the REST API`,
+      };
+    });
+    return { provider, applied: false, actions, unsupported };
+  }
+
+  /**
+   * The STATUS NAMES a project offers, lowercased for the case-insensitive
+   * comparison this adapter already uses in `stateOf`/`applyStatus`.
+   *
+   * Jira answers `GET /rest/api/3/project/<key>/statuses` as one bucket per ISSUE
+   * TYPE, each holding that type's statuses; an entry carrying no bucket is taken as
+   * a status itself (see {@link JiraProjectStatus}).
+   */
+  private async projectStatusNames(projectKey: string): Promise<Set<string>> {
+    const payload = await requestBoardJson<JiraProjectStatus[]>(
+      this.request,
+      { method: 'GET', url: `${this.baseUrl}/rest/api/3/project/${encodeURIComponent(projectKey)}/statuses` },
+      `project statuses of ${projectKey}`,
+    );
+    const names = new Set<string>();
+    for (const entry of Array.isArray(payload) ? payload : []) {
+      const bucket = entry.statuses;
+      if (Array.isArray(bucket)) {
+        for (const status of bucket) {
+          if (typeof status?.name === 'string' && status.name.length > 0) names.add(status.name.toLowerCase());
+        }
+        continue;
+      }
+      if (typeof entry.name === 'string' && entry.name.length > 0) names.add(entry.name.toLowerCase());
+    }
+    return names;
+  }
+
   /** Move the issue to the status that represents `to`, via a real transition. */
   private async applyStatus(id: string, to: BoardWorkItemState): Promise<void> {
     const target = this.statusMap[to];
@@ -389,6 +665,39 @@ export class JiraBoardProvider implements TaskBoardProvider {
     return result.comments ?? [];
   }
 
+  /**
+   * The issue this adapter already filed for `key`, or `null`.
+   *
+   * The search is Jira's OWN text search (`text ~`), not a scan of `listWork`: a scan is
+   * one page wide and covers only the states the caller asked for, so a duplicate filed
+   * because page one happened not to contain the original is exactly what this avoids.
+   * `text ~` is a fuzzy full-text match, so every hit is confirmed with `createKeyOf` —
+   * the EXACT marker decides, never a passing mention of the key.
+   *
+   * A match is returned as-is whether or not its status still maps: an existing item is
+   * the answer to "was this already filed?", and re-filing because the original moved on
+   * is precisely the duplicate this exists to prevent.
+   */
+  private async findFiledIssue(projectKey: string, key: string): Promise<JiraIssue | null> {
+    const jql = `project = ${projectKey} AND text ~ "${key.replace(/"/g, '\\"')}"`;
+    const found = await requestBoardJson<{ issues?: JiraIssue[] }>(
+      this.request,
+      {
+        method: 'GET',
+        url:
+          `${this.baseUrl}${this.searchPath}?jql=${encodeURIComponent(jql)}` +
+          `&fields=summary,description&maxResults=${CREATE_SEARCH_LIMIT}`,
+      },
+      'createWork: search',
+    );
+    for (const issue of found.issues ?? []) {
+      const description = issue.fields?.description;
+      const text = `${issue.fields?.summary ?? ''}\n${description === undefined ? '' : adfToText(description)}`;
+      if (createKeyOf(text) === key) return issue;
+    }
+    return null;
+  }
+
   private async authenticatedAccountId(): Promise<string | undefined> {
     this.myselfPromise ??= requestBoardJson<{ accountId?: string }>(
       this.request,
@@ -404,12 +713,21 @@ export class JiraBoardProvider implements TaskBoardProvider {
       : `project = ${this.projectKey} AND statusCategory != Done ORDER BY created ASC`;
   }
 
-  /** Narrow the JQL to the mapped status names of the requested states. */
-  private scopedJql(states: BoardWorkItemState[]): string {
+  /**
+   * Narrow the JQL to the mapped status names of the requested states, plus — when the
+   * caller gave one — their free-text scope.
+   *
+   * Both clauses ride in the SAME query this adapter already posts to `/search`: Jira
+   * evaluates the whole JQL server-side and answers once, so a state filter and a text
+   * scope cost one round trip and one answer (intersecting two listings here would only
+   * ever be as complete as the first page of whichever list was fetched).
+   */
+  private scopedJql(states: BoardWorkItemState[], term?: string): string {
+    const clauses: string[] = [];
     const names = states.map((state) => this.statusMap[state]).filter((name) => name.length > 0);
-    const quoted = names.map((name) => `"${name.replace(/"/g, '\\"')}"`).join(', ');
-    if (quoted.length === 0) return this.jql;
-    return `${this.jql.includes(' AND ') || this.jql.includes(' WHERE ') ? this.jql : this.jql} AND status in (${quoted})`;
+    if (names.length > 0) clauses.push(`status in (${names.map(jqlLiteral).join(', ')})`);
+    if (term !== undefined) clauses.push(textScopeClause(term));
+    return withJqlClauses(this.jql, clauses);
   }
 
   /** An issue's delivery state, read from its workflow status. */
@@ -466,6 +784,87 @@ export function runMarker(runId: string): string {
   } catch (e) {
     throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
   }
+}
+
+/**
+ * The create marker is CORE's (`renderCreateMarker`) too: the reader greps for exactly
+ * that spelling, so a second format here would produce items nothing can find again —
+ * which is a duplicate generator, the one thing the marker exists to prevent. A
+ * malformed key is reported as a `precondition` through this port's own error family
+ * instead of escaping as a bare Error.
+ */
+function createMarkerFor(key: string): string {
+  try {
+    return renderCreateMarker(key);
+  } catch (e) {
+    throw new BoardError('precondition', e instanceof Error ? e.message : String(e), { cause: e });
+  }
+}
+
+/**
+ * A JQL string literal. Identical escaping to what this adapter already sent for status
+ * names, factored out so the status clause and the text clause cannot drift apart.
+ */
+function jqlLiteral(value: string): string {
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * The `text ~ "<term>"` clause for a caller's free-text scope.
+ *
+ * WHAT `text ~` SEARCHES: Jira's own text index over the issue — summary, description
+ * and comments — which is the same index `createWork`'s dedupe search uses. That is
+ * deliberately the board's vocabulary, not takumi's: a caller can scope a tick to the
+ * words their epic/milestone actually carries, and this adapter never has to invent an
+ * epic model to do it.
+ *
+ * WHY A TERM IS REFUSED RATHER THAN ESCAPED, and this is the whole of the injection
+ * story: a JQL string literal ends at the next double quote, and the escape rules
+ * inside one are not stable across Jira versions (a backslash is an escape in some and
+ * a literal in others, while a bare quote is never one). Guessing wrong has only two
+ * outcomes and both are unacceptable — a term that closes the literal and injects JQL
+ * of its own, which is exactly the scope widening the operator asked to avoid, or a
+ * query Jira rejects with a syntax error, which fails EVERY list rather than just this
+ * one. So `"` and `\` are rejected with the fix named, and no clause this function
+ * returns can ever end its own literal. An empty term is rejected for the same
+ * fail-closed reason: `query: ''` names no scope at all, and quietly searching for
+ * everything is the one thing a scope must never do.
+ */
+function textScopeClause(term: string): string {
+  if (term.trim().length === 0) {
+    throw new BoardError(
+      'precondition',
+      'a text scope must contain at least one non-whitespace character: an empty term names no scope, ' +
+        'and dropping it would widen the search to every issue the caller meant to exclude',
+    );
+  }
+  if (term.includes('"') || term.includes('\\')) {
+    throw new BoardError(
+      'precondition',
+      `a text scope must not contain a double quote or a backslash, so ${JSON.stringify(term)} cannot be sent as JQL: ` +
+        'inside a JQL string literal either character can end the literal (injecting the rest of the term as JQL) or is ' +
+        'an escape whose meaning depends on the Jira version, and this adapter will not guess which — ' +
+        'search for the words without them',
+    );
+  }
+  return `text ~ ${jqlLiteral(term)}`;
+}
+
+/**
+ * Add `AND` clauses to a JQL string, BEFORE its `ORDER BY` when it has one.
+ *
+ * WHY NOT SIMPLY APPEND: `ORDER BY` terminates a JQL query, so a clause appended after
+ * it is a syntax error and Jira rejects the whole search — the caller gets an auth-shaped
+ * failure for a filter they cannot see. The default JQL carries its own `ORDER BY`
+ * (operators supply one too), so the clauses are inserted in front of it and the ordering
+ * that was asked for is preserved.
+ */
+function withJqlClauses(jql: string, clauses: readonly string[]): string {
+  if (clauses.length === 0) return jql;
+  const extra = clauses.join(' AND ');
+  const orderBy = / order by /i.exec(jql);
+  if (orderBy === null) return `${jql} AND ${extra}`;
+  return `${jql.slice(0, orderBy.index)} AND ${extra}${jql.slice(orderBy.index)}`;
 }
 
 /** Flatten a Jira ADF document (or a legacy string) into plain text. */

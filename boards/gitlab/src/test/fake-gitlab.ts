@@ -7,11 +7,19 @@
  * zero credentials. The double therefore records every request it receives and
  * answers exactly like GitLab would — including the awkward parts (401 without
  * the token header, 404 for an unknown iid, 201 for a created note, label
- * add/remove semantics, notes attributed to the token's user).
+ * add/remove semantics, project labels paged/created/409-on-duplicate, notes
+ * attributed to the token's user).
  *
  * It is a test double, NOT a GitLab emulator: only the endpoints, fields and
  * statuses the adapter touches are modelled, and each one is documented with the
  * API fact it stands for.
+ *
+ * What is deliberately NOT modelled: GitLab REFUSES an issue that carries a label
+ * the project does not have (`400 Label(s) not allowed for this project`), but the
+ * shared contract suite files its probe BEFORE it bootstraps the state vocabulary,
+ * so enforcing that rule here would make the suite's own create fail. A test that
+ * wants the refusal injects it with `failWhen` — the same surface the existing
+ * bootstrap tests use — and the adapter's translation of it is proven there.
  */
 
 import type { BoardHttpRequest, BoardHttpResponse, BoardRequestFn } from '@takumi/core';
@@ -67,6 +75,12 @@ interface FakeIssue {
   notes: FakeNote[];
 }
 
+/** A project-level label — the vocabulary state bootstrapping manages. */
+interface FakeLabel {
+  name: string;
+  color: string;
+}
+
 /** A canned answer, optionally aimed at one kind of request. */
 interface FakeFault {
   matches: (req: BoardHttpRequest) => boolean;
@@ -79,6 +93,7 @@ const CLOCK_ORIGIN = Date.parse('2026-01-01T00:00:00.000Z');
 
 export class FakeGitLab {
   private readonly issues = new Map<number, FakeIssue>();
+  private readonly labels = new Map<string, FakeLabel>();
   private readonly recorded: BoardHttpRequest[] = [];
   private readonly faults: FakeFault[] = [];
   private readonly project: string;
@@ -167,6 +182,23 @@ export class FakeGitLab {
     return [...(this.issues.get(iid)?.labels ?? [])];
   }
 
+  /**
+   * Put a LABEL on the project (not on an issue) — the thing state bootstrapping
+   * reads. Seeding is not a request, so it is not recorded.
+   *
+   * The colour is arbitrary on purpose: a test needs to seed a label with a
+   * DIFFERENT colour to prove the adapter reports it `exists` and leaves it alone.
+   */
+  seedLabel(name: string, color = '#ededed'): FakeGitLab {
+    this.labels.set(name, { name, color });
+    return this;
+  }
+
+  /** Every label on the project, in creation order. */
+  labelsOnBoard(): Array<{ name: string; color: string }> {
+    return [...this.labels.values()].map((label) => ({ ...label }));
+  }
+
   /** Answer the NEXT request with this response instead of routing it (status-code tests). */
   failNext(status: number, body = '{"message":"forced"}'): FakeGitLab {
     this.faults.push({ matches: () => true, once: true, response: { status, body } });
@@ -233,15 +265,30 @@ export class FakeGitLab {
       return json(400, { message: '400 Bad Request' });
     }
 
-    // `/projects/:id/issues/:iid[/notes[/:note_id]]` — the project segment is the
-    // URL-encoded full path, so a decoded `group/project` arrives as ONE element.
+    // `/projects/:id/issues/:iid[/notes[/:note_id]]` and `/projects/:id/labels` —
+    // the project segment is the URL-encoded full path, so a decoded
+    // `group/project` arrives as ONE element.
     if (segments[0] !== 'projects' || segments[1] !== this.project) return null;
+
+    // GET /labels supports `per_page`/`page`; GitLab reports the totals in
+    // HEADERS (which the request seam does not expose), so a short page is the
+    // only end-of-list signal — the same one the adapter walks on.
+    if (segments[2] === 'labels') {
+      if (segments.length !== 3) return null;
+      if (req.method === 'GET') return json(200, this.listLabels(url));
+      if (req.method === 'POST') return this.createLabel(req);
+      return json(405, { message: '405 Method Not Allowed' });
+    }
+
     if (segments[2] !== 'issues') return null;
 
-    // GET /issues supports `state`, `labels` (comma-separated = AND) and `per_page`.
+    // GET /issues supports `state`, `labels` (comma-separated = AND), `search`
+    // (free text over title + description) and `per_page`.
     if (segments.length === 3) {
-      if (req.method !== 'GET') return json(405, { message: '405 Method Not Allowed' });
-      return json(200, this.listIssues(url));
+      if (req.method === 'GET') return json(200, this.listIssues(url));
+      // GitLab answers issue creation with 201.
+      if (req.method === 'POST') return this.createIssue(req);
+      return json(405, { message: '405 Method Not Allowed' });
     }
 
     const iid = Number.parseInt(segments[3] ?? '', 10);
@@ -284,6 +331,7 @@ export class FakeGitLab {
   /** List-issue semantics: `state` filter, `labels` filter (all must match), `per_page` slice. */
   private listIssues(url: URL): Record<string, unknown>[] {
     const state = url.searchParams.get('state') ?? 'all';
+    const search = url.searchParams.get('search');
     const wanted = url.searchParams
       .getAll('labels')
       .flatMap((value) => value.split(','))
@@ -293,8 +341,75 @@ export class FakeGitLab {
     return [...this.issues.values()]
       .filter((issue) => state === 'all' || issue.state === state)
       .filter((issue) => wanted.every((label) => issue.labels.includes(label)))
+      // GitLab's `search` greps the title and the description (case-insensitively);
+      // this is the one history-free scope the adapter forwards rather than filters.
+      .filter((issue) => search === null || matchesSearch(issue, search))
       .slice(0, Number.isInteger(perPage) && perPage > 0 ? perPage : 20)
       .map((issue) => this.issueJson(issue));
+  }
+
+  /**
+   * Issue-create semantics: `title` is required (400 without it), `description`
+   * defaults to empty, `labels` is an array, the new iid is the next free one, and
+   * the issue starts `opened` with no notes.
+   */
+  private createIssue(req: BoardHttpRequest): BoardHttpResponse {
+    const body = bodyOf(req);
+    const title = body['title'];
+    if (typeof title !== 'string' || title.length === 0) return json(400, { message: 'title is missing' });
+    const description = body['description'];
+    const labels = Array.isArray(body['labels'])
+      ? body['labels'].filter((label): label is string => typeof label === 'string')
+      : [];
+    const iid = this.nextIid();
+    const issue: FakeIssue = {
+      iid,
+      title,
+      description: typeof description === 'string' ? description : '',
+      webUrl: `https://gitlab.test/${this.project}/-/issues/${iid}`,
+      state: 'opened',
+      labels: [...labels],
+      assignees: [],
+      updatedAt: this.now(),
+      notes: [],
+    };
+    this.issues.set(iid, issue);
+    return json(201, this.issueJson(issue));
+  }
+
+  /** The next free iid: GitLab numbers issues per project, seeded ones included. */
+  private nextIid(): number {
+    let max = 0;
+    for (const iid of this.issues.keys()) max = Math.max(max, iid);
+    return max + 1;
+  }
+
+  /**
+   * Label-list semantics: a plain array (the totals live in response headers
+   * this double, like the seam, does not model), sliced by `per_page`/`page`.
+   */
+  private listLabels(url: URL): Record<string, unknown>[] {
+    const perPage = Number.parseInt(url.searchParams.get('per_page') ?? '20', 10);
+    const page = Number.parseInt(url.searchParams.get('page') ?? '1', 10);
+    const size = Number.isInteger(perPage) && perPage > 0 ? perPage : 20;
+    const index = Number.isInteger(page) && page > 0 ? page : 1;
+    return [...this.labels.values()].slice((index - 1) * size, index * size).map((label) => labelJson(label));
+  }
+
+  /**
+   * Label-create semantics: `name` and `color` are both required (GitLab rejects
+   * a colourless label with a 400), a duplicate is a 409, and a success is a 201.
+   */
+  private createLabel(req: BoardHttpRequest): BoardHttpResponse {
+    const body = bodyOf(req);
+    const name = body['name'];
+    const color = body['color'];
+    if (typeof name !== 'string' || name.length === 0) return json(400, { message: 'name is missing' });
+    if (typeof color !== 'string' || color.length === 0) return json(400, { message: 'color is missing' });
+    if (this.labels.has(name)) return json(409, { message: 'Label already exists' });
+    const label: FakeLabel = { name, color };
+    this.labels.set(name, label);
+    return json(201, labelJson(label));
   }
 
   /**
@@ -364,12 +479,41 @@ function bodyOf(req: BoardHttpRequest): Record<string, unknown> {
   return typeof req.body === 'object' && req.body !== null ? (req.body as Record<string, unknown>) : {};
 }
 
+/**
+ * A project label as GitLab returns it. The `id`/`description`/`priority` fields
+ * are NOT modelled: `bootstrapStates` asks only whether a NAME exists, and this
+ * double only models what the adapter reads.
+ */
+function labelJson(label: FakeLabel): Record<string, unknown> {
+  return { name: label.name, color: label.color, is_project_label: true };
+}
+
 function splitLabels(value: unknown): string[] {
   if (typeof value !== 'string') return [];
   return value
     .split(',')
     .map((label) => label.trim())
     .filter((label) => label.length > 0);
+}
+
+/**
+ * GitLab's `search` on issues, as the Free-tier backend behaves: EVERY whitespace-
+ * separated term must appear (case-insensitively) in the title or the description.
+ *
+ * Two things this deliberately keeps faithful:
+ *   - it is a TEXT match, not a meaning match, so an issue that merely MENTIONS a
+ *     create key in prose is returned too — which is exactly why `findByCreateKey`
+ *     confirms a hit with `createKeyOf` instead of trusting it;
+ *   - a term NOTHING carries returns nothing, which is what makes a scope a scope:
+ *     the shared contract suite checks a caller's term is not silently ignored.
+ */
+function matchesSearch(issue: FakeIssue, term: string): boolean {
+  const haystack = `${issue.title}\n${issue.description}`.toLowerCase();
+  const words = term
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+  return words.length > 0 && words.every((word) => haystack.includes(word));
 }
 
 function cloneRequest(req: BoardHttpRequest): BoardHttpRequest {

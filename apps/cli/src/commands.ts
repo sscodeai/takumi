@@ -74,6 +74,28 @@ export interface ProjectConfig {
   artifacts: string;
   /** Audit trail dir (default `.takumi/audit`). */
   audit?: string;
+  /**
+   * The unattended runner (ADR-009). Present only in a project that runs a pilot:
+   * everything here is a deployment decision, so none of it has a default that could
+   * silently start working on the wrong repository.
+   */
+  pilot?: {
+    repo: string;
+    worktreeRoot: string;
+    slotDir: string;
+    baseBranch: string;
+    remote?: string;
+    board: string;
+    boardOptions?: Record<string, string>;
+    delivery: string;
+    deliveryOptions?: Record<string, string>;
+    agent: { command: string; args?: string[]; timeoutSeconds?: number; env?: Record<string, string> };
+    policy: { reviewMode: 'checks-only' | 'label' | 'rules'; reviewRules?: { forbidTestWeakening?: boolean; protectedPaths?: string[]; replaceProtectedPaths?: boolean; testPathPatterns?: string[]; testOnlyChange?: 'note' | 'block' | 'ignore' }; approvalLabel?: string; maxReviewRounds?: number; retainWorktreesHours?: number; agentRetries?: number; agentRetryDelaySeconds?: number; blockStaleClaims?: boolean; staleClaimSeconds?: number; checksWaitSeconds?: number; checksPollSeconds?: number; mergeabilityReads?: number; mergeabilityReadSeconds?: number; progressIntervalSeconds?: number; fileIssueOnExhaustedChecks?: boolean; scopeQuery?: string };
+    eventsFile?: string;
+    /** Counters (JSON), and a Prometheus textfile beside it for whatever scrapes it. */
+    metricsFile?: string;
+    metricsTextfile?: string;
+  };
 }
 
 export function loadConfig(cwd: string): ProjectConfig {

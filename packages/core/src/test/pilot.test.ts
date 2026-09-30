@@ -1,0 +1,819 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  acquireSlot,
+  assertTransition,
+  BoardError,
+  BoardUnsupportedError,
+  createEventLog,
+  createGitRunner,
+  createRuleReviewer,
+  DeliveryError,
+  ProviderError,
+  runPilotTick,
+} from '../index.js';
+import type {
+  BoardBootstrapReport,
+  BoardCapabilities,
+  BoardCommentRef,
+  BoardStateRecord,
+  BoardWorkItem,
+  BoardWorkItemState,
+  ClaimResult,
+  CheckSummary,
+  DeliveryCapabilities,
+  DeliveryOutcome,
+  DeliveryProvider,
+  DeliveryRequest,
+  MergeOutcome,
+  PullRequestRef,
+  PullRequestStatus,
+  TaskBoardProvider,
+  WorktreeHandle,
+} from '../index.js';
+
+/**
+ * The pilot's tests use in-file doubles rather than the packages built on top of
+ * core: a cycle (core test importing a board package) would hide the coupling this
+ * layer exists to prevent. Everything here is offline and takes milliseconds.
+ */
+
+const RUN = 'c0ffee01';
+const BASE = 'a'.repeat(40);
+
+class PilotBoard implements TaskBoardProvider {
+  readonly items = new Map<string, { state: BoardWorkItemState; labels: string[]; title?: string; claim?: string }>();
+  readonly transitions: string[] = [];
+  readonly comments: string[] = [];
+  readonly records = new Map<string, BoardStateRecord>();
+
+  constructor(seed: Array<{ id: string; state?: BoardWorkItemState; labels?: string[]; title?: string }>) {
+    for (const entry of seed) {
+      this.items.set(entry.id, {
+        state: entry.state ?? 'ready',
+        labels: entry.labels ?? [],
+        ...(entry.title === undefined ? {} : { title: entry.title }),
+      });
+    }
+  }
+
+  metadata() {
+    return { id: 'pilot-probe', name: 'Pilot Probe Board', version: '0.1.0' };
+  }
+  capabilities(): BoardCapabilities {
+    return {
+      states: ['ready', 'claimed', 'pr_open', 'fix_needed', 'merged', 'blocked'],
+      comments: true,
+      editableComment: true,
+      trustedAuthorFilter: true,
+      machineReadableState: true,
+      atomicClaim: true,
+      canBootstrapStates: true,
+      canCreateWork: true,
+      canTextSearch: true,
+      delivery: { canOpenPullRequest: true, canRunChecks: true, canMerge: true },
+    };
+  }
+  private workItem(id: string): BoardWorkItem {
+    const entry = this.items.get(id);
+    if (!entry) throw new BoardError('not_found', `no such item: ${id}`, { item: id });
+    return {
+      id,
+      title: entry.title ?? `Item ${id}`,
+      body: '',
+      url: `https://board.example/${id}`,
+      state: entry.state,
+      labels: [...entry.labels],
+      assignees: [],
+      updatedAt: '2026-09-15T00:00:00.000Z',
+    };
+  }
+  /** Seed the state record a previous run left on an item. */
+  seedRecord(id: string, runId: string, updatedAt: string, reviewRound = 0): void {
+    this.records.set(id, { schema: 1, runId, item: id, reviewRound, updatedAt, baseBranch: 'main' });
+  }
+
+  async listWork(query: { states?: readonly BoardWorkItemState[]; query?: string } = {}): Promise<BoardWorkItem[]> {
+    const wanted = query.states ?? (['ready'] as readonly BoardWorkItemState[]);
+    if (query.query !== undefined && !this.capabilities().canTextSearch) {
+      // A board that cannot search refuses, exactly as a real adapter must: the pilot's
+      // assertion is what protects us, and this keeps a double from papering over it.
+      throw new BoardUnsupportedError('canTextSearch', this.metadata().id);
+    }
+    return [...this.items.keys()]
+      .filter((id) => wanted.includes(this.items.get(id)?.state ?? 'ready'))
+      .map((id) => this.workItem(id))
+      .filter((item) =>
+        query.query === undefined ? true : `${item.title}\n${item.body}`.toLowerCase().includes(query.query.toLowerCase()),
+      );
+  }
+  async getWork(id: string): Promise<BoardWorkItem> {
+    return this.workItem(id);
+  }
+  async claim(id: string, runId: string): Promise<ClaimResult> {
+    const entry = this.items.get(id);
+    if (!entry) throw new BoardError('not_found', `no such item: ${id}`, { item: id });
+    if (entry.claim !== undefined) return { item: id, runId, claimed: false, reason: `already claimed by ${entry.claim}` };
+    entry.claim = runId;
+    entry.state = 'claimed';
+    return { item: id, runId, claimed: true };
+  }
+  async transition(id: string, to: BoardWorkItemState): Promise<void> {
+    const entry = this.items.get(id);
+    if (!entry) throw new BoardError('not_found', `no such item: ${id}`, { item: id });
+    assertTransition(entry.state, to);
+    entry.state = to;
+    this.transitions.push(to);
+  }
+  async comment(id: string, body: string, opts: { runId: string }): Promise<BoardCommentRef> {
+    this.comments.push(body);
+    return { item: id, comment: `c${this.comments.length}`, runId: opts.runId };
+  }
+  async updateComment(): Promise<void> {}
+  async readState(id: string): Promise<BoardStateRecord | null> {
+    return this.records.get(id) ?? null;
+  }
+  async writeState(id: string, record: BoardStateRecord): Promise<void> {
+    this.records.set(id, record);
+  }
+  async createWork(spec: { title: string; body?: string; state?: BoardWorkItemState; idempotencyKey?: string }): Promise<{ item: BoardWorkItem; created: boolean }> {
+    const id = `NEW-${this.items.size + 1}`;
+    const body = spec.body ?? '';
+    this.items.set(id, { state: spec.state ?? 'ready', labels: [] });
+    return { item: { id, title: spec.title, body, url: `https://board.example/${id}`, state: spec.state ?? 'ready', labels: [], assignees: [], updatedAt: '2026-09-15T00:00:00.000Z' }, created: true };
+  }
+
+  async bootstrapStates(desired: readonly BoardWorkItemState[]): Promise<BoardBootstrapReport> {
+    return {
+      provider: this.metadata().id,
+      applied: false,
+      actions: desired.map((state) => ({ state, name: `state:${state}`, outcome: 'exists' as const })),
+      unsupported: [],
+    };
+  }
+}
+
+class PilotDelivery implements DeliveryProvider {
+  headSha = `${'b'.repeat(12)}commit000001`;
+  dirty = false;
+  checkRuns: CheckSummary[] = [];
+  mergeable: boolean | null = true;
+  merged = false;
+  prCount = 0;
+  private readonly pr: PullRequestRef = { number: '1', url: 'https://host.example/pull/1', headSha: BASE, baseSha: 'main' };
+
+  metadata() {
+    return { id: 'pilot-delivery', name: 'Pilot Probe Delivery', version: '0.1.0' };
+  }
+  capabilities(): DeliveryCapabilities {
+    return { canPushBranch: true, canOpenPullRequest: true, canRunChecks: true, canMerge: true };
+  }
+  async deliver(req: DeliveryRequest, base: { baseSha: string }): Promise<DeliveryOutcome> {
+    if (this.dirty) throw new DeliveryError('precondition', 'the worktree has uncommitted changes', { item: req.itemId });
+    if (this.headSha === base.baseSha) throw new DeliveryError('precondition', 'no commit on the branch', { item: req.itemId });
+    const created = this.prCount === 0;
+    if (created) this.prCount = 1;
+    this.pr.headSha = this.headSha;
+    return {
+      created,
+      pr: { ...this.pr },
+      push: { mode: 'plain', branch: req.branch, head: this.headSha },
+      notes: [],
+    };
+  }
+  async status(): Promise<PullRequestStatus> {
+    return { state: this.merged ? 'merged' : 'open', mergeable: this.mergeable, headSha: this.pr.headSha, baseSha: 'main' };
+  }
+  async checks(): Promise<CheckSummary[]> {
+    return this.checkRuns;
+  }
+  async merge(ref: PullRequestRef, opts: { expectedHeadSha: string; method?: 'merge' | 'squash' | 'rebase' }): Promise<MergeOutcome> {
+    if (this.pr.headSha !== opts.expectedHeadSha) {
+      throw new DeliveryError('precondition', `the head moved: reviewed ${opts.expectedHeadSha}, remote ${this.pr.headSha}`);
+    }
+    this.merged = true;
+    return { merged: true, method: opts.method ?? 'merge', headSha: opts.expectedHeadSha, url: ref.url };
+  }
+}
+
+function harness(seed: Array<{ id: string; state?: BoardWorkItemState; labels?: string[] }>, policy: Partial<{ reviewMode: 'checks-only' | 'label'; approvalLabel: string }> = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-pilot-'));
+  const board = new PilotBoard(seed);
+  const delivery = new PilotDelivery();
+  const worktrees: string[] = [];
+  let slumber = 0;
+  const deps = {
+    board,
+    delivery,
+    repo: '/tmp/takumi-pilot-repo',
+    worktreeRoot: join(dir, 'worktrees'),
+    baseBranch: 'main',
+    resolveBaseSha: async () => BASE,
+    prepareWorktree: async (item: BoardWorkItem, runId: string): Promise<WorktreeHandle> => {
+      const path = join(dir, 'worktrees', `${item.id}-${runId}`);
+      worktrees.push(path);
+      return { path, branch: `takumi/${item.id}-${runId}`, baseSha: BASE };
+    },
+    agent: async () => {},
+    policy: { reviewMode: policy.reviewMode ?? 'checks-only', ...(policy.approvalLabel === undefined ? {} : { approvalLabel: policy.approvalLabel }) } as const,
+    slotDir: join(dir, 'slots'),
+    sleep: async (seconds: number) => {
+      slumber += seconds;
+    },
+  };
+  return {
+    deps,
+    board,
+    delivery,
+    worktrees,
+    sleptSeconds: () => slumber,
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    dir,
+  };
+}
+
+test('runPilotTick: nothing ready is `idle`, not an error', async () => {
+  const h = harness([]);
+  try {
+    const log = createEventLog();
+    const result = await runPilotTick({ ...h.deps, events: log });
+    assert.equal(result.outcome, 'idle');
+    assert.deepEqual(log.of('pilot.idle').length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: selects one ready item, runs the agent, and merges through the loop', async () => {
+  const h = harness([{ id: 'ITEM-1' }, { id: 'ITEM-2' }]);
+  try {
+    const log = createEventLog();
+    const rounds: number[] = [];
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      agent: async ({ round, worktree }) => {
+        rounds.push(round);
+        assert.ok(worktree.includes('ITEM-1'), 'the agent works in the item’s own worktree');
+      },
+    });
+
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(result.itemId, 'ITEM-1', 'the first ready item is taken');
+    assert.deepEqual(rounds, [0]);
+    assert.equal(h.delivery.merged, true);
+    assert.equal((await h.board.getWork('ITEM-1')).state, 'merged');
+    assert.equal((await h.board.getWork('ITEM-2')).state, 'ready', 'the second item is left for the next tick');
+    assert.deepEqual(log.of('pilot.item_selected').length, 1);
+    assert.deepEqual(log.of('worktree.created').length, 1);
+    assert.deepEqual(log.of('pilot.tick_done').length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: skips an item another runner holds and takes the next one', async () => {
+  const h = harness([{ id: 'ITEM-1' }, { id: 'ITEM-2' }]);
+  try {
+    const held = acquireSlot({ dir: h.deps.slotDir, key: 'ITEM-1', owner: { runId: 'otherrun' } });
+    const log = createEventLog();
+    const result = await runPilotTick({ ...h.deps, events: log });
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(result.itemId, 'ITEM-2', 'the contended item is skipped, not waited on');
+    assert.equal(log.of('pilot.item_skipped').length, 1);
+    held.handle?.release();
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: every ready item held means `busy`, and the board is untouched', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    const held = acquireSlot({ dir: h.deps.slotDir, key: 'ITEM-1', owner: { runId: 'otherrun' } });
+    const result = await runPilotTick(h.deps);
+    assert.equal(result.outcome, 'busy');
+    assert.deepEqual(h.board.transitions, []);
+    assert.equal(h.delivery.prCount, 0);
+    held.handle?.release();
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: reviewMode label waits for a human without burning a round', async () => {
+  const h = harness([{ id: 'ITEM-1' }], { reviewMode: 'label', approvalLabel: 'takumi-approved' });
+  try {
+    const log = createEventLog();
+    const result = await runPilotTick({ ...h.deps, events: log });
+
+    assert.equal(result.outcome, 'awaiting_review');
+    assert.match(result.detail, /takumi-approved/);
+    assert.equal(h.delivery.merged, false, 'an unapproved change must not merge');
+    assert.equal((await h.board.getWork('ITEM-1')).state, 'pr_open');
+    assert.equal(
+      h.board.transitions.includes('fix_needed'),
+      false,
+      'waiting for a human is not a defect, so it must not ask the agent to fix anything',
+    );
+    assert.equal(log.of('review.awaiting_human').length, 1);
+    assert.deepEqual(h.board.transitions, ['pr_open']);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: reviewMode label merges once the human approves', async () => {
+  const h = harness([{ id: 'ITEM-1', labels: ['takumi-approved'] }], {
+    reviewMode: 'label',
+    approvalLabel: 'takumi-approved',
+  });
+  try {
+    const result = await runPilotTick(h.deps);
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(h.delivery.merged, true);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: a transport failure runs the agent again, after a delay', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    const log = createEventLog();
+    let attempts = 0;
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      policy: { reviewMode: 'checks-only', agentRetries: 2, agentRetryDelaySeconds: 5 },
+      agent: async () => {
+        attempts += 1;
+        if (attempts < 3) throw new ProviderError('transport', 'the model endpoint reset the connection');
+      },
+    });
+
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(attempts, 3);
+    assert.equal(h.sleptSeconds(), 10, 'two retries, two delays');
+    assert.equal(log.of('agent.retry').length, 2, 'the retry wrapper reports the retries');
+    assert.equal(
+      log.of('agent.finished').length,
+      1,
+      'and ONLY the loop reports the agent finishing: one event per fact',
+    );
+    assert.equal(log.of('agent.started').length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: an agent that keeps failing on transport stops retrying', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    let attempts = 0;
+    const result = await runPilotTick({
+      ...h.deps,
+      policy: { reviewMode: 'checks-only', agentRetries: 1, agentRetryDelaySeconds: 1 },
+      agent: async () => {
+        attempts += 1;
+        throw new ProviderError('transport', 'still down');
+      },
+    });
+
+    assert.equal(attempts, 2, 'the first attempt plus one retry');
+    assert.equal(result.outcome, 'retriable');
+    // A retriable failure BEFORE anything was delivered must not block the item for
+    // a human: the next tick can pick it up. It stays claimed, which the detail says.
+    assert.match(result.detail, /still down/);
+    assert.equal(h.delivery.prCount, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: an agent that fails for a real reason blocks the item', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    const result = await runPilotTick({
+      ...h.deps,
+      agent: async () => {
+        throw new ProviderError('auth', 'the agent token expired');
+      },
+    });
+    assert.equal(result.outcome, 'blocked');
+    assert.match(result.detail, /token expired/);
+    assert.equal((await h.board.getWork('ITEM-1')).state, 'blocked');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: an agent that commits nothing is a blocked precondition, not a silent idle', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    // The delivery refuses because HEAD still equals the frozen base.
+    h.delivery.headSha = BASE;
+    const result = await runPilotTick(h.deps);
+    assert.equal(result.outcome, 'blocked');
+    assert.match(result.detail, /no commit/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: the item slot is released whatever the outcome', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    await runPilotTick(h.deps);
+    const lockPath = join(h.deps.slotDir, 'ITEM-1.lock');
+    assert.equal(existsSync(lockPath), false, 'the lock file must be gone after the tick');
+    const reacquire = acquireSlot({ dir: h.deps.slotDir, key: 'ITEM-1', owner: { runId: 'another1' } });
+    assert.equal(reacquire.acquired, true);
+    reacquire.handle?.release();
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('pilotRunId: eight lowercase hex, which is the grammar every reader expects', async () => {
+  const { pilotRunId } = await import('../index.js');
+  for (const seed of [0, 1, Date.now(), 1757900000000, 999999999999]) {
+    assert.match(pilotRunId(seed), /^[0-9a-f]{8}$/, `seed ${seed}`);
+  }
+});
+
+// --- the sweep: what a stopped run left behind (ADR-009's known limit) -------
+
+test('runPilotTick: a stale claim is handed to a human, and the tick still works', async () => {
+  const h = harness([{ id: 'ITEM-1' }, { id: 'ITEM-9', state: 'claimed' }]);
+  try {
+    h.board.seedRecord('ITEM-9', 'deadbeef', '2026-09-15T00:00:00.000Z');
+    const log = createEventLog();
+    const at = Date.parse('2026-09-15T00:30:00.000Z'); // half an hour later
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      now: () => at,
+      policy: { reviewMode: 'checks-only', blockStaleClaims: true, staleClaimSeconds: 900 },
+    });
+
+    // The sweep reports it, blocks it, and does NOT cost the tick its real work.
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(result.itemId, 'ITEM-1');
+    assert.equal((await h.board.getWork('ITEM-9')).state, 'blocked');
+    assert.equal(log.of('pilot.in_flight').length, 1);
+    assert.match(log.of('pilot.in_flight')[0]?.message ?? '', /claimed for 1800s \(run deadbeef\)/);
+    assert.equal(log.of('pilot.stale_claim_blocked').length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: a fresh claim is reported but never touched', async () => {
+  const h = harness([{ id: 'ITEM-9', state: 'claimed' }]);
+  try {
+    h.board.seedRecord('ITEM-9', 'runnning', '2026-09-15T00:29:00.000Z');
+    const log = createEventLog();
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      now: () => Date.parse('2026-09-15T00:30:00.000Z'),
+      policy: { reviewMode: 'checks-only', blockStaleClaims: true, staleClaimSeconds: 900 },
+    });
+    assert.equal(result.outcome, 'idle', 'nothing is ready, and the in-flight item stays in flight');
+    assert.equal((await h.board.getWork('ITEM-9')).state, 'claimed');
+    assert.equal(log.of('pilot.in_flight').length, 1);
+    assert.equal(log.of('pilot.stale_claim_blocked').length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: a stale claim is left alone unless the operator opts in', async () => {
+  const h = harness([{ id: 'ITEM-9', state: 'claimed' }]);
+  try {
+    h.board.seedRecord('ITEM-9', 'deadbeef', '2026-09-01T00:00:00.000Z');
+    const log = createEventLog();
+    await runPilotTick({ ...h.deps, events: log, policy: { reviewMode: 'checks-only' } });
+    assert.equal((await h.board.getWork('ITEM-9')).state, 'claimed');
+    assert.equal(log.of('pilot.in_flight').length, 1, 'still visible in the trail');
+    assert.equal(log.of('pilot.stale_claim_blocked').length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: an open pull request is never swept — that is a human decision', async () => {
+  const h = harness([{ id: 'ITEM-8', state: 'pr_open' }]);
+  try {
+    h.board.seedRecord('ITEM-8', 'deadbeef', '2026-08-01T00:00:00.000Z');
+    const log = createEventLog();
+    await runPilotTick({
+      ...h.deps,
+      events: log,
+      policy: { reviewMode: 'checks-only', blockStaleClaims: true, staleClaimSeconds: 60 },
+    });
+    assert.equal((await h.board.getWork('ITEM-8')).state, 'pr_open');
+    assert.equal(log.of('pilot.stale_claim_blocked').length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: the policy’s pacing knobs reach the delivery loop', async () => {
+  // A policy knob the tick accepts and then drops is the same silent drop as a config
+  // option nothing reads, so this asserts the EFFECT (the block message names the budget)
+  // rather than that the object was passed along.
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    h.delivery.checkRuns = [{ name: 'e2e', conclusion: 'pending' }];
+    const result = await runPilotTick({
+      ...h.deps,
+      policy: { reviewMode: 'checks-only', checksWaitSeconds: 45, checksPollSeconds: 15 },
+      sleep: async () => {},
+    });
+    assert.equal(result.outcome, 'blocked');
+    assert.match(result.detail, /still pending after 45s/, 'the pilot must hand checksWaitSeconds to the loop');
+    assert.equal(result.checksWaitedSeconds, undefined, 'a run that never settled waited no measurable time');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: a settled wait is reported as a number, not parsed from text', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    let polls = 0;
+    h.delivery.checks = async () => {
+      polls += 1;
+      return polls <= 2 ? [{ name: 'e2e', conclusion: 'pending' as const }] : [{ name: 'e2e', conclusion: 'success' as const }];
+    };
+    const result = await runPilotTick({
+      ...h.deps,
+      policy: { reviewMode: 'checks-only', checksWaitSeconds: 60, checksPollSeconds: 15 },
+      sleep: async () => {},
+    });
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(result.checksWaitedSeconds, 30);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// --- scoping a tick (ADR-012): a scope is never ignored ----------------------
+
+test('runPilotTick: a scope restricts the tick to matching items', async () => {
+  const h = harness([
+    { id: 'ITEM-1' },
+    { id: 'ITEM-2' },
+  ]);
+  try {
+    // Give the items the text a board would search.
+    h.board.items.get('ITEM-1')!.title = 'Epic: onboarding';
+    h.board.items.get('ITEM-2')!.title = 'Unrelated chore';
+    const log = createEventLog();
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      policy: { reviewMode: 'checks-only', scopeQuery: 'onboarding' },
+    });
+
+    assert.equal(result.outcome, 'delivered');
+    assert.equal(result.itemId, 'ITEM-1', 'the scoped item, not the first ready one');
+    assert.equal((await h.board.getWork('ITEM-2')).state, 'ready', 'out-of-scope work is untouched');
+    assert.match(log.of('pilot.item_selected')[0]?.message ?? '', /selected ITEM-1 \(1 ready\)/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: a scope on a board that cannot search refuses to start', async () => {
+  const h = harness([{ id: 'ITEM-1' }]);
+  try {
+    h.board.capabilities = () => ({ ...PilotBoard.prototype.capabilities.call(h.board), canTextSearch: false });
+    await assert.rejects(
+      () => runPilotTick({ ...h.deps, policy: { reviewMode: 'checks-only', scopeQuery: 'onboarding' } }),
+      (e: unknown) => {
+        assert.ok(e instanceof BoardUnsupportedError);
+        return true;
+      },
+    );
+    // Refusing to start means nothing was touched: no claim, no transition.
+    assert.equal((await h.board.getWork('ITEM-1')).state, 'ready');
+    assert.deepEqual(h.board.transitions, []);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('runPilotTick: the in-flight sweep is NOT scoped', async () => {
+  const h = harness([{ id: 'ITEM-9', state: 'claimed' }]);
+  try {
+    h.board.seedRecord('ITEM-9', 'deadbeef', '2026-09-15T00:00:00.000Z');
+    const log = createEventLog();
+    const result = await runPilotTick({
+      ...h.deps,
+      events: log,
+      now: () => Date.parse('2026-09-15T01:00:00.000Z'),
+      policy: { reviewMode: 'checks-only', scopeQuery: 'nothing-matches-this', blockStaleClaims: true, staleClaimSeconds: 900 },
+    });
+    assert.equal(result.outcome, 'idle');
+    assert.equal(log.of('pilot.in_flight').length, 1, 'a stranded item is reported whatever the scope');
+    assert.equal((await h.board.getWork('ITEM-9')).state, 'blocked', 'and it is still handed to a human');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// --- the rules reviewer (ADR-013), end to end through the real loop ----------
+
+test('runPilotTick: an agent that buys a green pipeline by weakening its own test is blocked', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-review-e2e-'));
+  const raw = (args: string[]): string =>
+    execFileSync('git', args, {
+      cwd: dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@example.invalid',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@example.invalid',
+      },
+    });
+  try {
+    // A real repository, cut the way a worktree is: a base commit the reviewer can read.
+    raw(['init', '-q', '-b', 'main']);
+    writeFileSync(join(dir, 'calc.py'), 'def add(a, b):\n    return a + b\n');
+    writeFileSync(
+      join(dir, 'test_calc.py'),
+      'import unittest\n\nclass CalcTest(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n        self.assertEqual(add(0, 0), 0)\n',
+    );
+    raw(['add', '-A']);
+    raw(['commit', '-q', '-m', 'chore: fixture']);
+    const baseSha = raw(['rev-parse', 'HEAD']).trim();
+
+    const board = new PilotBoard([{ id: 'ITEM-1' }]);
+    // The delivery reports the head that is REALLY on the branch — which is what makes the
+    // reviewer read the delivered change rather than a configured value.
+    class RealHeadDelivery extends PilotDelivery {
+      override async deliver(req: DeliveryRequest, base: { baseSha: string }): Promise<DeliveryOutcome> {
+        this.headSha = raw(['rev-parse', 'HEAD']).trim();
+        return await super.deliver(req, base);
+      }
+    }
+    const delivery = new RealHeadDelivery();
+    const log = createEventLog();
+
+    const result = await runPilotTick({
+      board,
+      delivery,
+      events: log,
+      repo: dir,
+      worktreeRoot: join(dir, 'worktrees'),
+      baseBranch: 'main',
+      resolveBaseSha: async () => baseSha,
+      prepareWorktree: async (item, runId) => ({ path: dir, branch: `takumi/${item.id}-${runId}`, baseSha }),
+      // The failure this reviewer exists for: the agent deletes an assertion and commits.
+      agent: async () => {
+        writeFileSync(
+          join(dir, 'test_calc.py'),
+          'import unittest\n\nclass TestCalc(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n',
+        );
+        raw(['add', '-A']);
+        raw(['commit', '-q', '-m', 'fix: make the failing test pass']);
+      },
+      review: createRuleReviewer({ git: createGitRunner() }),
+      policy: { reviewMode: 'rules', maxReviewRounds: 1 },
+      slotDir: join(dir, 'slots'),
+      sleep: async () => {},
+    });
+
+    assert.equal(result.outcome, 'blocked', 'a weakened test must never be delivered');
+    assert.equal(delivery.merged, false, 'and it must never merge');
+    const findings = log.of('review.findings');
+    assert.ok(findings.length > 0, 'the reviewer must say what it found');
+    assert.match(findings[0]?.message ?? '', /test-weakening\/assertions-removed/);
+    assert.equal(log.of('merge.done').length, 0, 'no merge event for a refused delivery');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runPilotTick: the same item merges when the tests are kept honest', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-review-ok-'));
+  const raw = (args: string[]): string =>
+    execFileSync('git', args, {
+      cwd: dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@example.invalid',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@example.invalid',
+      },
+    });
+  try {
+    raw(['init', '-q', '-b', 'main']);
+    writeFileSync(join(dir, 'calc.py'), 'def add(a, b):\n    return a + b\n');
+    writeFileSync(join(dir, 'test_calc.py'), 'import unittest\n\nclass CalcTest(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n');
+    raw(['add', '-A']);
+    raw(['commit', '-q', '-m', 'chore: fixture']);
+    const baseSha = raw(['rev-parse', 'HEAD']).trim();
+
+    const board = new PilotBoard([{ id: 'ITEM-1' }]);
+    class RealHeadDelivery extends PilotDelivery {
+      override async deliver(req: DeliveryRequest, base: { baseSha: string }): Promise<DeliveryOutcome> {
+        this.headSha = raw(['rev-parse', 'HEAD']).trim();
+        return await super.deliver(req, base);
+      }
+    }
+    const delivery = new RealHeadDelivery();
+    const log = createEventLog();
+
+    const result = await runPilotTick({
+      board,
+      delivery,
+      events: log,
+      repo: dir,
+      worktreeRoot: join(dir, 'worktrees'),
+      baseBranch: 'main',
+      resolveBaseSha: async () => baseSha,
+      prepareWorktree: async (item, runId) => ({ path: dir, branch: `takumi/${item.id}-${runId}`, baseSha }),
+      // The honest version: the implementation gains the function, and the test gains an
+      // assertion. Nothing was weakened, so the rules must let it through.
+      agent: async () => {
+        writeFileSync(join(dir, 'calc.py'), 'def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n');
+        writeFileSync(
+          join(dir, 'test_calc.py'),
+          'import unittest\n\nclass CalcTest(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n\n    def test_mul(self):\n        self.assertEqual(mul(2, 3), 6)\n',
+        );
+        raw(['add', '-A']);
+        raw(['commit', '-q', '-m', 'feat: add mul() with a test']);
+      },
+      review: createRuleReviewer({ git: createGitRunner() }),
+      policy: { reviewMode: 'rules', maxReviewRounds: 1 },
+      slotDir: join(dir, 'slots'),
+      sleep: async () => {},
+    });
+
+    assert.equal(result.outcome, 'delivered', 'honest work still merges');
+    assert.equal(delivery.merged, true);
+    assert.match(log.of('review.clean')[0]?.message ?? '', /clean at /);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runPilotTick: with nothing ready, a tick finishes a delivery an earlier run left open', async () => {
+  // The board holds one item, and it is NOT ready: its delivery reached pr_open and the run that
+  // did that is gone. Selecting only `ready` work is how such an item stayed unfinished forever —
+  // the sweep reported it and only a human could act, and a human resetting it re-ran the agent
+  // and pushed a second branch for work that was already reviewed.
+  const h = harness([{ id: 'ITEM-9', state: 'pr_open' }]);
+  h.board.records.set('ITEM-9', {
+    schema: 1,
+    runId: 'run-that-died',
+    item: 'ITEM-9',
+    reviewRound: 0,
+    updatedAt: '2026-09-16T00:00:00.000Z',
+    deliveryRef: '#3',
+    branch: 'takumi/9-a1b2c3',
+  });
+  const hints: Array<{ branch: string } | undefined> = [];
+  const result = await runPilotTick({
+    ...h.deps,
+    prepareWorktree: async (item, runId, resume) => {
+      hints.push(resume);
+      return h.deps.prepareWorktree(item, runId);
+    },
+  });
+
+  assert.equal(result.outcome, 'delivered', 'the resumed delivery must run to its end');
+  assert.equal(result.itemId, 'ITEM-9');
+  assert.deepEqual(hints, [{ branch: 'takumi/9-a1b2c3' }], 'the tick must ask for the branch the record names');
+  assert.equal(h.delivery.prCount, 1, 'the delivery step still runs (it reuses the open pull request)');
+});
+
+test('runPilotTick: an in-flight item whose record names no branch is left alone, not guessed at', async () => {
+  // Without the branch there is nothing to resume: a tick must not invent one, because a wrong
+  // branch means a wrong delivery. This is the "skip rather than guess" half of the rule.
+  const h = harness([{ id: 'ITEM-9', state: 'pr_open' }]);
+  h.board.records.set('ITEM-9', {
+    schema: 1,
+    runId: 'run-that-died',
+    item: 'ITEM-9',
+    reviewRound: 0,
+    updatedAt: '2026-09-16T00:00:00.000Z',
+    deliveryRef: '#3',
+  });
+  const result = await runPilotTick(h.deps);
+  assert.equal(result.outcome, 'idle');
+  assert.equal(h.delivery.prCount, 0);
+});

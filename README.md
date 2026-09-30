@@ -145,7 +145,7 @@ takumi/
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
 ├── examples/              # end-to-end delivery examples, including Japanese SI
-└── docs/                  # ADRs, the bug ledger and evaluation notes
+└── docs/                  # ADRs (006-013: boards, delivery, rails, pilot, metrics, filing, scope, review), notes
 ```
 
 ## Core Ideas
@@ -175,6 +175,13 @@ takumi/
 | Read-only board view: `takumi board --provider <id>` | Done |
 | Delivery providers: fake / GitHub / GitLab — plain push, one PR, merge of the reviewed commit only | Done |
 | Runnable board -> delivery -> merge demo with in-memory providers: `node scripts/board-delivery-demo.mjs` | Done |
+| Pilot safety rails (ADR-008): exclusive slot lock, closed event registry, state bootstrap (`takumi board --check/--bootstrap`) | Done |
+| Pilot tick (ADR-009): `takumi pilot --once` — select, lock, worktree, agent, deliver, review; systemd/cron shape | Done |
+| Pilot metrics (ADR-010): JSON counters + a Prometheus textfile, and progress writes throttled | Done |
+| Filing work (ADR-011): `createWork` on every board, idempotent by marker; a red pipeline files its own item | Done |
+| Scoping a tick (ADR-012): `query` scope through each board's own search, fail-closed where it cannot search | Done |
+| OpenHands as an agent (spike report): proven through the existing pilot seam, zero new abstraction | Done |
+| Deterministic reviewer (ADR-013): `reviewMode: rules` — test-weakening and protected paths blocked, fail-closed review | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -225,6 +232,7 @@ Inspired by LongHorizon-Harness:
 
 - [examples/pi10](./examples/pi10): Golden Path enterprise delivery project based on a Japanese SI / V-model workflow, including requirements, design documents, Spring Boot backend, Vue frontend, unit/integration tests, and evidence summaries.
 - [examples/minimal-vmodel](./examples/minimal-vmodel): smaller V-model example for workflow and traceability experiments.
+- [examples/openhands-agent.sh](./examples/openhands-agent.sh): run the OpenHands CLI as a pilot agent command (see `docs/openhands-spike-report.md`).
 
 ## Known Limitations
 
@@ -254,7 +262,11 @@ Takumi is currently a Developer Preview.
 - [x] DeliveryProvider port: branch, plain push, one pull request, checks, merge of the reviewed head
 - [x] Delivery adapters for GitHub and GitLab
 - [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
-- [ ] A `deliveries/git` adapter for a bare remote with no review surface
+- [x] A `deliveries/git` adapter for a bare remote with no review surface (ADR-015: the push is
+  read back from the remote, the base moves forward to exactly the reviewed head, and nothing
+  claims a pull request or a pipeline that does not exist)
+- [x] A `runtimes/openhands` adapter (ADR-016): events from the `--json` stream, per-task tokens
+  and cost from OpenHands' own conversation accounting, the verbatim transcript as an artifact
 - [ ] Claude runtime adapter
 - [ ] Excel, Word, and Playwright tool plugins
 - [ ] Jira and GitHub tool plugins (the board layer already covers issues)

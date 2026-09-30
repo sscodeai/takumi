@@ -15,6 +15,7 @@ import type {
   GitRunner,
 } from '@takumi/core';
 import { createGitHubDeliveryProvider, GitHubDeliveryProvider, pullRequestBody } from '../index.js';
+import type { PullRequestRef } from '@takumi/core';
 
 /**
  * Two injected seams, no network and no real repository: a modelled git worktree
@@ -191,6 +192,18 @@ function makeProvider(git: FakeGit, sim: ReturnType<typeof githubSimulator>) {
   return createGitHubDeliveryProvider({ repo: 'acme/widgets', request: sim.request, git });
 }
 
+
+/**
+ * This adapter OPENS pull requests, so its own tests may rely on the reference being there. The
+ * port keeps `pr` optional (a bare remote has no review surface and reports none) — which is why
+ * the shared suite gates on `canOpenPullRequest` and this helper exists for the tests that are
+ * about THIS provider.
+ */
+function prRefOf(out: { pr?: PullRequestRef }): PullRequestRef {
+  if (out.pr === undefined) throw new Error('this delivery opens pull requests');
+  return out.pr;
+}
+
 test('GitHubDeliveryProvider: shared delivery contract suite', async () => {
   const git = new FakeGit();
   const sim = githubSimulator();
@@ -345,7 +358,7 @@ test('merge: the host refuses a moved head (GitHub 409) and nothing is merged', 
   assert.ok(pull);
   pull!.headSha = `${'d'.repeat(12)}moved0000000`;
   await assert.rejects(
-    () => provider.merge(out.pr, { expectedHeadSha: out.pr.headSha }),
+    () => provider.merge(prRefOf(out), { expectedHeadSha: prRefOf(out).headSha }),
     (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /head moved/.test(e.message),
   );
   assert.equal(sim.requests.some((r) => r.method === 'PUT' && r.url.endsWith('/merge')), false, 'no merge request may be sent');
@@ -362,7 +375,7 @@ test('merge: an unknown mergeability is not a yes', async () => {
   const pull = sim.pulls[0];
   pull!.mergeable = null;
   await assert.rejects(
-    () => provider.merge(out.pr, { expectedHeadSha: out.pr.headSha }),
+    () => provider.merge(prRefOf(out), { expectedHeadSha: prRefOf(out).headSha }),
     (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /not known yet/.test(e.message),
   );
 });
@@ -375,7 +388,7 @@ test('checks: pending stays pending, legacy commit statuses are included', async
     { worktree: fixture.worktree, branch: fixture.branch, baseBranch: fixture.baseBranch, itemId: '7', runId: 'abcdef12' },
     { baseSha: BASE },
   );
-  const checks = await provider.checks(out.pr);
+  const checks = await provider.checks(prRefOf(out));
   assert.deepEqual(checks.map((c) => `${c.name}:${c.conclusion}`), ['build:success', 'e2e:pending', 'lint:neutral', 'ci/legacy:pending']);
   assert.equal(checks.some((c) => c.name === 'e2e' && c.conclusion === 'success'), false);
 });
