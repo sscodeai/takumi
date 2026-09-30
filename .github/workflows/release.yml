@@ -1,0 +1,79 @@
+name: Release
+
+# A tag is a claim about a specific tree, so the tagged tree is always verified here.
+# Publishing is a separate job, and it stays INERT until the repository variable
+# PUBLISH_ENABLED is set to "true" — see docs/RELEASING.md for the two decisions that
+# must be made first (the CLI's npm name, and the NPM_TOKEN secret).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Test
+        run: pnpm test
+      - name: Typecheck
+        run: pnpm typecheck
+
+  publish:
+    needs: verify
+    # `vars` is one of the few contexts GitHub allows in a job-level if.
+    if: ${{ vars.PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+
+      # Publishing half a workspace is worse than publishing none: the CLI's name is a
+      # decision (docs/RELEASING.md), so refuse rather than ship @takumi/* alone.
+      - name: Refuse a half-published workspace
+        run: |
+          if node -e "process.exit(require('./package.json').private ? 0 : 1)"; then
+            echo "::error::the root package (the CLI) is still private: pick its npm name, remove \"private\": true, commit that and tag again. See docs/RELEASING.md."
+            exit 1
+          fi
+
+      - name: Check the token is present
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN is not set for this repository (settings -> secrets and variables -> actions). See docs/RELEASING.md."
+            exit 1
+          fi
+          npm whoami
+
+      # pnpm rewrites `workspace:*` to the real version as it packs, so every package in
+      # the workspace goes up together.
+      - name: Publish the workspace
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm -r publish --access public --no-git-checks

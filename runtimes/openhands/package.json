@@ -1,7 +1,7 @@
 {
   "name": "@takumi/runtime-openhands",
   "version": "0.1.0",
-  "description": "OpenHandsRuntimeAdapter: the OpenHands CLI as a runtime — events from the JSON stream, usage from the conversation's own accounting.",
+  "description": "OpenHandsRuntimeAdapter: the OpenHands CLI as a runtime \u2014 events from the JSON stream, usage from the conversation's own accounting.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,5 +18,21 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sscodeai/takumi.git",
+    "directory": "runtimes/openhands"
+  },
+  "homepage": "https://github.com/sscodeai/takumi",
+  "bugs": {
+    "url": "https://github.com/sscodeai/takumi/issues"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

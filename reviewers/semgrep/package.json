@@ -1,7 +1,7 @@
 {
   "name": "@takumi/reviewer-semgrep",
   "version": "0.1.0",
-  "description": "SemgrepReviewer: a second, independent reviewer behind the same review seam — a PINNED local rule set, a pinned tool version, and a fail-closed answer when it cannot run.",
+  "description": "SemgrepReviewer: a second, independent reviewer behind the same review seam \u2014 a PINNED local rule set, a pinned tool version, and a fail-closed answer when it cannot run.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,5 +18,22 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sscodeai/takumi.git",
+    "directory": "reviewers/semgrep"
+  },
+  "homepage": "https://github.com/sscodeai/takumi",
+  "bugs": {
+    "url": "https://github.com/sscodeai/takumi/issues"
+  },
+  "files": [
+    "dist",
+    "rules"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
