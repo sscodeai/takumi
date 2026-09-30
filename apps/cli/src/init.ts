@@ -9,6 +9,7 @@ import { join } from 'node:path';
  *   .takumi/sessions/    (event/session logs)
  *   extensions/{skills,tools,workflows}/  (registry roots)
  *   runtimes/
+ *   boards/              (task-board provider adapters, ADR-006)
  */
 export function initProject(cwd: string): string[] {
   const created: string[] = [];
@@ -25,6 +26,8 @@ export function initProject(cwd: string): string[] {
         '  tools: extensions/tools',
         '  workflows: extensions/workflows',
         '  runtimes: runtimes',
+        '  boards: boards',
+        '  deliveries: deliveries',
         'artifacts: .takumi/artifacts',
         '',
       ].join('\n'),
@@ -32,7 +35,7 @@ export function initProject(cwd: string): string[] {
     created.push(configPath);
   }
 
-  for (const dir of ['.takumi/artifacts', '.takumi/sessions', 'extensions/skills', 'extensions/tools', 'extensions/workflows', 'runtimes']) {
+  for (const dir of ['.takumi/artifacts', '.takumi/sessions', 'extensions/skills', 'extensions/tools', 'extensions/workflows', 'runtimes', 'boards', 'deliveries']) {
     if (!existsSync(join(cwd, dir))) {
       mkdirSync(join(cwd, dir), { recursive: true });
       created.push(dir + '/');

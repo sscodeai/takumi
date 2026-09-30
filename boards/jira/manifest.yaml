@@ -1,0 +1,33 @@
+name: jira-board
+kind: board
+version: 0.1.0
+description: Jira issues as the task board (the delivery state is the workflow status, the run record is an issue property).
+entry: dist/index.js
+package: "@takumi/board-jira"
+provider:
+  factory: createJiraBoardProvider
+  transport: createJiraTransport
+  auth:
+    scheme: "Basic (email + API token) or Bearer"
+    env: [JIRA_API_TOKEN, JIRA_TOKEN]
+  api:
+    base: https://your-site.atlassian.net
+    endpoints:
+      search: POST /rest/api/3/search
+      getIssue: GET /rest/api/3/issue/:key
+      listTransitions: GET /rest/api/3/issue/:key/transitions
+      applyTransition: POST /rest/api/3/issue/:key/transitions
+      listComments: GET /rest/api/3/issue/:key/comment
+      createComment: POST /rest/api/3/issue/:key/comment
+      updateComment: PUT /rest/api/3/issue/:key/comment/:id
+      stateRecord: "PUT|GET /rest/api/3/issue/:key/properties/takumi.boardstate.v1"
+capabilities:
+  comments: true
+  editableComment: true
+  machineReadableState: true
+  atomicClaim: false
+  trustedAuthorFilter: only-with-trustedAuthors-allowlist
+  delivery:
+    canOpenPullRequest: false
+    canRunChecks: false
+    canMerge: false

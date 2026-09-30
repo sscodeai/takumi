@@ -108,23 +108,51 @@ pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --m
    More runtimes                       Any harness
 ```
 
+The same principle applies to where work comes from (ADR-006):
+
+```text
+                          Work request
+                                |
+                       TaskBoardProvider
+                                |
+        +-------------+---------+---------+-------------+
+        |             |                   |             |
+      GitHub        GitLab       Jira      Notion    Redmine   ...one MCP/REST
+        |             |            |          |          |          adapter
+   Issues + PRs   Issues + MRs   Status   select prop  Status workflow
+        |
+        └──> DeliveryProvider  (ADR-007)
+                   |
+        GitHub / GitLab  —  plain push, one pull request, checks, merge of the
+                            reviewed commit only; no capability, no silent no-op
+```
+
+A board keeps its own delivery state (a label, a status, a column); Takumi keeps
+the execution evidence. A provider declares what it can do, and a capability it
+does not have is an explicit error, never a silent no-op. Delivery is a separate
+port because the two are genuinely different systems: a Jira board can pair with
+a GitHub delivery, and a Notion database has no pull request at all.
+
 ```text
 takumi/
 ├── apps/cli/              # takumi CLI: init, run, loop, runtime list, extension list
 ├── apps/console/          # lightweight web console with SSE live logs
 ├── packages/core/         # workflow engine, runtime API, artifacts, traceability, MEA loop, sandbox
 ├── runtimes/              # fake, pi, deepseek, cli adapters
+├── boards/                # task-board providers: fake, github, gitlab, jira, notion, redmine
+├── deliveries/            # delivery providers: fake, github, gitlab
 ├── extensions/            # skills, tools, workflows
 ├── eval/                  # agent reliability evaluation tasks
 ├── bench/                 # system benchmark baselines
 ├── examples/              # end-to-end delivery examples, including Japanese SI
-└── docs/                  # ADRs and evaluation notes
+└── docs/                  # ADRs, the bug ledger and evaluation notes
 ```
 
 ## Core Ideas
 
 - **Small Core**: orchestration, task/event/artifact models, runtime abstraction, extension loading, approval, and audit.
 - **Four extension kinds**: Skill, Tool Plugin, Workflow Plugin, Runtime Adapter.
+- **Board agnostic**: work comes from a `TaskBoardProvider` (GitHub, GitLab, Jira, Notion, or one MCP/REST adapter for the rest). The board owns the delivery state; Takumi owns the execution evidence.
 - **Harness agnostic**: `runTask`, `cancel`, `getStatus`, `getUsage`, `getArtifacts` over a unified event stream.
 - **Traceability by default**: `REQ-001 -> DESIGN-001 -> UT-001 -> EVIDENCE-001`.
 - **Human in the loop**: workflows can declare approval gates.
@@ -143,6 +171,10 @@ takumi/
 | Parallel workflow step execution | Done |
 | Sandbox abstraction with unshare support | Done |
 | Web console with live logs | Done |
+| Task-board providers: fake / GitHub / GitLab / Jira / Notion / Redmine, one shared contract suite | Done |
+| Read-only board view: `takumi board --provider <id>` | Done |
+| Delivery providers: fake / GitHub / GitLab — plain push, one PR, merge of the reviewed commit only | Done |
+| Runnable board -> delivery -> merge demo with in-memory providers: `node scripts/board-delivery-demo.mjs` | Done |
 | Agent Eval with held-out verifier tests and repair loop | Done |
 | MEA loop: Manage, Execute, Audit | Done |
 | Golden Path E2E: Spring Boot + Vue inventory system, 53 Java files, 59 tests green | Done |
@@ -166,7 +198,9 @@ TAKUMI_EVAL_HARNESS=pi node eval/scripts/run-eval.mjs
 | deepseek v4-pro, complex | 4/5 | 0% | 1 natural repair |
 | Pi, opencode-zen | 6/6 | 0% | 0 |
 
-See [docs/evaluation.md](./docs/evaluation.md) for methodology, raw caveats,
+See [docs/bugs-fixed.md](./docs/bugs-fixed.md) for every defect found in the board
+and delivery layers — symptom, root cause, the commit that fixed it and the test
+that pins it — and [docs/evaluation.md](./docs/evaluation.md) for methodology, raw caveats,
 and limitations.
 
 ## MEA Loop
@@ -202,6 +236,11 @@ Takumi is currently a Developer Preview.
 - Traceability currently relies on ID naming conventions rather than structural foreign keys.
 - Tool plugins run with user privileges unless a sandbox is explicitly selected.
 - Real-repo-scale evaluation is still on the roadmap.
+- The board layer (ADR-006) covers the work source; the delivery layer (ADR-007) covers branch, pull request, checks and merge. Boards differ in what they can express, on purpose: a Notion database has no labels, no editable comments and no pull requests, so those operations fail closed instead of quietly doing nothing.
+- Every provider ships with offline tests only: no adapter has yet been exercised against a live board or host. Expect to adjust API details (pagination beyond the first page, site-specific status/property names, self-hosted base URLs) on first real use.
+- Claiming is not atomic on any of these boards (`atomicClaim: false` everywhere): two runs sharing one account can both believe they claimed an item, which is why a local slot lock — one runner per item — remains the caller's job.
+- A conflicting base merge is aborted and handed to the review session; takumi never resolves a conflict by rewriting history.
+- Redmine needs its `statusMap` (CLI: `--status-map "ready=New,pr_open=In Progress"`) and, for the run record, a text custom field (`--state-field`). An issue whose status maps to nothing is REPORTED with the fix, never silently dropped from the board.
 
 ## Roadmap
 
@@ -211,8 +250,14 @@ Takumi is currently a Developer Preview.
 - [x] Japanese SI skills and V-model workflow
 - [x] Agent Eval and system benchmarks
 - [x] Durable resume, parallel execution, web console, sandbox, and MEA loop
+- [x] Task-board providers (fake / GitHub / GitLab / Jira / Notion / Redmine) with one shared contract suite
+- [x] DeliveryProvider port: branch, plain push, one pull request, checks, merge of the reviewed head
+- [x] Delivery adapters for GitHub and GitLab
+- [ ] One MCP/REST board adapter for the long tail (Backlog, Plane, in-house systems)
+- [ ] A `deliveries/git` adapter for a bare remote with no review surface
 - [ ] Claude runtime adapter
-- [ ] Excel, Word, Jira, GitHub, and Playwright tool plugins
+- [ ] Excel, Word, and Playwright tool plugins
+- [ ] Jira and GitHub tool plugins (the board layer already covers issues)
 - [ ] npm package publishing
 - [ ] Real-repo-scale evals
 

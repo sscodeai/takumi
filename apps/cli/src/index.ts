@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { listExtensions, loadConfig, runTask } from './commands.js';
 import { initProject } from './init.js';
+import { runBoardCommand } from './board-command.js';
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
@@ -49,6 +50,10 @@ async function main(argv: string[]): Promise<number> {
       }
       console.log('usage: takumi extension list');
       return 1;
+    }
+
+    case 'board': {
+      return await runBoardCommand(rest);
     }
 
     case 'run': {
@@ -154,6 +159,8 @@ Usage:
   takumi run "<prompt>"                Run an agent task
   takumi run requirements.md [--runtime fake] [--workflow jp-si-standard]
   takumi runtime list                  List available runtimes
+  takumi board [--provider github --repo owner/name]
+                                       Read-only view of a task board (ADR-006)
   takumi extension list                List discovered extensions
 
 Examples:

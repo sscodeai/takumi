@@ -14,6 +14,12 @@
     "pretest": "pnpm build"
   },
   "dependencies": {
+    "@takumi/board-fake": "workspace:*",
+    "@takumi/board-github": "workspace:*",
+    "@takumi/board-gitlab": "workspace:*",
+    "@takumi/board-jira": "workspace:*",
+    "@takumi/board-notion": "workspace:*",
+    "@takumi/board-redmine": "workspace:*",
     "@takumi/core": "workspace:*",
     "@takumi/runtime-cli": "workspace:*",
     "@takumi/runtime-deepseek": "workspace:*",

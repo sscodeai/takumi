@@ -1,0 +1,14 @@
+name: fake-delivery
+kind: delivery
+version: 0.1.0
+description: "FakeDeliveryProvider: in-memory git and host simulator, zero credentials, zero network."
+entry: dist/index.js
+package: "@takumi/delivery-fake"
+provider:
+  factory: FakeDeliveryProvider
+  transport: "in-memory: no network and no credentials"
+capabilities:
+  canPushBranch: true
+  canOpenPullRequest: true
+  canRunChecks: true
+  canMerge: true
