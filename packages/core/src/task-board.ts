@@ -912,6 +912,19 @@ export async function runTaskBoardProviderContractSuite(
       'merged → claimed (terminal must have no automated exit)',
     );
     notes.push('terminal: PASS (merged reached; merged→claimed rejected)');
+
+    // A state a board can SET must be a state it can LIST. `merged` items are CLOSED on most hosts,
+    // and a list query that only ever asks the host for OPEN work answers "nothing" — which is how a
+    // mirror rebuilding itself saw one item out of six, with every finished item invisible. The
+    // caller asked for that state; an empty answer is the board contradicting itself.
+    const terminalList = await provider.listWork({ states: ['merged'] });
+    if (!terminalList.some((item) => item.id === opts.itemId)) {
+      throw new Error(
+        `listWork({ states: ['merged'] }) did not return ${opts.itemId}, which this board just put in ` +
+          'merged: a state that can be set but not listed is invisible to every audit and every projection',
+      );
+    }
+    notes.push('listWork: PASS (a terminal item is listed when that state is asked for)');
   } else {
     notRun += 1;
     notes.push('terminal: NOT_RUN (provider does not declare the merged state)');

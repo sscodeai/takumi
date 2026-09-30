@@ -61,7 +61,11 @@ test('Gate 10: quality_gate passes when tests are green, fails + aborts when red
 test('Independent Review: isolated cwd and persists verdict artifact (Gate 27 direction)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rev-'));
   try {
-    const rt = new TestRuntime((t) => (t.context?.independentReview ? 'レビュー結果: 問題なし、合格' : 'impl'), undefined, 'rev');
+    const rt = new TestRuntime(
+      (t) => (t.context?.independentReview ? 'レビュー結果: 問題なし、合格\nREVIEW_VERDICT: pass' : 'impl'),
+      undefined,
+      'rev',
+    );
     let seenCwd: string | undefined;
     const orig = rt.run.bind(rt);
     rt.run = async function* (task: any) {
@@ -87,7 +91,11 @@ test('Independent Review: isolated cwd and persists verdict artifact (Gate 27 di
 test('Independent Review: critical finding → workflow aborts', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'revc-'));
   try {
-    const rt = new TestRuntime((t) => (t.context?.independentReview ? '重大な欠陥 (Critical): SQL injection in login' : 'impl'), undefined, 'revc');
+    const rt = new TestRuntime(
+      (t) => (t.context?.independentReview ? '重大な欠陥 (Critical): SQL injection in login\nREVIEW_VERDICT: findings' : 'impl'),
+      undefined,
+      'revc',
+    );
     const wf: WorkflowDefinition = {
       name: 'review', version: '0.1.0', description: '',
       steps: [
@@ -100,6 +108,74 @@ test('Independent Review: critical finding → workflow aborts', async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/**
+ * The verdict is a structured marker, so the prose can say anything and change
+ * nothing. Each case here was wrong under the old word-list regex: it passed a
+ * defect it could not name, or failed a clean review for matching "Critical".
+ */
+async function reviewWith(summary: string): Promise<{ status: string; step?: { status: string; summary: string } }> {
+  const dir = mkdtempSync(join(tmpdir(), 'revv-'));
+  try {
+    const rt = new TestRuntime((t) => (t.context?.independentReview ? summary : 'impl'), undefined, 'revv');
+    const wf: WorkflowDefinition = {
+      name: 'review', version: '0.1.0', description: '',
+      steps: [{ id: 'review', type: 'independent_review', prompt: 'review' }],
+    };
+    const res = await executeWorkflow(wf, { cwd: dir, runtime: rt, artifacts: new ArtifactStore(join(dir, 'a')), onApproval: () => true });
+    return { status: res.status, step: res.steps.find((s) => s.stepId === 'review') };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('Independent Review: marker pass → completed even with warnings in the prose', async () => {
+  const res = await reviewWith('No Critical or High issues found. Warnings: none.\nREVIEW_VERDICT: pass');
+  assert.equal(res.status, 'completed');
+  assert.equal(res.step?.status, 'completed');
+});
+
+test('Independent Review: marker findings → failed', async () => {
+  const res = await reviewWith('Looks fine to me.\nREVIEW_VERDICT: findings');
+  assert.equal(res.status, 'failed');
+  assert.equal(res.step?.status, 'failed');
+});
+
+test('Independent Review: marker blocked → failed', async () => {
+  const res = await reviewWith('I could not read the diff.\nREVIEW_VERDICT: blocked');
+  assert.equal(res.status, 'failed');
+});
+
+test('Independent Review: marker accepted case-insensitively and with "="', async () => {
+  const res = await reviewWith('review_verdict = PASS');
+  assert.equal(res.status, 'completed');
+});
+
+test('Independent Review: missing marker → failed even when the prose looks clean', async () => {
+  // The old regex accepted "all tests passing" because `ng` had no word boundary.
+  const res = await reviewWith('All tests passing. No issues. This change is good.');
+  assert.equal(res.status, 'failed');
+  assert.match(res.step?.summary ?? '', /verdict marker .*missing|REVIEW_VERDICT: \(none/);
+});
+
+test('Independent Review: missing marker → failed even when the prose names a real defect', async () => {
+  // The old regex had no word for this defect, so the workflow continued.
+  const res = await reviewWith('脆弱性があります: authentication bypass in login');
+  assert.equal(res.status, 'failed');
+  assert.match(res.step?.summary ?? '', /verdict marker .*missing|REVIEW_VERDICT: \(none/);
+});
+
+test('Independent Review: conflicting markers → failed as ambiguous', async () => {
+  const res = await reviewWith('REVIEW_VERDICT: pass\nREVIEW_VERDICT: findings');
+  assert.equal(res.status, 'failed');
+  assert.match(res.step?.summary ?? '', /ambiguous/i);
+});
+
+test('Independent Review: unknown marker value → failed closed', async () => {
+  const res = await reviewWith('REVIEW_VERDICT: maybe');
+  assert.equal(res.status, 'failed');
+  assert.match(res.step?.summary ?? '', /unrecognised REVIEW_VERDICT/);
 });
 
 test('Delivery: manifest lists all artifacts, workflow completes', async () => {

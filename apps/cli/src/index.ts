@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { listExtensions, loadConfig, runTask } from './commands.js';
 import { initProject } from './init.js';
-import { runBoardCommand } from './board-command.js';
+import { createBoardProvider, runBoardCommand } from './board-command.js';
 import { eventLogFor, runOnce, type PilotConfig } from './run-command.js';
+import { join } from 'node:path';
 import type { DeliveryProvider, TaskBoardProvider } from '@takumi/core';
 
 async function main(argv: string[]): Promise<number> {
@@ -196,12 +197,16 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
   if (rest.includes('--help') || rest.includes('-h')) {
     console.log(
       [
-        'usage: takumi pilot --once [--json]',
+        'usage: takumi pilot --once [--json] [--resync]',
         '',
         '  Runs ONE tick: pick a ready item, lock it, prepare a worktree, run the',
         '  configured agent, then deliver and review it. Exits 1 only when a human',
         '  must act; every ordinary outcome (idle, busy, delivered, awaiting review,',
         '  retriable) exits 0 so a scheduler journal stays quiet.',
+        '',
+        '  --resync: do NOT run a tick. Rebuild every configured board mirror (ADR-017)',
+        '  from the primary — what makes a projection that drifted, or never existed, a',
+        '  five-minute problem instead of a lost one.',
         '',
         '  Configuration lives in the `pilot:` section of takumi.yaml.',
         '  Schedule it with a systemd timer or cron — do not run it in a loop here.',
@@ -210,6 +215,7 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
     return 0;
   }
   const json = rest.includes('--json');
+  const resync = rest.includes('--resync');
   const config = loadConfig(cwd);
   if (config.pilot === undefined) {
     console.error('takumi.yaml has no `pilot:` section — see docs/adr/009 (the pilot) for what it needs');
@@ -255,8 +261,77 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
     ...(p.metricsTextfile === undefined ? {} : { metricsTextfile: p.metricsTextfile }),
   };
 
-  const { board, delivery } = await createProviders(p.board, p.boardOptions ?? {}, p.delivery, p.deliveryOptions ?? {});
+  // The log is created FIRST: the mirrors below are constructed with it, so their writes and their
+  // failures are events rather than whatever the mirror felt like doing (ADR-017 rule 2).
   const log = await eventLogFor(p.eventsFile);
+  const { board: primary, delivery } = await createProviders(
+    p.board,
+    p.boardOptions ?? {},
+    p.delivery,
+    p.deliveryOptions ?? {},
+  );
+
+  // --- board mirrors (ADR-017): one authority, N write-only projections for the people looking ----
+  const mirrorSpecs = p.boardMirrors ?? [];
+  let board: TaskBoardProvider = primary;
+  let saveMirrorMap: (() => void) | undefined;
+  if (mirrorSpecs.length > 0) {
+    const { MirroringBoard, readMirrorIdMap, writeMirrorIdMap } = await import('@takumi/core');
+    const mirrors = [];
+    for (const spec of mirrorSpecs) {
+      // A mirror is built through the SAME provider factory `takumi board` uses, so a projection can
+      // never be something the CLI cannot also express or check on its own.
+      const mirrorBoard = await createBoardProvider({
+        providerId: spec.provider,
+        providerOptions: spec.options ?? {},
+        json: false,
+      });
+      mirrors.push({
+        id: spec.id,
+        board: mirrorBoard,
+        // Passed only when it was set: the default belongs to the decorator, so a config that says
+        // nothing and a config that says `true` cannot drift apart here.
+        ...(spec.labels === undefined ? {} : { labels: spec.labels }),
+      });
+    }
+    const composite = new MirroringBoard(primary, mirrors, { events: log });
+    const idMapPath =
+      mirrorSpecs.find((spec) => spec.idMapFile !== undefined)?.idMapFile ?? join(p.slotDir, 'mirror-ids.json');
+    // The id map is a CACHE: loading a damaged one costs API calls, never correctness.
+    composite.loadIdMap(readMirrorIdMap(idMapPath));
+    board = composite;
+    saveMirrorMap = (): void => {
+      try {
+        writeMirrorIdMap(idMapPath, composite.idMap());
+      } catch (error) {
+        // A cache that cannot be written costs calls on the next tick. It must never cost THIS tick,
+        // which has already happened (ADR-017 rule 2, one layer down).
+        console.error(
+          `mirror   the id map could not be saved (${error instanceof Error ? error.message : String(error)}): the projections are still correct, and the next tick re-finds them by marker`,
+        );
+      }
+    };
+    if (!json) {
+      // What is projected WHERE, and what each mirror can represent — the check ADR-017 asks for.
+      for (const entry of composite.mirrorsList()) {
+        console.log(
+          `mirror   ${entry.id}: canCreateWork=${entry.canCreateWork}, editableComment=${entry.editableComment}, ` +
+            `labels=${entry.labels}`,
+        );
+      }
+    }
+    if (resync) {
+      for (const result of await composite.resync()) {
+        console.log(`resync   ${result.mirror}: projected ${result.projected}, failed ${result.failed}`);
+      }
+      saveMirrorMap();
+      return 0;
+    }
+  } else if (resync) {
+    console.error('`pilot --resync` needs `boardMirrors` in takumi.yaml: there is nothing to rebuild.');
+    return 1;
+  }
+
   const { tick, exitCode } = await runOnce({
     board,
     delivery,
@@ -266,6 +341,7 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
       if (!json) console.log(line);
     },
   });
+  saveMirrorMap?.();
   if (json) console.log(JSON.stringify(tick, null, 2));
   return exitCode;
 }

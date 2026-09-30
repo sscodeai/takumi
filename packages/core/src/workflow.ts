@@ -1,4 +1,5 @@
 import type { RuntimeCapability } from './types.js';
+import type { ReviewRules } from './review-rules.js';
 
 /**
  * Workflow model (ADR-003): declarative YAML/JSON workflows.
@@ -8,7 +9,27 @@ import type { RuntimeCapability } from './types.js';
  * honest scope note; see docs/acceptance-report.md Gate 10).
  */
 
-export type StepType = 'agent' | 'approval' | 'tool' | 'quality_gate' | 'independent_review' | 'delivery';
+/**
+ * Every step type the engine knows how to execute. This is the single source of
+ * truth: `StepType` is derived from it and manifest validation reads it, so a
+ * type cannot be added to the union while a manifest validator still rejects it.
+ */
+export const WORKFLOW_STEP_TYPES = [
+  'agent',
+  'approval',
+  'tool',
+  'quality_gate',
+  'independent_review',
+  'rule_review',
+  'delivery',
+] as const;
+
+export type StepType = (typeof WORKFLOW_STEP_TYPES)[number];
+
+/** Is `value` one of the step types the engine can execute? */
+export function isWorkflowStepType(value: unknown): value is StepType {
+  return typeof value === 'string' && (WORKFLOW_STEP_TYPES as readonly string[]).includes(value);
+}
 
 export interface WorkflowStep {
   id: string;
@@ -33,6 +54,59 @@ export interface WorkflowStep {
   };
   /** Optional timeout ms. */
   timeoutMs?: number;
+  /**
+   * `rule_review`: the ref that is the frozen base of the change set. Required
+   * for a `rule_review` step (e.g. `origin/main` or a sha); manifest validation
+   * refuses a rule_review without it, because a review with no base is not a
+   * review.
+   */
+  baseRef?: string;
+  /** `rule_review`: the delivered head to judge. Default `HEAD`. */
+  headRef?: string;
+  /** `rule_review`: rule configuration; absent means the deterministic defaults. */
+  rules?: ReviewRules;
+}
+
+export interface WorkflowManifestIssue {
+  /** Step the issue belongs to, when it can be attributed to one. */
+  stepId?: string;
+  message: string;
+}
+
+/**
+ * Validate a workflow manifest before anything runs.
+ *
+ * This exists so a manifest that names a step type the engine does not execute
+ * (or a `rule_review` with no base to judge) fails at load time with an
+ * actionable message, instead of silently behaving like an agent step. The
+ * engine's dispatch is exhaustive over `WORKFLOW_STEP_TYPES`; this is the reader
+ * that keeps a YAML file honest about that contract.
+ */
+export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManifestIssue[] {
+  const issues: WorkflowManifestIssue[] = [];
+  if (typeof def?.name !== 'string' || def.name.length === 0) {
+    issues.push({ message: 'missing workflow name' });
+  }
+  const steps = Array.isArray(def?.steps) ? def.steps : [];
+  if (steps.length === 0) {
+    issues.push({ message: 'missing or empty workflow steps' });
+    return issues;
+  }
+  for (let i = 0; i < steps.length; i += 1) {
+    const step = steps[i] as Partial<WorkflowStep> | undefined;
+    const stepId = typeof step?.id === 'string' && step.id.length > 0 ? step.id : `#${i + 1}`;
+    if (stepId.startsWith('#')) issues.push({ stepId, message: `step ${stepId} has no id` });
+    if (!isWorkflowStepType(step?.type)) {
+      issues.push({
+        stepId,
+        message: `step ${stepId} has unknown type "${String(step?.type)}" (allowed: ${WORKFLOW_STEP_TYPES.join(', ')})`,
+      });
+    }
+    if (step?.type === 'rule_review' && (typeof step.baseRef !== 'string' || step.baseRef.trim().length === 0)) {
+      issues.push({ stepId, message: `step ${stepId} is a rule_review and requires a non-empty baseRef` });
+    }
+  }
+  return issues;
 }
 
 export interface WorkflowDefinition {

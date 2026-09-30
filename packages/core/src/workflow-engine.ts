@@ -13,6 +13,16 @@ import {
   validateCapabilities,
 } from './index.js';
 import { groupByLevel } from './workflow.js';
+import { judgeGate, parseTestReport } from './quality-gate.js';
+import { createGitRunner, type GitRunner } from './git-runner.js';
+import { ProviderError } from './provider-error.js';
+import { collectReviewInput, verdictFromFindings } from './review.js';
+import {
+  describeFindings,
+  isTestPath,
+  runReviewRules,
+  type ReviewFinding,
+} from './review-rules.js';
 import { randomUUID } from 'node:crypto';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -32,6 +42,12 @@ export interface WorkflowExecutionContext {
   onApproval?: (req: ApprovalRequest) => Promise<boolean> | boolean;
   /** Optional event observer (progress reporting). */
   onEvent?: (stepId: string, message: string) => void;
+  /**
+   * Git seam for steps that read the real change set (`rule_review`). Absent
+   * means the engine builds the default async runner — the step never spawns
+   * git itself, so a test can inject a runner that refuses.
+   */
+  git?: GitRunner;
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
   /**
@@ -69,6 +85,78 @@ export interface WorkflowRunResult {
 }
 
 const RUNNING = new Set<string>();
+
+/** The verdicts a prose reviewer is allowed to emit. */
+export type ReviewVerdict = 'pass' | 'findings' | 'blocked';
+
+/** Result of reading a `REVIEW_VERDICT` marker out of prose. */
+export interface ParsedReviewVerdict {
+  verdict?: ReviewVerdict;
+  /** Why no verdict could be trusted; present exactly when `verdict` is absent. */
+  error?: string;
+}
+
+const REVIEW_VERDICT_VALUES: readonly ReviewVerdict[] = ['pass', 'findings', 'blocked'];
+
+/**
+ * Strip the decoration a markdown-minded reviewer wraps around the VALUE
+ * (`pass.`, `**pass**`, `` `pass` ``, "pass"). Only decoration is removed: the
+ * value still has to be one of the three verdicts, and the strict
+ * one-marker-per-review rule is unchanged.
+ */
+function normaliseVerdictToken(raw: string): string {
+  return raw
+    .replace(/^[*`"'\u201c\u201d\u2018\u2019]+/, '')
+    .replace(/[*`"'\u201c\u201d\u2018\u2019.,;:!?\u3002\uff01\uff1f]+$/, '');
+}
+
+/**
+ * Read the reviewer's verdict from a STRUCTURED marker, never from its prose.
+ *
+ * The reviewer must emit a line `REVIEW_VERDICT: <value>` (a `=` separator is
+ * accepted; the key and the value are case-insensitive). Matching a word list
+ * against free text was wrong in both directions: a real defect phrased
+ * "脆弱性" or "broken" did not match, so the review passed, while `ng` without
+ * a word boundary matched "all tests passing" and `Critical` matched
+ * "No Critical or High issues found", so a clean review failed.
+ *
+ * Fail closed: a missing marker, an unknown value, or two conflicting markers
+ * all produce `error` and NO verdict. The prose decides nothing.
+ */
+export function parseReviewVerdict(text: string): ParsedReviewVerdict {
+  const seen: ReviewVerdict[] = [];
+  let unknown: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*REVIEW_VERDICT\s*[:=]\s*(\S+)\s*$/i.exec(line);
+    if (!match) continue;
+    const raw = normaliseVerdictToken(match[1] ?? '');
+    const value = raw.toLowerCase();
+    if ((REVIEW_VERDICT_VALUES as readonly string[]).includes(value)) {
+      seen.push(value as ReviewVerdict);
+    } else if (unknown === undefined) {
+      unknown = raw;
+    }
+  }
+  if (unknown !== undefined) {
+    return { error: `unrecognised REVIEW_VERDICT value "${unknown}" (expected pass, findings or blocked)` };
+  }
+  if (seen.length === 0) {
+    return { error: 'the review verdict marker "REVIEW_VERDICT: <pass|findings|blocked>" was missing' };
+  }
+  const unique = [...new Set(seen)];
+  if (unique.length > 1) {
+    return { error: `ambiguous REVIEW_VERDICT: the review emitted both ${unique.join(' and ')}` };
+  }
+  return { verdict: unique[0] };
+}
+
+/**
+ * One finding per line, for a step summary and the review artifact. The rules
+ * already know how to render a finding; this only chooses the line shape.
+ */
+function renderFindingsLines(findings: readonly ReviewFinding[]): string {
+  return findings.length === 0 ? '(no findings)' : findings.map((finding) => `- ${describeFindings([finding])}`).join('\n');
+}
 
 /** Extract trace IDs (REQ-xxx, UT-xxx, DESIGN-xxx...) from free text. */
 export function extractTraceIds(text: string): string[] {
@@ -371,29 +459,27 @@ export async function executeWorkflow(
           const msg = e instanceof Error && 'stdout' in e ? `${(e as { stdout?: string }).stdout ?? ''}${(e as { stderr?: string }).stderr ?? ''}` : e instanceof Error ? e.message : String(e);
           out = msg;
         }
-        // Parse test outcome: fail count / "not ok" markers / explicit failure.
+        // Parse and judge test outcome in a pure, testable module. The parser
+        // recognises TAP, jest/vitest, pytest, Maven and gradle/JUnit shapes;
+        // anything else is `unrecognised` and FAILS CLOSED (there is no
+        // `fails > 0 ? fails : 1` fallback: no known summary = no evidence).
         // A gate with ZERO tests is NOT green (Quality Gate must be enforced:
         // no tests at all = the gate has nothing to vouch for → ABORT).
         const allOut = out.toUpperCase();
-        // TAP format: "# tests N" / "# fail N" / "not ok"
-        const notOk = (out.match(/not ok/g) ?? []).length;
-        const failLine = out.match(/^#\s*fail\s*:?\s*(\d+)/m);
-        const testLine = out.match(/^#\s*tests\s*:?\s*(\d+)/m);
-        // Maven format: "Tests run: 2, Failures: 0, Errors: 1, Skipped: 0"
-        const mvnLine = out.match(/Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)/);
-        let fails: number;
-        let totalTests: number;
-        if (mvnLine) {
-          totalTests = parseInt(mvnLine[1] ?? '0', 10);
-          fails = parseInt(mvnLine[2] ?? '0', 10) + parseInt(mvnLine[3] ?? '0', 10);
-        } else {
-          fails = failLine ? parseInt(failLine[1] ?? '0', 10) : notOk;
-          totalTests = testLine ? parseInt(testLine[1] ?? '0', 10) : (fails > 0 ? fails : 1);
-        }
+        const report = parseTestReport(out);
         // Maven BUILD FAILURE (e.g. compile error before any test runs) is a hard fail.
         const hardFail = /BUILD FAILURE|BUILD FAILED|FATAL/i.test(allOut);
-        const gatePassed = exitOk && !hardFail && fails === 0 && totalTests > 0;
-        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${out.slice(0, 1200)}`;
+        const verdict = judgeGate(report, { exitOk, hardFail });
+        const gatePassed = verdict.passed;
+        const fails = report.shape === 'unrecognised' ? 0 : report.failed;
+        const totalTests = report.shape === 'unrecognised' ? 0 : report.total;
+        // Keep the summary diagnosable: the raw command, the parser verdict and
+        // the output tail, so a human does not reach for `|| true` first.
+        const shapeLine =
+          report.shape === 'unrecognised'
+            ? `shape: unrecognised (no known test summary found in the output)\ncommand: ${cmd}`
+            : `shape: ${report.shape}\ncommand: ${cmd}`;
+        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${shapeLine}\nreason: ${verdict.reason}\n${out.slice(0, 1200)}`;
         if (gatePassed) {
           run.stepStatus[stepId] = 'completed';
           stepResults.push({ stepId, status: 'completed', summary, artifacts: [], tests: [] });
@@ -409,11 +495,153 @@ export async function executeWorkflow(
         continue;
       }
 
+      // Rule Review step: the DETERMINISTIC reviewer (ADR-013) over the real
+      // change set. It resolves the frozen base and the delivered head to SHAs
+      // through the injected GitRunner (never by spawning git here), collects
+      // the change set, lets the pure rules judge it, and fails closed on a
+      // block finding, on a human decision, and on a review that could not run.
+      if (step.type === 'rule_review') {
+        run.stepStatus[stepId] = 'running';
+        const git = ctx.git ?? createGitRunner();
+        const kind = step.id.split('_')[0] ?? 'review';
+        const baseRef = step.baseRef?.trim() ?? '';
+        const headRef = step.headRef?.trim() || 'HEAD';
+
+        const writeFindingsArtifact = async (verdictLine: string, details: string): Promise<string | null> => {
+          try {
+            const artifact = await ctx.artifacts.write({
+              taskId: `${runId}:${stepId}`,
+              kind,
+              fileName: `${stepId}.md`,
+              content: `# ${stepId} (rule_review)\n\nbase: ${baseRef || '(none)'}  |  head: ${headRef}\n\n${verdictLine}\n\n${details}\n`,
+              contentType: 'text/markdown',
+              trace: taskTraceFor(step, vars),
+            });
+            return artifact.path;
+          } catch (e) {
+            ctx.onEvent?.(stepId, `artifact persist failed: ${e instanceof Error ? e.message : String(e)}`);
+            return null;
+          }
+        };
+
+        const failRuleReview = async (summary: string, findings: readonly ReviewFinding[] = []): Promise<void> => {
+          const artifactPath = await writeFindingsArtifact(`verdict: FAILED`, `${summary}\n\n${renderFindingsLines(findings)}`);
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({
+            stepId,
+            status: 'failed',
+            summary: artifactPath === null ? summary : `${summary}\nrule_review artifact: ${artifactPath}`,
+            artifacts: artifactPath === null ? [] : [artifactPath],
+            tests: [],
+          });
+          ctx.onEvent?.(stepId, `rule review FAILED: ${summary.split('\n')[0]}`);
+        };
+
+        /** Resolve a ref to a commit sha through the git seam; undefined = could not. */
+        const resolveSha = async (ref: string): Promise<string | undefined> => {
+          try {
+            const resolved = await git.run(['rev-parse', '--verify', `${ref}^{commit}`], { cwd: ctx.cwd });
+            if (resolved.exitCode !== 0) return undefined;
+            const sha = resolved.stdout.trim().split('\n')[0]?.trim() ?? '';
+            return /^[0-9a-f]{40}$/i.test(sha) ? sha : undefined;
+          } catch {
+            return undefined;
+          }
+        };
+
+        if (baseRef.length === 0) {
+          await failRuleReview(
+            'rule_review precondition failed: the step has no baseRef to judge (a review with no base is not a review)',
+          );
+          done.add(stepId);
+          continue;
+        }
+        const baseSha = await resolveSha(baseRef);
+        if (baseSha === undefined) {
+          await failRuleReview(
+            `rule_review precondition failed: baseRef "${baseRef}" could not be resolved to a commit in ${ctx.cwd}`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        const headSha = await resolveSha(headRef);
+        if (headSha === undefined) {
+          await failRuleReview(
+            `rule_review precondition failed: headRef "${headRef}" could not be resolved to a commit in ${ctx.cwd}`,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        let findings: ReviewFinding[] = [];
+        try {
+          const input = await collectReviewInput(git, {
+            worktree: ctx.cwd,
+            baseSha,
+            headSha,
+            // Only test files need their CONTENT read; the rules that judge
+            // everything else work from the change list.
+            contentFor: (path) => isTestPath(path, step.rules?.testPathPatterns ?? []),
+          });
+          findings = runReviewRules(input, step.rules);
+        } catch (e) {
+          const message = e instanceof ProviderError ? e.message : e instanceof Error ? e.message : String(e);
+          await failRuleReview(
+            `rule_review precondition failed: the change set ${baseSha.slice(0, 12)}..${headSha.slice(0, 12)} could not be reviewed: ${message}`,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        const notes = findings.filter((finding) => finding.severity === 'note');
+        const outcome = verdictFromFindings(findings, notes);
+        if (outcome.verdict === 'findings') {
+          const blocking = findings.filter((finding) => finding.severity === 'block');
+          await failRuleReview(
+            `rule_review FAILED: blocking findings (${blocking.map((finding) => finding.rule).join(', ')})\n${outcome.note ?? describeFindings(blocking)}`,
+            blocking,
+          );
+          done.add(stepId);
+          continue;
+        }
+        if (outcome.verdict === 'awaiting-human') {
+          const human = findings.filter((finding) => finding.severity === 'human');
+          await failRuleReview(
+            `rule_review FAILED: a human must decide this — a machine may not decide it, and the automation must not continue\n${outcome.note ?? describeFindings(human)}`,
+            human,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        // Clean: no block and no human finding. Notes gate nothing and are
+        // rendered one per line so an observation still reaches the reader.
+        const summary =
+          notes.length === 0
+            ? `rule_review PASSED: no findings in ${baseSha.slice(0, 12)}..${headSha.slice(0, 12)}`
+            : `rule_review PASSED: ${notes.length} note(s) in ${baseSha.slice(0, 12)}..${headSha.slice(0, 12)}\n${renderFindingsLines(notes)}`;
+        const artifactPath = await writeFindingsArtifact('verdict: PASSED', `${summary}\n\n${renderFindingsLines(findings)}`);
+        run.stepStatus[stepId] = 'completed';
+        stepResults.push({
+          stepId,
+          status: 'completed',
+          summary: artifactPath === null ? summary : `${summary}\nrule_review artifact: ${artifactPath}`,
+          artifacts: artifactPath === null ? [] : [artifactPath],
+          tests: [],
+        });
+        ctx.onEvent?.(stepId, `rule review passed (${notes.length} note(s))`);
+        done.add(stepId);
+        continue;
+      }
+
       // Independent Review step: a quality gate on top of review. Runs in an
       // ISOLATED runtime context (separate cwd → separate Pi session) so the
       // reviewer sees the code cold, untainted by the implementation session.
-      // Its prompt uses the independent_review skill; the review verdict is
-      // persisted as an artifact and the step fails if a critical finding exists.
+      // Its prompt uses the independent_review skill; the verdict is read from
+      // the STRUCTURED REVIEW_VERDICT marker and persisted as an artifact. The
+      // prose decides nothing: a missing or ambiguous marker fails closed.
       if (step.type === 'independent_review') {
         run.stepStatus[stepId] = 'running';
         const fsx2 = await import('node:fs/promises');
@@ -434,7 +662,8 @@ export async function executeWorkflow(
           context: { workflowStep: stepId, workflow: workflow.name, independentReview: true },
         };
         const res2 = await runTaskAndCollect(ctx.runtime, reviewTask);
-        const hasCritical = /Critical|High|重大|must fix|要修正|ng|✗|不合格/i.test(res2.summary);
+        const parsed = parseReviewVerdict(res2.summary);
+        const passed = parsed.verdict === 'pass';
         const kind = step.id.split('_')[0] ?? 'review';
         const artifact = await ctx.artifacts.write({
           taskId: reviewTask.id,
@@ -444,18 +673,25 @@ export async function executeWorkflow(
           contentType: 'text/markdown',
           trace: taskTraceFor(step, vars),
         });
+        const verdictLine =
+          parsed.verdict !== undefined
+            ? `REVIEW_VERDICT: ${parsed.verdict}`
+            : `REVIEW_VERDICT: (none — ${parsed.error ?? 'unparseable'})`;
+        const summary = passed
+          ? `independent review passed (${verdictLine})\n${res2.summary.slice(0, 800)}\nreview artifact: ${artifact.path}`
+          : `independent review FAILED (${verdictLine}): ${parsed.error ?? 'the reviewer reported findings'}\n${res2.summary.slice(0, 1500)}\nreview artifact: ${artifact.path}`;
         stepResults.push({
           stepId,
-          status: hasCritical ? 'failed' : 'completed',
-          summary: hasCritical ? `independent review found critical findings:\n${res2.summary.slice(0, 1500)}` : `independent review passed:\n${res2.summary.slice(0, 800)}`,
+          status: passed ? 'completed' : 'failed',
+          summary,
           artifacts: [artifact.path],
           tests: [],
         });
-        run.stepStatus[stepId] = hasCritical ? 'failed' : 'completed';
-        if (hasCritical) {
+        run.stepStatus[stepId] = passed ? 'completed' : 'failed';
+        if (!passed) {
           run.status = 'failed';
           failedIds.add(stepId);
-          ctx.onEvent?.(stepId, `independent review FAILED (critical findings) — workflow aborted`);
+          ctx.onEvent?.(stepId, `independent review FAILED (${verdictLine}) — workflow aborted`);
         } else {
           ctx.onEvent?.(stepId, `independent review passed`);
         }

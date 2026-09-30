@@ -7,6 +7,7 @@ import {
   discoverExtensions,
   executeWorkflow,
   renderTraceabilityMatrix,
+  validateWorkflowManifest,
   WorkflowDefinition,
   WorkflowStepResult,
 } from '@takumi/core';
@@ -91,6 +92,30 @@ export interface ProjectConfig {
     deliveryOptions?: Record<string, string>;
     agent: { command: string; args?: string[]; timeoutSeconds?: number; env?: Record<string, string> };
     policy: { reviewMode: 'checks-only' | 'label' | 'rules'; reviewRules?: { forbidTestWeakening?: boolean; protectedPaths?: string[]; replaceProtectedPaths?: boolean; testPathPatterns?: string[]; testOnlyChange?: 'note' | 'block' | 'ignore' }; approvalLabel?: string; maxReviewRounds?: number; retainWorktreesHours?: number; agentRetries?: number; agentRetryDelaySeconds?: number; blockStaleClaims?: boolean; staleClaimSeconds?: number; checksWaitSeconds?: number; checksPollSeconds?: number; mergeabilityReads?: number; mergeabilityReadSeconds?: number; progressIntervalSeconds?: number; fileIssueOnExhaustedChecks?: boolean; scopeQuery?: string };
+    /**
+     * Write-only projections of the primary board (ADR-017): the board OTHER people look at
+     * (a Notion database, a second Redmine project). The primary stays the authority — reading,
+     * claiming and every decision — and a mirror only ever receives state and comments. A mirror
+     * failure is loud (`mirror.failed`) and never fails the work.
+     */
+    boardMirrors?: Array<{
+      /** The name used in events and in the id map, e.g. `notion`. */
+      id: string;
+      /** A board provider id (the same ones `takumi board --provider` accepts). */
+      provider: string;
+      /** Provider options, named as the provider documents them (e.g. `{ databaseId: '<notion id>' }`). */
+      options?: Record<string, string>;
+      /** Where the id map (a CACHE, rebuildable with `pilot --resync`) is kept. */
+      idMapFile?: string;
+      /**
+       * Project the primary's labels onto this mirror. Default true.
+       *
+       * Set FALSE for a mirror whose board has no labels column: such a board refuses a labelled
+       * create (fail-closed, `precondition`), which is loud but leaves the mirror empty until an
+       * operator decides. Saying so here — once — is that decision.
+       */
+      labels?: boolean;
+    }>;
     /**
      * WHICH reviewer judges a `rules` delivery (ADR-021). `rules` (the default) is the built-in
      * deterministic engine; `semgrep` is the pinned sidecar, composed with the built-in rules unless
@@ -209,6 +234,15 @@ export async function loadWorkflow(cwd: string, config: ProjectConfig, name: str
   const def = (manifest.endsWith('.json') ? JSON.parse(raw) : parse(raw)) as WorkflowDefinition;
   if (!def.name || !def.steps) {
     throw new Error(`invalid workflow manifest at ${manifest}: missing name or steps`);
+  }
+  // The engine dispatches on step type; refusing an unknown one here means a
+  // typo fails at load with the allowed list instead of silently behaving like
+  // an agent step. A rule_review with no baseRef is refused for the same reason:
+  // a review with no base is not a review.
+  const issues = validateWorkflowManifest(def);
+  if (issues.length > 0) {
+    const detail = issues.map((issue) => (issue.stepId === undefined ? issue.message : `${issue.stepId}: ${issue.message}`)).join('; ');
+    throw new Error(`invalid workflow manifest at ${manifest}: ${detail}`);
   }
   return def;
 }

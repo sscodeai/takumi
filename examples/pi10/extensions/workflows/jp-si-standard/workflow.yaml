@@ -62,6 +62,14 @@ steps:
       grep -E "^# tests|Tests run:|BUILD SUCCESS|BUILD FAILURE" /tmp/takumi-qg.log | tail -5
     dependsOn: [integration_test]
     timeoutMs: 300000
+  - id: rule_review
+    type: rule_review
+    # The deterministic rules (ADR-013) are the GATE: they judge the real change
+    # set between the frozen base and the delivered head. The prose reviewer in
+    # the next step is a second reader, not the gate.
+    baseRef: origin/main
+    headRef: HEAD
+    dependsOn: [quality_gate]
   - id: independent_review
     type: independent_review
     skill: jp-code-review
@@ -69,7 +77,10 @@ steps:
       独立レビューを実施せよ。対象プロジェクト: {projectDir}。
       実装が詳細設計書・品質基準を満たすか、テストが全てグリーンかを独立の視点で判断し、
       重大な欠陥（Critical/High/セキュリティ）があれば指摘せよ。なければ合格とする。
-    dependsOn: [quality_gate]
+      レビューの最終行に、次の形式の1行だけを出力すること（値は3つのうち1つだけ）:
+      REVIEW_VERDICT: <pass | findings | blocked>
+      値の一覧をそのまま出力したり、2行以上出力してはならない（相反する判定は不合格として扱われる）。
+    dependsOn: [rule_review]
   - id: evidence
     type: agent
     skill: jp-evidence
