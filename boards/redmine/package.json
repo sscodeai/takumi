@@ -18,5 +18,22 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sscodeai/takumi.git",
+    "directory": "boards/redmine"
+  },
+  "homepage": "https://github.com/sscodeai/takumi",
+  "bugs": {
+    "url": "https://github.com/sscodeai/takumi/issues"
+  },
+  "files": [
+    "dist",
+    "manifest.yaml"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

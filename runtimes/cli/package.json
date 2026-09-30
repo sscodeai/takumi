@@ -18,5 +18,21 @@
   "devDependencies": {
     "@types/node": "^22.20.1",
     "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sscodeai/takumi.git",
+    "directory": "runtimes/cli"
+  },
+  "homepage": "https://github.com/sscodeai/takumi",
+  "bugs": {
+    "url": "https://github.com/sscodeai/takumi/issues"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

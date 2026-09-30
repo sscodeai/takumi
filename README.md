@@ -283,7 +283,8 @@ Takumi is currently a Developer Preview.
 - [ ] Claude runtime adapter
 - [ ] Excel, Word, and Playwright tool plugins
 - [ ] Jira and GitHub tool plugins (the board layer already covers issues)
-- [ ] npm package publishing
+- [ ] npm package publishing — prepared but blocked on a name (`takumi` is taken on npm) and
+  a token; see [docs/RELEASING.md](./docs/RELEASING.md)
 - [ ] Real-repo-scale evals
 
 ## License
