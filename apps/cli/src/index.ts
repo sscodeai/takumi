@@ -225,6 +225,10 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
     agent: p.agent,
     policy: {
       reviewMode: p.policy.reviewMode,
+      // The rules travel with the mode: a `rules` mode whose rules never arrived would
+      // silently review with the defaults, which is the "config with no reader" defect in
+      // a new costume.
+      ...(p.policy.reviewRules === undefined ? {} : { reviewRules: p.policy.reviewRules }),
       ...(p.policy.approvalLabel === undefined ? {} : { approvalLabel: p.policy.approvalLabel }),
       ...(p.policy.maxReviewRounds === undefined ? {} : { maxReviewRounds: p.policy.maxReviewRounds }),
       ...(p.policy.retainWorktreesHours === undefined ? {} : { retainWorktreesHours: p.policy.retainWorktreesHours }),
@@ -234,6 +238,10 @@ export async function runPilotCommand(cwd: string, rest: string[]): Promise<numb
       ...(p.policy.staleClaimSeconds === undefined ? {} : { staleClaimSeconds: p.policy.staleClaimSeconds }),
       ...(p.policy.checksWaitSeconds === undefined ? {} : { checksWaitSeconds: p.policy.checksWaitSeconds }),
       ...(p.policy.checksPollSeconds === undefined ? {} : { checksPollSeconds: p.policy.checksPollSeconds }),
+      ...(p.policy.mergeabilityReads === undefined ? {} : { mergeabilityReads: p.policy.mergeabilityReads }),
+      ...(p.policy.mergeabilityReadSeconds === undefined
+        ? {}
+        : { mergeabilityReadSeconds: p.policy.mergeabilityReadSeconds }),
       ...(p.policy.progressIntervalSeconds === undefined ? {} : { progressIntervalSeconds: p.policy.progressIntervalSeconds }),
       ...(p.policy.fileIssueOnExhaustedChecks === undefined ? {} : { fileIssueOnExhaustedChecks: p.policy.fileIssueOnExhaustedChecks }),
       ...(p.policy.scopeQuery === undefined ? {} : { scopeQuery: p.policy.scopeQuery }),
@@ -280,6 +288,21 @@ async function createProviders(
     const { createGitHubDeliveryProvider } = await import('@takumi/delivery-github');
     return { board, delivery: createGitHubDeliveryProvider({ repo: deliveryOptions['repo'] ?? '', ...(deliveryOptions['apiBase'] === undefined ? {} : { apiBase: deliveryOptions['apiBase'] }) }) };
   }
+  if (deliveryId === 'git') {
+    // A bare remote: the branch is pushed and READ BACK, and integration is a fast-forward of the
+    // base branch. It needs a checkout of the same remote (for the calls that outlive one
+    // worktree) and the base branch a merge would move — both from the delivery options.
+    const { createGitDeliveryProvider } = await import('@takumi/delivery-git');
+    return {
+      board,
+      delivery: createGitDeliveryProvider({
+        repo: deliveryOptions['repo'] ?? '',
+        baseBranch: deliveryOptions['baseBranch'] ?? 'main',
+        ...(deliveryOptions['remote'] === undefined ? {} : { remote: deliveryOptions['remote'] }),
+      }),
+    };
+  }
+
   if (deliveryId === 'gitlab') {
     const { createGitLabDeliveryProvider } = await import('@takumi/delivery-gitlab');
     return { board, delivery: createGitLabDeliveryProvider({ project: deliveryOptions['project'] ?? '', ...(deliveryOptions['apiBase'] === undefined ? {} : { apiBase: deliveryOptions['apiBase'] }) }) };

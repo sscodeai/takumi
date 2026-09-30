@@ -22,7 +22,13 @@
  */
 
 import type { BoardWorkItemState } from './board-state.js';
-import { DeliveryError, type CheckSummary, type DeliveryProvider, type PullRequestRef } from './delivery.js';
+import {
+  DeliveryError,
+  deliveryRefFor,
+  type CheckSummary,
+  type DeliveryProvider,
+  type PullRequestRef,
+} from './delivery.js';
 import { createEventLog, nullEventLog, type EventLog } from './events.js';
 import { ProviderError } from './provider-error.js';
 import { acquireSlot, type SlotHandle } from './slot-lock.js';
@@ -64,6 +70,10 @@ export interface DeliveryLoopPlan {
   checksWaitSeconds?: number;
   /** Poll interval while waiting for checks. Default 15. */
   checksPollSeconds?: number;
+  /** How many times to re-read mergeability before it counts as unknown (default 5). */
+  mergeabilityReads?: number;
+  /** Seconds between mergeability re-reads (default 3). */
+  mergeabilityReadSeconds?: number;
   /**
    * Rewrite the board's progress record at most this often when nothing material
    * changed, in seconds. Default 30. Every write is an API call against a host that
@@ -84,14 +94,30 @@ export interface DeliveryLoopPlan {
 
 export interface ReviewContext {
   round: number;
-  pr: PullRequestRef;
+  /** The review surface, when the delivery has one (a bare branch has none). */
+  pr?: PullRequestRef;
   /** The exact head the review must cover — the only head that may later merge. */
   headSha: string;
   changedFiles: string[];
+  /**
+   * The worktree and the frozen base, so a reviewer can read the change itself.
+   *
+   * `changedFiles` alone is a list of names: enough to say "the CI config changed", not
+   * enough to say "this test lost three assertions". A reviewer that has to reconstruct the
+   * base from somewhere else is a reviewer with a second source of truth, so the loop hands
+   * over the two things it already knows.
+   */
+  worktree: string;
+  baseSha: string;
 }
 
 export type ReviewOutcome =
-  | { verdict: 'clean' }
+  /**
+   * `clean` unlocks the merge. A NOTE is allowed on a clean verdict because an observation
+   * is not a defect: "only the tests changed" belongs on the record, and forcing it into
+   * `findings` would spend a fix round on work that may be exactly what the item asked for.
+   */
+  | { verdict: 'clean'; note?: string }
   | { verdict: 'findings'; note?: string }
   /**
    * The change is ready but a HUMAN has not approved it yet (orbi's human review).
@@ -170,9 +196,23 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
   const waitSeconds = plan.checksWaitSeconds ?? 300;
   let checksWaited = 0;
   const pollSeconds = plan.checksPollSeconds ?? 15;
+  // A fresh merge request can answer "mergeability unknown" for a moment (GitLab computes it
+  // asynchronously), and that moment is not a verdict. Bounded on purpose: the window is a
+  // courtesy to an asynchronous host, not a license to wait forever for a yes.
+  const mergeabilityReads = plan.mergeabilityReads ?? 5;
+  const mergeabilityReadSeconds = plan.mergeabilityReadSeconds ?? 3;
   const sleep = deps.sleep ?? ((seconds: number) => new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000)));
   let rounds = 0;
   let pr: PullRequestRef | undefined;
+  /**
+   * The reference every delivery step works against: the pull request when the delivery has one
+   * and the pushed branch when it does not. Port calls go through this, so a provider with no
+   * review surface is never asked to invent one.
+   */
+  let ref: PullRequestRef | undefined;
+  // The branch this run delivers on: the plan's branch until the delivery confirms it, and the
+  // delivered branch afterwards (a resumed run adopts the branch it is finishing).
+  let deliveredBranch: string | undefined;
 
   // The exclusion rail, before anything is claimed: every board here is
   // non-atomic, so a second runner must be turned away before it can believe it
@@ -241,6 +281,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       updatedAt: new Date(clock()).toISOString(),
       baseBranch: plan.baseBranch,
       ...(pr === undefined ? {} : { deliveryRef: `#${pr.number}` }),
+      branch: deliveredBranch ?? plan.branch,
     };
     await board.writeState(plan.itemId, record_);
   };
@@ -310,7 +351,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         message: 'fileIssueOnExhaustedChecks is on, but this board cannot file work items',
       });
       record('issue', 'not filed: this board declares canCreateWork=false');
-      return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+      return { outcome: 'blocked', itemId: plan.itemId, ...(pr === undefined ? {} : { pr }), rounds, steps, error: detail };
     }
 
     const names = failing.map((c) => c.name).join(', ');
@@ -400,10 +441,17 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         { baseSha: plan.baseSha },
       );
       pr = delivered.pr;
+      ref = deliveryRefFor(delivered, plan.baseSha);
+      // Narrowed once for the rest of this round: every delivery step below works against the
+      // reference (the pull request, or the pushed branch when the delivery has no review surface).
+      const thisRef: PullRequestRef = ref;
+      deliveredBranch = delivered.push.branch;
       record(
         'deliver',
-        `round ${round + 1}: ${delivered.created ? 'opened' : 'reused'} PR #${pr.number} ` +
-          `push=${delivered.push.mode} head=${pr.headSha.slice(0, 12)}` +
+        `round ${round + 1}: ${
+          pr === undefined ? 'pushed' : delivered.created ? 'opened' : 'reused'
+        } ${pr === undefined ? delivered.push.branch : `PR #${pr.number}`} ` +
+          `push=${delivered.push.mode} head=${ref.headSha.slice(0, 12)}` +
           (delivered.notes.length === 0 ? '' : ` (${delivered.notes.join('; ')})`),
       );
       // The item returns to review after every round: on the first one it enters
@@ -413,32 +461,46 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         kind: 'deliver.pushed',
         runId: plan.runId,
         itemId: plan.itemId,
-        pr: pr.number,
-        message: `pushed ${delivered.push.mode} ${delivered.push.branch} at ${pr.headSha.slice(0, 12)}`,
-        fields: { mode: delivered.push.mode, head: pr.headSha },
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: `pushed ${delivered.push.mode} ${delivered.push.branch} at ${ref.headSha.slice(0, 12)}`,
+        fields: { mode: delivered.push.mode, head: thisRef.headSha },
       });
-      events.emit({
-        kind: delivered.created ? 'deliver.pr_opened' : 'deliver.pr_reused',
-        runId: plan.runId,
-        itemId: plan.itemId,
-        pr: pr.number,
-        message: delivered.created ? `opened PR #${pr.number}` : `reused PR #${pr.number}`,
-      });
+      // A delivery with no review surface has no pull request to announce: emitting an event that
+      // claims one would put a pull request in the trail that does not exist.
+      if (pr !== undefined) {
+        events.emit({
+          kind: delivered.created ? 'deliver.pr_opened' : 'deliver.pr_reused',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          pr: pr.number,
+          message: delivered.created ? `opened PR #${pr.number}` : `reused PR #${pr.number}`,
+        });
+      }
+      // After delivering, the item is DELIVERED AND UNDER REVIEW — the state must say so.
+      // Reading it off `delivered.created` instead was wrong for a REUSED delivery in round 0: a
+      // resumed delivery (its branch and pull request already exist) would stay in `claimed`, and
+      // `claimed → merged` is not a legal move — so finishing an interrupted delivery blocked on
+      // the state machine rather than on anything real.
       const current = (await board.getWork(plan.itemId)).state;
-      if (current === 'fix_needed' || (round === 0 && delivered.created)) {
-        await transition('pr_open', `PR #${pr.number} ready for review${round === 0 ? '' : ` (round ${round + 1})`}`);
+      if (current !== 'pr_open') {
+        await transition(
+          'pr_open',
+          pr === undefined
+            ? `branch ${delivered.push.branch} pushed for review${round === 0 ? '' : ` (round ${round + 1})`}`
+            : `PR #${pr.number} ready for review${round === 0 ? '' : ` (round ${round + 1})`}`,
+        );
       }
       await writeRecord(round);
 
       // --- checks: a failure blocks, a pending waits, and neither is a success --
-      const checks = await delivery.checks(pr);
+      const checks = await delivery.checks(thisRef);
       const failed = checks.filter((c) => c.conclusion === 'failure');
       const pending = checks.filter((c) => c.conclusion === 'pending');
       events.emit({
         kind: 'checks.read',
         runId: plan.runId,
         itemId: plan.itemId,
-        pr: pr.number,
+        ...(pr === undefined ? {} : { pr: pr.number }),
         message: checks.length === 0 ? 'no checks reported' : checks.map((c) => `${c.name}=${c.conclusion}`).join(' '),
         fields: { total: checks.length, failed: failed.length, pending: pending.length },
       });
@@ -447,7 +509,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
           kind: 'check.failed',
           runId: plan.runId,
           itemId: plan.itemId,
-          pr: pr.number,
+          ...(pr === undefined ? {} : { pr: pr.number }),
           message: `check ${check.name} failed`,
           fields: { check: check.name },
         });
@@ -468,7 +530,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         // returning here used to leave the item owned by a run that never came back,
         // because the runner only ever selects `ready` items (the comment that used to
         // sit here claimed "another tick will read it again"; no tick ever did).
-        const waited = await waitForChecks(pr, round);
+        const waited = await waitForChecks(thisRef, round);
         if (waited === null) {
           const detail = `check(s) still pending after ${waitSeconds}s: ${pending.map((c) => c.name).join(', ')}`;
           await transition('blocked', detail);
@@ -487,7 +549,7 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
           kind: 'checks.waited',
           runId: plan.runId,
           itemId: plan.itemId,
-          pr: pr.number,
+          ...(pr === undefined ? {} : { pr: pr.number }),
           message: `checks settled after ${waited.waitedSeconds}s: ${waited.checks.map((c) => `${c.name}=${c.conclusion}`).join(' ')}`,
           fields: { seconds: waited.waitedSeconds },
         });
@@ -509,15 +571,25 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         hooks.changedFiles === undefined
           ? []
           : await hooks.changedFiles({ worktree: plan.worktree, baseSha: plan.baseSha });
-      const review = await hooks.review({ round, pr, headSha: pr.headSha, changedFiles });
+      // The reviewer works against the delivered HEAD; the pull request, when there is one, is
+      // context it may use (the rules reviewer reads the diff instead, which is why a delivery
+      // with no review surface can still be reviewed).
+      const review = await hooks.review({
+        round,
+        ...(pr === undefined ? {} : { pr }),
+        headSha: thisRef.headSha,
+        changedFiles,
+        worktree: plan.worktree,
+        baseSha: plan.baseSha,
+      });
       if (review.verdict === 'awaiting-human') {
         events.emit({
           kind: 'review.awaiting_human',
           runId: plan.runId,
           itemId: plan.itemId,
-          pr: pr.number,
+          ...(pr === undefined ? {} : { pr: pr.number }),
           message: `round ${round + 1}: waiting for a human${review.note === undefined ? '' : ` — ${review.note}`}`,
-          fields: { round, head: pr.headSha },
+          fields: { round, head: thisRef.headSha },
         });
         record('review', `round ${round + 1}: awaiting a human${review.note === undefined ? '' : ` — ${review.note}`}`);
         return {
@@ -533,20 +605,22 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         kind: review.verdict === 'clean' ? 'review.clean' : 'review.findings',
         runId: plan.runId,
         itemId: plan.itemId,
-        pr: pr.number,
+        ...(pr === undefined ? {} : { pr: pr.number }),
         message:
           review.verdict === 'clean'
-            ? `round ${round + 1}: clean at ${pr.headSha.slice(0, 12)}`
+            ? // A note on a clean verdict is an observation ("only the tests changed"), and
+              // dropping it here would lose the one place a human would have seen it.
+              `round ${round + 1}: clean at ${thisRef.headSha.slice(0, 12)}${review.note === undefined ? '' : ` — note: ${review.note}`}`
             : `round ${round + 1}: findings${review.note === undefined ? '' : ` — ${review.note}`}`,
-        fields: { round, head: pr.headSha },
+        fields: { round, head: thisRef.headSha },
       });
-      record('review', `round ${round + 1}: ${review.verdict}${review.verdict === 'findings' && review.note ? ` — ${review.note}` : ''}`);
+      record('review', `round ${round + 1}: ${review.verdict}${review.note ? ` — ${review.note}` : ''}`);
 
       if (review.verdict === 'findings') {
         if (round + 1 >= maxRounds) {
           const detail = `review found issues in ${maxRounds} consecutive rounds; a human must decide`;
           await transition('blocked', detail);
-          return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+          return { outcome: 'blocked', itemId: plan.itemId, ...(pr === undefined ? {} : { pr }), rounds, steps, error: detail };
         }
         await transition('fix_needed', review.note ?? 'review findings');
         continue; // the next round's agent hook fixes them in the same worktree/PR
@@ -555,40 +629,86 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       // --- merge EXACTLY the reviewed head -------------------------------------
       // Re-read first: if the branch moved after the review, the reviewed head is
       // no longer what would land, and merging would be merging unreviewed code.
-      const status = await delivery.status(pr);
-      if (status.headSha !== pr.headSha) {
-        const detail = `the head moved after the review (reviewed ${pr.headSha.slice(0, 12)}, now ${status.headSha.slice(0, 12)}); re-review required`;
+      // GitLab computes mergeability ASYNCHRONOUSLY: a merge request that was just opened
+      // legitimately answers "unknown" for a moment, and reading that as a verdict stranded a
+      // real item in `pr_open` — where no later tick would look at it again, because the pilot
+      // selects `ready` work. So the unknown is given a BOUNDED window to become an answer.
+      //
+      // It is still never read as a yes: once the window is spent the item is handed on as
+      // `retriable` exactly as before, only later, and the message says how long we looked.
+      // The head is re-read on every attempt, because a head that moves is a decision rather
+      // than a transient — it ends the window and falls through to the check below.
+      let status = await delivery.status(thisRef);
+      for (
+        let attempt = 1;
+        attempt < mergeabilityReads && status.mergeable === null;
+        attempt += 1
+      ) {
+        await sleep(mergeabilityReadSeconds);
+        status = await delivery.status(thisRef);
+        if (status.headSha !== thisRef.headSha) break;
+        events.emit({
+          kind: 'merge.mergeability_waited',
+          runId: plan.runId,
+          itemId: plan.itemId,
+          ...(pr === undefined ? {} : { pr: pr.number }),
+          message: `mergeability still unknown after ${attempt * mergeabilityReadSeconds}s (attempt ${attempt + 1}/${mergeabilityReads})`,
+          fields: { attempt: attempt + 1, reads: mergeabilityReads },
+        });
+      }
+      if (status.headSha !== thisRef.headSha) {
+        const detail = `the head moved after the review (reviewed ${thisRef.headSha.slice(0, 12)}, now ${status.headSha.slice(0, 12)}); re-review required`;
         await transition('fix_needed', detail);
         if (round + 1 >= maxRounds) {
           await transition('blocked', detail);
-          return { outcome: 'blocked', itemId: plan.itemId, pr, rounds, steps, error: detail };
+          return { outcome: 'blocked', itemId: plan.itemId, ...(pr === undefined ? {} : { pr }), rounds, steps, error: detail };
         }
         continue;
       }
       if (status.mergeable === null) {
-        return {
-          outcome: 'retriable',
-          itemId: plan.itemId,
-          pr,
-          rounds,
-          steps,
-          error: 'mergeability is not known yet — an unknown is not a yes',
-        };
+        // BLOCKED, not `retriable`. The window above already gave the host its chance, and
+        // nothing re-selects an item left in `pr_open`: returning `retriable` would strand the
+        // item exactly the way the pending-checks budget refuses to (see the note on that
+        // path). A block is visible — the watchdog reports it, a human sees it — and the
+        // message carries the way back, which the claim rule now actually honours.
+        const detail = `mergeability is still unknown after ${mergeabilityReads} reads over ${(mergeabilityReads - 1) * mergeabilityReadSeconds}s — an unknown is not a yes`;
+        await transition('blocked', detail);
+        await board.comment(
+          plan.itemId,
+          `Could not merge: ${detail}. The branch and merge request are untouched — move the item back to \`ready\` to have a runner finish the delivery.`,
+          { runId: plan.runId },
+        );
+        return { outcome: 'blocked', itemId: plan.itemId, ...(pr === undefined ? {} : { pr }), rounds, steps, error: detail };
       }
 
-      const merged = await delivery.merge(pr, { expectedHeadSha: pr.headSha, method: 'merge' });
+      // One name for the thing that was merged, so the trail reads the same for a pull request
+      // and for a bare branch.
+      const what = pr === undefined ? `branch ${delivered.push.branch}` : `PR #${pr.number}`;
+      const merged = await delivery.merge(thisRef, { expectedHeadSha: thisRef.headSha, method: 'merge' });
       events.emit({
         kind: 'merge.done',
         runId: plan.runId,
         itemId: plan.itemId,
-        pr: pr.number,
-        message: `PR #${pr.number} merged at ${merged.headSha.slice(0, 12)}`,
+        ...(pr === undefined ? {} : { pr: pr.number }),
+        message: `${what} merged at ${merged.headSha.slice(0, 12)}`,
         fields: { method: merged.method, head: merged.headSha },
       });
-      record('merge', `PR #${pr.number} merged at ${merged.headSha.slice(0, 12)} (${merged.method})`);
+      record('merge', `${what} merged at ${merged.headSha.slice(0, 12)} (${merged.method})`);
       await transition('merged', `merged ${merged.headSha.slice(0, 8)}`);
-      await board.comment(plan.itemId, `Delivered and merged: ${pr.url}`, { runId: plan.runId });
-      return { outcome: 'merged', itemId: plan.itemId, pr, rounds, steps };
+      await board.comment(
+        plan.itemId,
+        pr === undefined
+          ? `Delivered and merged onto the base branch: branch ${delivered.push.branch}, commit ${merged.headSha} (this delivery has no review surface).`
+          : `Delivered and merged: ${pr.url}`,
+        { runId: plan.runId },
+      );
+      return {
+        outcome: 'merged',
+        itemId: plan.itemId,
+        ...(pr === undefined ? {} : { pr }),
+        rounds,
+        steps,
+      };
     }
 
     // The loop only reaches here when every round ended in `continue`.

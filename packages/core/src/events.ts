@@ -50,6 +50,22 @@ export const EVENT_KINDS = [
   // Checks and review
   'checks.read',
   'checks.waited',
+  /**
+   * Mergeability was not known yet and is being re-read: a host that computes it
+   * asynchronously (GitLab) answers "unknown" for a moment after a merge request opens.
+   */
+  'merge.mergeability_waited',
+  /**
+   * What an agent task cost, from the runtime that ran it (ADR-016). Emitted only when the agent
+   * ran through a runtime: a bare subprocess cannot answer, and a zero invented for it would read
+   * as "this was free".
+   */
+  'runtime.usage',
+  /**
+   * A tick took an item that already had a delivery in flight (same branch, same pull request)
+   * instead of starting fresh work on it.
+   */
+  'pilot.resumed',
   'check.failed',
   // Turning a failure into work, and the honest refusal when a board cannot file
   'issue.filed',

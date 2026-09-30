@@ -825,3 +825,64 @@ test('runDeliveryLoop: filing stays OFF unless asked for', async () => {
   assert.equal(log.of('issue.filed').length, 0);
   assert.equal(log.of('issue.skipped').length, 0, 'nothing is reported when the feature is off');
 });
+
+test('runDeliveryLoop: an unknown mergeability is re-read inside a bounded window, then merged', async () => {
+  const { board, delivery } = harness();
+  const sleeps: number[] = [];
+  const realStatus = delivery.status.bind(delivery);
+  let reads = 0;
+  delivery.status = async (ref: PullRequestRef) => {
+    reads += 1;
+    const status = await realStatus(ref);
+    // A host that computes mergeability asynchronously (GitLab): unknown at first, an answer
+    // a moment later. Reading the first answer as a verdict is what stranded a real item.
+    return reads <= 2 ? { ...status, mergeable: null } : status;
+  };
+  const result = await runDeliveryLoop({
+    board,
+    delivery,
+    plan: { ...plan, mergeabilityReads: 5, mergeabilityReadSeconds: 3 },
+    sleep: async (seconds: number) => {
+      sleeps.push(seconds);
+    },
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'merged');
+  assert.equal(reads, 3, 'two unknowns, then the answer');
+  assert.deepEqual(sleeps, [3, 3], 'the window waits between reads, and only between them');
+  assert.equal(delivery.merged, true);
+  assert.equal((await board.getWork('ITEM-7')).state, 'merged');
+});
+
+test('runDeliveryLoop: mergeability that stays unknown blocks the item, visibly', async () => {
+  const { board, delivery } = harness();
+  const sleeps: number[] = [];
+  delivery.status = async (ref: PullRequestRef) => ({
+    state: 'open',
+    mergeable: null,
+    headSha: ref.headSha,
+    baseSha: ref.baseSha,
+  });
+  const result = await runDeliveryLoop({
+    board,
+    delivery,
+    plan: { ...plan, mergeabilityReads: 4, mergeabilityReadSeconds: 3 },
+    sleep: async (seconds: number) => {
+      sleeps.push(seconds);
+    },
+    hooks: { agent: async () => {}, review: async () => ({ verdict: 'clean' }) },
+  });
+
+  assert.equal(result.outcome, 'blocked', 'retriable would leave it in pr_open, where nothing looks at it again');
+  assert.match(result.error ?? '', /still unknown after 4 reads over 9s/);
+  assert.equal(delivery.merged, false, 'a window that ends still ends in "no"');
+  assert.deepEqual(sleeps, [3, 3, 3], 'the reads are bounded by the window, not by patience');
+  // A blocked item is visible AND the way back is in the trail.
+  assert.equal((await board.getWork('ITEM-7')).state, 'blocked');
+  assert.match(
+    board.comments.join(' '),
+    /move the item back to `ready`/,
+    'the blocked item must carry the way back in the trail, not just a refusal',
+  );
+});

@@ -56,6 +56,7 @@
 import {
   assertBoardHttpOk,
   assertBoardCapability,
+  decideClaim,
   assertScopeQuery,
   assertTransition,
   BoardError,
@@ -489,29 +490,29 @@ export class GitLabBoardProvider implements TaskBoardProvider {
     const item = await this.getWork(id);
     const existing = await this.readState(id);
 
-    if (existing !== null) {
-      if (existing.runId === runId) {
-        return {
-          item: id,
-          runId,
-          claimed: false,
-          reason: `issue ${id} is already claimed by run ${runId}: claim is not repeatable (read the state record to resume)`,
-        };
-      }
-      return {
-        item: id,
-        runId,
-        claimed: false,
-        reason: `issue ${id} is already claimed by run ${existing.runId} (state record on the board)`,
-      };
-    }
-
-    if (item.state !== 'ready') {
-      return { item: id, runId, claimed: false, reason: `issue ${id} is in state ${item.state}, not ready` };
+    // The rule lives in core (decideClaim): the board's STATE says whether the item is held,
+    // the record only says who worked it last. Reading the record as a lock is how an item
+    // became unrecoverable here on the first real run — the run died, blocked the item, the
+    // operator moved it back to `ready`, and every later claim was refused by the dead run's
+    // own record. The claim race check below is about CONCURRENCY and is untouched: it still
+    // refuses when two runs write at the same instant.
+    const decision = decideClaim({ state: item.state, record: existing, runId });
+    if (!decision.claimed) {
+      return { item: id, runId, claimed: false, reason: decision.reason };
     }
 
     await this.putStateLabels(id, 'claimed', item.labels);
-    await this.writeState(id, recordFor(id, runId, null));
+    await this.writeState(
+      id,
+      recordFor(
+        id,
+        runId,
+        null,
+        decision.takeoverFrom === undefined
+          ? undefined
+          : `took over from run ${decision.takeoverFrom} (its record named itself while the board said ready)`,
+      ),
+    );
 
     const afterWrite = await this.getWork(id);
     if (afterWrite.state !== 'claimed') {
@@ -536,7 +537,12 @@ export class GitLabBoardProvider implements TaskBoardProvider {
         reason: `lost the claim race on issue ${id}: ${who} (GitLab cannot update labels conditionally — see capabilities().atomicClaim)`,
       };
     }
-    return { item: id, runId, claimed: true };
+    return {
+      item: id,
+      runId,
+      claimed: true,
+      ...(decision.takeoverFrom === undefined ? {} : { takeoverFrom: decision.takeoverFrom }),
+    };
   }
 
   /**

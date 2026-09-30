@@ -1,4 +1,5 @@
 import {
+  decideClaim,
   assertBoardCapability,
   assertScopeQuery,
   boardErrorFromResponse,
@@ -402,13 +403,13 @@ export class NotionBoardProvider implements TaskBoardProvider {
 
   async claim(id: string, runId: string): Promise<ClaimResult> {
     const page = await this.fetchPage(id);
+    // The rule lives in core (decideClaim): the board's STATE says whether the item is
+    // held, the record only says who worked it last. Reading the record as a lock is how an
+    // item becomes unrecoverable after the run that claimed it dies.
     const existing = this.readRecord(page);
-    if (existing !== null && existing.runId !== runId) {
-      return { item: id, runId, claimed: false, reason: `already claimed by ${existing.runId}` };
-    }
-    const current = this.readColumn(page);
-    if (current !== 'ready') {
-      return { item: id, runId, claimed: false, reason: `item is in state ${current}, not ready` };
+    const decision = decideClaim({ state: this.readColumn(page), record: existing, runId });
+    if (!decision.claimed) {
+      return { item: id, runId, claimed: false, reason: decision.reason };
     }
 
     await this.patchPage(id, this.columnPatch('claimed'), 'claim');
@@ -418,6 +419,11 @@ export class NotionBoardProvider implements TaskBoardProvider {
       item: id,
       reviewRound: 0,
       updatedAt: new Date().toISOString(),
+      // A takeover is written down: the record is evidence a human reads later, and "this run
+      // took the item over from one that had died" is exactly the kind of fact it exists for.
+      ...(decision.takeoverFrom === undefined
+        ? {}
+        : { note: `took over from run ${decision.takeoverFrom} (its record named itself while the board said ready)` }),
     });
 
     // Notion offers no conditional update, so the claim is read-then-write plus
@@ -431,7 +437,7 @@ export class NotionBoardProvider implements TaskBoardProvider {
         reason: `lost a concurrent claim to ${confirmed?.runId ?? 'an unknown run'}`,
       };
     }
-    return { item: id, runId, claimed: true };
+    return { item: id, runId, claimed: true, ...(decision.takeoverFrom === undefined ? {} : { takeoverFrom: decision.takeoverFrom }) };
   }
 
   async transition(id: string, to: BoardWorkItemState, evidence: BoardTransitionEvidence): Promise<void> {

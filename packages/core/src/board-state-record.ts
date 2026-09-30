@@ -30,6 +30,16 @@ export interface BoardStateRecord {
   item: string;
   baseBranch?: string;
   deliveryRef?: string;
+  /**
+   * The branch this run delivered on.
+   *
+   * Recorded so a LATER tick can resume an unfinished delivery — same branch, same pull
+   * request — instead of starting over: without it, the only recovery was a human resetting the
+   * item, which re-runs the agent and pushes a second branch for work that was already
+   * reviewed. Optional because records written before this field exist, and a record without it
+   * simply cannot be resumed (never guessed).
+   */
+  branch?: string;
   reviewRound: number;
   updatedAt: string;
   note?: string;
@@ -117,6 +127,7 @@ export function validateBoardStateRecord(value: Record<string, unknown>): BoardS
   };
   if (typeof value['baseBranch'] === 'string') record.baseBranch = value['baseBranch'];
   if (typeof value['deliveryRef'] === 'string') record.deliveryRef = value['deliveryRef'];
+  if (typeof value['branch'] === 'string') record.branch = value['branch'];
   if (typeof value['note'] === 'string') record.note = value['note'];
   return record;
 }

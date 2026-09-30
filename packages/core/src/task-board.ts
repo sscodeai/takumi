@@ -227,6 +227,14 @@ export interface ClaimResult {
   item: string;
   runId: string;
   claimed: boolean;
+  /**
+   * Set when this claim took over an item whose state record named an EARLIER run.
+   *
+   * The board reported the item as `ready`, so that run no longer held it (a run that holds an
+   * item never leaves it there). Reported rather than silent: a takeover is a fact an operator
+   * may need to see in the trail.
+   */
+  takeoverFrom?: string;
   /** Why the claim was refused (already claimed, closed, blocked, ...). */
   reason?: string;
 }
@@ -429,6 +437,72 @@ export function assertBoardCapability(
       if (caps.delivery.canMerge !== true) throw new BoardUnsupportedError(capability, id);
       return;
   }
+}
+
+/**
+ * Decide a claim from the two facts a board gives us: its STATE, and any state record.
+ *
+ * The rule, stated once because five adapters used to guess at it:
+ *
+ *   1. The board's STATE is the authority for whether an item is held. A run that holds an item
+ *      never leaves it at `ready`, so an item the board reports as `ready` is available — no
+ *      matter what a previous run's state record says.
+ *   2. The record is EVIDENCE ABOUT A RUN, not a lock. It answers "who worked this last" and
+ *      "what did they do", and it drives the tracing a human reads.
+ *   3. `pr_open` and `fix_needed` are IN FLIGHT, not held: a delivery exists, its review never
+ *      finished, and FINISHING IT IS WORK TOO — so such an item is claimable when its record
+ *      names another run (that run is not working any more, and the slot lock is what proves
+ *      it). A terminal state (`merged`, `blocked`) never is: those want a human decision, and
+ *      `claimed` means somebody is working it right now.
+ *   4. A refused claim must say why (a silent refusal is not a contract).
+ *
+ * Reading (2) as a lock is how an item becomes UNRECOVERABLE, and it happened on the first real
+ * run against a real instance: a run claimed the item, died of a transport failure, and blocked
+ * it. The operator did exactly what takumi's block message told them to — moved it back to
+ * `ready` — and every later run was refused, because the dead run's record named itself. The
+ * only way out was a human deleting takumi's own note through the host's API, which is not a
+ * recovery path; it is a workaround for a defect.
+ */
+export function decideClaim(opts: {
+  state: BoardWorkItemState;
+  record: { runId: string } | null;
+  runId: string;
+}): { claimed: true; takeoverFrom?: string } | { claimed: false; reason: string } {
+  const { state, record, runId } = opts;
+  if (record !== null && record.runId === runId) {
+    return {
+      claimed: false,
+      reason: `claim is not repeatable for the same run ${runId} (read the state record to resume)`,
+    };
+  }
+  if (state === 'pr_open' || state === 'fix_needed') {
+    // Rule 3: in-flight work, claimable to be FINISHED. Without this, a delivery interrupted
+    // after the push (a network blip, an answer the host had not computed yet) was unfinishable
+    // by any runner: the sweep reported it and only a human could act, and a human resetting the
+    // item re-ran the agent and pushed a second branch for work that was already reviewed.
+    if (record !== null && record.runId !== runId) {
+      return { claimed: true, takeoverFrom: record.runId };
+    }
+    return {
+      claimed: false,
+      reason:
+        record === null
+          ? `item is in state ${state} with no delivery record, so there is nothing to resume`
+          : `item is in state ${state} and its record names this run already — claim is not repeatable`,
+    };
+  }
+  if (state !== 'ready') {
+    return {
+      claimed: false,
+      reason:
+        record === null || record.runId === runId
+          ? `item is in state ${state}, not ready`
+          : `already claimed by ${record.runId} (the board reports ${state})`,
+    };
+  }
+  return record === null || record.runId === runId
+    ? { claimed: true }
+    : { claimed: true, takeoverFrom: record.runId };
 }
 
 /** The board contract suite. Any adapter must pass it unchanged. */
@@ -708,6 +782,31 @@ export async function runTaskBoardProviderContractSuite(
   );
   notes.push(`getWork: PASS (known item + not_found for unknown item), state=${item.state}`);
 
+  // --- recovery: a record from a run that DIED must not make the item unclaimable ----------
+  // The operator's documented recovery path is to move an item back to `ready` — takumi's own
+  // block message names it. That path has to work: if the record left by the dead run refused
+  // every later claim, the item would be unrecoverable without hand-editing takumi's note.
+  const diedRunId = `${runId}-died`;
+  if (!caps.machineReadableState) {
+    // No state records on this board means no record can block a claim: the defect cannot
+    // exist here, and pretending it passed would be a false positive.
+    notRun += 1;
+    notes.push('recovery: NOT_RUN (this board keeps no machine-readable state)');
+  } else {
+    await provider.writeState(opts.itemId, {
+    schema: 1,
+    runId: diedRunId,
+    item: opts.itemId,
+    reviewRound: 0,
+    updatedAt: new Date(0).toISOString(),
+    note: 'contract suite: a run that claimed this item and then died',
+  });
+    const beforeRecovery = await provider.getWork(opts.itemId);
+    if (beforeRecovery.state !== 'ready') {
+      throw new Error(`the recovery check needs a ready item, got state '${beforeRecovery.state}'`);
+    }
+  }
+
   // --- claim is NOT idempotent-by-accident ---
   const first = await provider.claim(opts.itemId, runId);
   if (first.claimed !== true) {
@@ -719,6 +818,18 @@ export async function runTaskBoardProviderContractSuite(
   }
   if (second.reason === undefined || second.reason.length === 0) {
     throw new Error('a refused claim must state a reason — a silent refusal is not a contract');
+  }
+  if (caps.machineReadableState) {
+    // Only a board that keeps records can have the defect the recovery check looks for, so the
+    // assertion travels with the check (the board without records reported NOT_RUN above).
+    if (first.takeoverFrom !== diedRunId) {
+      throw new Error(
+        `a claim of an item the board reports as ready must REPORT that it took over the record's run (${diedRunId}), got takeoverFrom=${JSON.stringify(first.takeoverFrom)}`,
+      );
+    }
+    notes.push(
+      `recovery: PASS (a record from the run ${diedRunId} does not block a claim while the board says ready; the takeover is reported)`,
+    );
   }
   notes.push(
     `claim: PASS (first claimed=true, second claimed=false reason=${JSON.stringify(second.reason)}, atomicClaim=${caps.atomicClaim})`,

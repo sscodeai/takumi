@@ -6,7 +6,7 @@
 # private SDK that most users cannot access.
 #
 # Takumi's installable core is therefore: packages/* + apps/* + runtimes/fake +
-# runtimes/cli + runtimes/deepseek. The Pi runtime is opt-in:
+# runtimes/cli + runtimes/deepseek + runtimes/openhands. The Pi runtime is opt-in:
 #   cd runtimes/pi && pnpm install && pnpm build
 # (on a machine that has the Pi SDK configured). The rest of Takumi builds and
 # runs without it — see README "Installable without the Pi runtime".
@@ -16,6 +16,7 @@ packages:
   - "runtimes/fake"
   - "runtimes/cli"
   - "runtimes/deepseek"
+  - "runtimes/openhands"
 # Task-board providers (ADR-006). They depend on @takumi/core only — the
 # request seam is injected, so no adapter needs a network client or a token
 # to build or to run its tests. A glob on purpose: adding a board is one new

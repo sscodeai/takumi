@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,6 +11,8 @@ import {
   BoardError,
   BoardUnsupportedError,
   createEventLog,
+  createGitRunner,
+  createRuleReviewer,
   DeliveryError,
   ProviderError,
   runPilotTick,
@@ -625,4 +628,192 @@ test('runPilotTick: the in-flight sweep is NOT scoped', async () => {
   } finally {
     h.cleanup();
   }
+});
+
+// --- the rules reviewer (ADR-013), end to end through the real loop ----------
+
+test('runPilotTick: an agent that buys a green pipeline by weakening its own test is blocked', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-review-e2e-'));
+  const raw = (args: string[]): string =>
+    execFileSync('git', args, {
+      cwd: dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@example.invalid',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@example.invalid',
+      },
+    });
+  try {
+    // A real repository, cut the way a worktree is: a base commit the reviewer can read.
+    raw(['init', '-q', '-b', 'main']);
+    writeFileSync(join(dir, 'calc.py'), 'def add(a, b):\n    return a + b\n');
+    writeFileSync(
+      join(dir, 'test_calc.py'),
+      'import unittest\n\nclass CalcTest(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n        self.assertEqual(add(0, 0), 0)\n',
+    );
+    raw(['add', '-A']);
+    raw(['commit', '-q', '-m', 'chore: fixture']);
+    const baseSha = raw(['rev-parse', 'HEAD']).trim();
+
+    const board = new PilotBoard([{ id: 'ITEM-1' }]);
+    // The delivery reports the head that is REALLY on the branch — which is what makes the
+    // reviewer read the delivered change rather than a configured value.
+    class RealHeadDelivery extends PilotDelivery {
+      override async deliver(req: DeliveryRequest, base: { baseSha: string }): Promise<DeliveryOutcome> {
+        this.headSha = raw(['rev-parse', 'HEAD']).trim();
+        return await super.deliver(req, base);
+      }
+    }
+    const delivery = new RealHeadDelivery();
+    const log = createEventLog();
+
+    const result = await runPilotTick({
+      board,
+      delivery,
+      events: log,
+      repo: dir,
+      worktreeRoot: join(dir, 'worktrees'),
+      baseBranch: 'main',
+      resolveBaseSha: async () => baseSha,
+      prepareWorktree: async (item, runId) => ({ path: dir, branch: `takumi/${item.id}-${runId}`, baseSha }),
+      // The failure this reviewer exists for: the agent deletes an assertion and commits.
+      agent: async () => {
+        writeFileSync(
+          join(dir, 'test_calc.py'),
+          'import unittest\n\nclass TestCalc(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n',
+        );
+        raw(['add', '-A']);
+        raw(['commit', '-q', '-m', 'fix: make the failing test pass']);
+      },
+      review: createRuleReviewer({ git: createGitRunner() }),
+      policy: { reviewMode: 'rules', maxReviewRounds: 1 },
+      slotDir: join(dir, 'slots'),
+      sleep: async () => {},
+    });
+
+    assert.equal(result.outcome, 'blocked', 'a weakened test must never be delivered');
+    assert.equal(delivery.merged, false, 'and it must never merge');
+    const findings = log.of('review.findings');
+    assert.ok(findings.length > 0, 'the reviewer must say what it found');
+    assert.match(findings[0]?.message ?? '', /test-weakening\/assertions-removed/);
+    assert.equal(log.of('merge.done').length, 0, 'no merge event for a refused delivery');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runPilotTick: the same item merges when the tests are kept honest', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-review-ok-'));
+  const raw = (args: string[]): string =>
+    execFileSync('git', args, {
+      cwd: dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@example.invalid',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@example.invalid',
+      },
+    });
+  try {
+    raw(['init', '-q', '-b', 'main']);
+    writeFileSync(join(dir, 'calc.py'), 'def add(a, b):\n    return a + b\n');
+    writeFileSync(join(dir, 'test_calc.py'), 'import unittest\n\nclass CalcTest(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n');
+    raw(['add', '-A']);
+    raw(['commit', '-q', '-m', 'chore: fixture']);
+    const baseSha = raw(['rev-parse', 'HEAD']).trim();
+
+    const board = new PilotBoard([{ id: 'ITEM-1' }]);
+    class RealHeadDelivery extends PilotDelivery {
+      override async deliver(req: DeliveryRequest, base: { baseSha: string }): Promise<DeliveryOutcome> {
+        this.headSha = raw(['rev-parse', 'HEAD']).trim();
+        return await super.deliver(req, base);
+      }
+    }
+    const delivery = new RealHeadDelivery();
+    const log = createEventLog();
+
+    const result = await runPilotTick({
+      board,
+      delivery,
+      events: log,
+      repo: dir,
+      worktreeRoot: join(dir, 'worktrees'),
+      baseBranch: 'main',
+      resolveBaseSha: async () => baseSha,
+      prepareWorktree: async (item, runId) => ({ path: dir, branch: `takumi/${item.id}-${runId}`, baseSha }),
+      // The honest version: the implementation gains the function, and the test gains an
+      // assertion. Nothing was weakened, so the rules must let it through.
+      agent: async () => {
+        writeFileSync(join(dir, 'calc.py'), 'def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n');
+        writeFileSync(
+          join(dir, 'test_calc.py'),
+          'import unittest\n\nclass CalcTest(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n\n    def test_mul(self):\n        self.assertEqual(mul(2, 3), 6)\n',
+        );
+        raw(['add', '-A']);
+        raw(['commit', '-q', '-m', 'feat: add mul() with a test']);
+      },
+      review: createRuleReviewer({ git: createGitRunner() }),
+      policy: { reviewMode: 'rules', maxReviewRounds: 1 },
+      slotDir: join(dir, 'slots'),
+      sleep: async () => {},
+    });
+
+    assert.equal(result.outcome, 'delivered', 'honest work still merges');
+    assert.equal(delivery.merged, true);
+    assert.match(log.of('review.clean')[0]?.message ?? '', /clean at /);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runPilotTick: with nothing ready, a tick finishes a delivery an earlier run left open', async () => {
+  // The board holds one item, and it is NOT ready: its delivery reached pr_open and the run that
+  // did that is gone. Selecting only `ready` work is how such an item stayed unfinished forever —
+  // the sweep reported it and only a human could act, and a human resetting it re-ran the agent
+  // and pushed a second branch for work that was already reviewed.
+  const h = harness([{ id: 'ITEM-9', state: 'pr_open' }]);
+  h.board.records.set('ITEM-9', {
+    schema: 1,
+    runId: 'run-that-died',
+    item: 'ITEM-9',
+    reviewRound: 0,
+    updatedAt: '2026-09-16T00:00:00.000Z',
+    deliveryRef: '#3',
+    branch: 'takumi/9-a1b2c3',
+  });
+  const hints: Array<{ branch: string } | undefined> = [];
+  const result = await runPilotTick({
+    ...h.deps,
+    prepareWorktree: async (item, runId, resume) => {
+      hints.push(resume);
+      return h.deps.prepareWorktree(item, runId);
+    },
+  });
+
+  assert.equal(result.outcome, 'delivered', 'the resumed delivery must run to its end');
+  assert.equal(result.itemId, 'ITEM-9');
+  assert.deepEqual(hints, [{ branch: 'takumi/9-a1b2c3' }], 'the tick must ask for the branch the record names');
+  assert.equal(h.delivery.prCount, 1, 'the delivery step still runs (it reuses the open pull request)');
+});
+
+test('runPilotTick: an in-flight item whose record names no branch is left alone, not guessed at', async () => {
+  // Without the branch there is nothing to resume: a tick must not invent one, because a wrong
+  // branch means a wrong delivery. This is the "skip rather than guess" half of the rule.
+  const h = harness([{ id: 'ITEM-9', state: 'pr_open' }]);
+  h.board.records.set('ITEM-9', {
+    schema: 1,
+    runId: 'run-that-died',
+    item: 'ITEM-9',
+    reviewRound: 0,
+    updatedAt: '2026-09-16T00:00:00.000Z',
+    deliveryRef: '#3',
+  });
+  const result = await runPilotTick(h.deps);
+  assert.equal(result.outcome, 'idle');
+  assert.equal(h.delivery.prCount, 0);
 });

@@ -38,6 +38,9 @@ importers:
       '@takumi/delivery-fake':
         specifier: workspace:*
         version: link:../../deliveries/fake
+      '@takumi/delivery-git':
+        specifier: workspace:*
+        version: link:../../deliveries/git
       '@takumi/delivery-github':
         specifier: workspace:*
         version: link:../../deliveries/github
@@ -53,6 +56,9 @@ importers:
       '@takumi/runtime-fake':
         specifier: workspace:*
         version: link:../../runtimes/fake
+      '@takumi/runtime-openhands':
+        specifier: workspace:*
+        version: link:../../runtimes/openhands
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
@@ -171,6 +177,19 @@ importers:
         specifier: ^5.6.0
         version: 5.9.3
 
+  deliveries/git:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
   deliveries/github:
     dependencies:
       '@takumi/core':
@@ -237,6 +256,19 @@ importers:
         version: 5.9.3
 
   runtimes/fake:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  runtimes/openhands:
     dependencies:
       '@takumi/core':
         specifier: workspace:*

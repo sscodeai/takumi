@@ -7,6 +7,7 @@ import {
   BOARD_WORK_ITEM_STATES,
   BoardError,
   BoardUnsupportedError,
+  decideClaim,
   renderCreateMarker,
   runTaskBoardProviderContractSuite,
   validateBoardCapabilities,
@@ -143,13 +144,39 @@ class ProbeProvider implements TaskBoardProvider {
 
   async claim(id: string, runId: string): Promise<ClaimResult> {
     const entry = this.must(id);
-    if (entry.claim !== undefined) {
+    // The same rule the adapters run (decideClaim): this probe is the yardstick the suite is
+    // calibrated against, so it must not answer a different contract than the adapters do.
+    // A board that keeps no machine-readable state has no record to read — and must not be
+    // asked for one (reading it is a capability violation, not a fallback). Read the DECLARED
+    // capabilities (`capabilities()`), not the field they are merged into: the two disagreeing
+    // is exactly the bug this probe exists to avoid.
+    const declared = this.capabilities();
+    const record = declared.machineReadableState ? await this.readState(id) : null;
+    const decision = decideClaim({ state: entry.item.state, record, runId });
+    if (!decision.claimed) {
       if (this.opts.breakSilentReclaim) return { item: id, runId, claimed: true };
-      return { item: id, runId, claimed: false, reason: `already claimed by ${entry.claim}` };
+      return { item: id, runId, claimed: false, reason: decision.reason };
     }
     entry.claim = runId;
     entry.item.state = 'claimed';
-    return { item: id, runId, claimed: true };
+    if (declared.machineReadableState) {
+      await this.writeState(id, {
+      schema: 1,
+      runId,
+      item: id,
+      reviewRound: 0,
+      updatedAt: new Date().toISOString(),
+        ...(decision.takeoverFrom === undefined
+          ? {}
+          : { note: `took over from run ${decision.takeoverFrom}` }),
+      });
+    }
+    return {
+      item: id,
+      runId,
+      claimed: true,
+      ...(decision.takeoverFrom === undefined ? {} : { takeoverFrom: decision.takeoverFrom }),
+    };
   }
 
   async transition(id: string, to: BoardWorkItemState): Promise<void> {

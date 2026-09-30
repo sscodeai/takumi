@@ -39,6 +39,24 @@ export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
+
+// The deterministic reviewer (ADR-013): rules over the real change set, pure and testable.
+export type {
+  ReviewFileChange,
+  ReviewFinding,
+  ReviewInput,
+  ReviewRules,
+  ReviewSeverity,
+} from './review-rules.js';
+export {
+  describeFindings,
+  hasBlockingFinding,
+  hasHumanFinding,
+  isTestPath,
+  runReviewRules,
+} from './review-rules.js';
+export { collectReviewInput, createRuleReviewer } from './review.js';
+export type { CollectReviewInputOptions, RuleReviewerOptions } from './review.js';
 export type { Sandbox, SandboxOptions, SandboxResult } from './sandbox.js';
 export { DockerSandbox, NoopSandbox, dockerAvailable } from './sandbox-docker.js';
 export { UnshareSandbox } from './sandbox-unshare.js';
@@ -73,6 +91,7 @@ export {
   BoardUnsupportedError,
   validateBoardCapabilities,
   assertBoardCapability,
+  decideClaim,
   assertScopeQuery,
   runTaskBoardProviderContractSuite,
 } from './task-board.js';

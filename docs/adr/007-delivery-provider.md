@@ -120,7 +120,39 @@ remote) is a natural next adapter, not a reason to weaken the port.
 - Gains: the three rules are executable and tested; a board without a review
   surface composes with a host that has one; and the merge of an unreviewed commit
   requires defeating both our check and the host's.
-- Deliberately still open: a `deliveries/git` (bare remote, no PR), a
+- Deliberately still open: a `deliveries/git` (bare remote, no PR). **CORRECTION (2026-09-19):
+  this believed "no port change" was needed. It was wrong — RESOLVED by ADR-015** (see the dated
+  correction note below for what it cost, and what the ordering rule is).
   conflict-resolution policy (today a conflicting base merge is aborted and handed
   to the review session), and multi-host fan-out (one change delivered to several
-  hosts) — none of which need a port change.
+  hosts).
+
+  **[Correction, 2026-09-19] `deliveries/git` DOES need a port change**, and the sentence
+  that claimed otherwise has been removed. Reading the code before building it showed why:
+  the loop already tolerates a missing pull request on every FAILURE path (`pr === undefined`
+  guards on the blocked and filing branches, including "No pull request was opened."), but
+  its happy path does not — `pr = delivered.pr` is unconditional, the delivered/review events
+  name `pr.number`, `checks(pr)` is called with it, and `merge(pr, { expectedHeadSha })` takes
+  a `PullRequestRef`. So a bare-remote provider cannot be written behind today's port without
+  either inventing a fake pull request (which would make the events lie) or generalizing the
+  reference the port passes around. The honest shape is a `DeliveryRef` (branch + head +
+  optional review surface), with PR-specific events and the checks phase gated on
+  `capabilities().canOpenPullRequest` / `canRunChecks` — a port change that ADR-015 describes.
+
+  **RESOLVED (2026-09-19, ADR-015)**: the suite now gates every pull-request-shaped assertion on
+  `canOpenPullRequest` and FAILS a provider whose report disagrees with its own declaration, so a
+  bare-remote delivery passes the same gate as the forge adapters while proving it claims nothing
+  it does not have. The lesson is in the ledger's class list: when a contract suite blocks a port
+  change, the suite is the first file to touch — not the last. Both attempts that started from the
+  loop were reverted; the one that started from the suite landed.
+  the reason this is a separate slice rather than an afternoon of adapter code.
+
+  **[Measured, same day]** Making `DeliveryOutcome.pr` optional was tried and reverted, and the
+  experiment is the useful part: the port change itself is one line, but it broke the **shared
+  delivery contract suite** in more than twenty places — every assertion that names a pull
+  request ("the same call twice does not open two", "the merged head is the reviewed one")
+  assumes one exists. That suite is the safety net for three adapters, so it must be taught
+  capability-aware expectations (the way the board suite reports `PASS_WITH_NOT_RUN`) BEFORE a
+  no-PR adapter can inherit it. Doing the port change first would have meant either weakening
+  those assertions or writing an adapter the suite cannot judge — which is why the work stopped
+  at a green tree rather than half-way through a port change.
