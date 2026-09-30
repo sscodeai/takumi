@@ -1,8 +1,10 @@
 # ADR-017: Mirror Boards — One Authority, N Write-Only Projections
 
 - **Date**: 2026-09-19
-- **Status**: Accepted, **core only** (`MirroringBoard` in `packages/core`; the CLI/config wiring is
-  the next slice and is named at the bottom)
+- **Status**: Accepted and **WIRED** (2026-09-25): `MirroringBoard` in `packages/core`, plus
+  `pilot.boardMirrors` in `takumi.yaml`, `takumi pilot --resync`, and a persisted id map. Verified
+  through the command against the fake board; the live check against a real Notion database is the
+  remaining step (it needs a token).
 - **Related**: ADR-006/007 (the two ports), ADR-008 (the event registry), the "progress write-back
   is a bypass" invariant, and the ledger's "a field nobody reads" class
 
@@ -38,9 +40,11 @@ thing to build.
 4. **Identity is carried by a marker, not by hope.** A mirror item is created with
    `<!-- takumi:mirror:<primaryId> -->` in its body and an idempotency key derived from the primary
    item, so a re-run — or a `resync` after a restart — cannot duplicate it.
-5. **What is mirrored is what a PERSON reads**: the delivery state and the comments. The state
-   RECORD is deliberately **not** mirrored: it is the control-flow surface, and copying it into a
-   human-facing board would invite exactly the confusion rule 1 exists to prevent.
+5. **What is mirrored is what a PERSON reads**: the delivery state, the item's TITLE and TEXT, its
+   LABELS and the comments (ADR-023 added the text and the labels; the state record is still the
+   control-flow surface and is deliberately **not** mirrored). A mirror that carries only some of
+   those is a CONFIGURATION (`labels: false` for a board with no labels column), never a runtime
+   decision made by guessing what someone else's error meant.
 6. **Outbound only.** Nothing in a mirror creates work or drives state. An inbound path (someone
    files an idea in Notion and it becomes a real issue in the primary) is a different feature with
    different semantics — who is allowed, dedupe, what the created item looks like — and is
@@ -57,8 +61,22 @@ thing to build.
   projected where and what each mirror can represent (Notion: append-only comments, no state
   creation).
 - A mirror that cannot create work is reported once per attempt and skipped, never silently absent.
-- **Still to wire (named, not hand-waved)**: `pilot.boardMirrors` in the CLI config, building the
-  decorator in `createProviders`, a `takumi board --resync` command, persisting the id map next to
-  the slot dir, and a real check against a real Notion database. Until that lands, this decorator
-  is reachable only from code — which is the "a capability with no reader" smell this project keeps
-  removing, and why it is the very next slice rather than a later one.
+- **WIRED (2026-09-25)**, which is what the line above asked for: `pilot.boardMirrors` in the config,
+  the decorator built where the board is built (through the same provider factory `takumi board`
+  uses), `takumi pilot --resync` (a resync is not a tick, and asking for one with no mirrors says so
+  instead of printing nothing), the id map persisted next to the slot dir (loaded tolerantly, written
+  after the work, and a write failure reported rather than thrown — a cache must not be able to fail a
+  tick that already happened), and what is projected WHERE printed on every tick. The whole wiring is
+  driven through the COMMAND in tests, not the class.
+- **CLOSED OUT (2026-09-25, second pass)**: the projection is verified against a LIVE Notion database:
+  a real GitLab item delivered end to end appeared as a page (created at claim, `pr_open`, `merged`,
+  plus the merge comment), and `pilot --resync` projected all eight items with `failed 0` — twice, with
+  the page count unchanged, so identity holds. `resync` now RE-ASSERTS the create (ADR-023): trusting
+  the id map meant a copy that existed but was MISSING its text or labels could never be completed, and
+  the eight pages filed before bodies were carried were completed exactly that way.
+- **CORRECTION (2026-09-25)**:"projections are rebuildable" was **false** until bug #21.
+  item was created at `ready` and then walked to the projected state — but the only edge out of `ready`
+  is `claimed`, so a resync of anything in flight died with `projected 1, failed 1`. The port already
+  carried the answer (`BoardWorkItemSpec.state`, honoured by all six adapters); the mirror never passed
+  it. The double in core's suite hardcoded `state: 'ready'` too, so it agreed with the bug: only a real
+  CALLER could expose it, which is the argument for wiring a capability in the slice that builds it.

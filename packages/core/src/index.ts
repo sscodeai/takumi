@@ -30,10 +30,25 @@ export type {
 } from './extensions.js';
 export { discoverExtensions } from './extensions.js';
 
-export type { WorkflowDefinition, WorkflowRun, WorkflowStep, StepType } from './workflow.js';
-export { topoSort, groupByLevel } from './workflow.js';
-export { executeWorkflow, renderPrompt, resolveStepPrompt } from './workflow-engine.js';
-export type { WorkflowExecutionContext, WorkflowRunResult, WorkflowStepResult } from './workflow-engine.js';
+export type { WorkflowDefinition, WorkflowRun, WorkflowStep, StepType, WorkflowManifestIssue } from './workflow.js';
+export {
+  WORKFLOW_STEP_TYPES,
+  isWorkflowStepType,
+  topoSort,
+  groupByLevel,
+  validateWorkflowManifest,
+} from './workflow.js';
+export { executeWorkflow, renderPrompt, resolveStepPrompt, parseReviewVerdict } from './workflow-engine.js';
+export type {
+  WorkflowExecutionContext,
+  WorkflowRunResult,
+  WorkflowStepResult,
+  ParsedReviewVerdict,
+  ReviewVerdict,
+} from './workflow-engine.js';
+
+export { parseTestReport, judgeGate } from './quality-gate.js';
+export type { TestReport, TestShape } from './quality-gate.js';
 
 export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
