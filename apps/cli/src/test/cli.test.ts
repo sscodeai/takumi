@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initProject } from '../init.js';
-import { loadConfig, loadWorkflow, resolveRuntime, runTask } from '../commands.js';
+import { loadConfig, loadWorkflow, resolveRuntime, runTask, workflowExitCode } from '../commands.js';
 
 function makeProject(): string {
   const dir = mkdtempSync(join(tmpdir(), 'takumi-cli-test-'));
@@ -127,6 +127,51 @@ test('runTask: a workflow containing rule_review runs to completion over a real 
     const out = await runTask({ cwd: dir, prompt: 'review the change', runtimeId: 'fake', workflow: 'rule-check', config: cfg });
     assert.match(out.summary, /workflow "rule-check" completed/);
     assert.ok(out.artifacts.some((path) => path.endsWith('rules.md')), `the findings artifact is in the delivery (${out.artifacts.join(', ')})`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The exit code is the only thing a CI job can read. Before this fix the CLI
+// printed `✓ workflow "..." failed` and exited 0, so a failed delivery (and a
+// failed black-box acceptance) was indistinguishable from a green one.
+test('runTask: a failed workflow reports its status, and the CLI exit code follows it', async () => {
+  const dir = makeProject();
+  try {
+    writeFileSync(join(dir, 'gate.sh'), '#!/bin/sh\necho "# tests 1"\necho "# pass 0"\necho "# fail 1"\nexit 1\n');
+    const wfDir = join(dir, 'extensions/workflows/failing-gate');
+    mkdirSync(wfDir, { recursive: true });
+    writeFileSync(
+      join(wfDir, 'workflow.yaml'),
+      [
+        'name: failing-gate',
+        'version: 0.1.0',
+        'description: a gate that cannot pass',
+        'steps:',
+        '  - id: gate',
+        '    type: quality_gate',
+        '    prompt: sh gate.sh',
+        '  - id: ship',
+        '    type: delivery',
+        '    prompt: ship the delivery',
+        '    dependsOn: [gate]',
+        '',
+      ].join('\n'),
+    );
+    const cfg = loadConfig(dir);
+    const out = await runTask({ cwd: dir, prompt: 'ship it', runtimeId: 'fake', workflow: 'failing-gate', config: cfg });
+
+    assert.equal(out.status, 'failed', 'the workflow outcome must reach the caller');
+    assert.match(out.summary, /workflow "failing-gate" failed/);
+    assert.equal(workflowExitCode(out.status), 1, 'a failed workflow must not exit 0');
+    assert.ok(
+      !out.artifacts.some((p) => p.includes('delivery')),
+      `nothing may be delivered after a failed gate (${out.artifacts.join(', ')})`,
+    );
+
+    assert.equal(workflowExitCode(undefined), 0, 'the plain path has no workflow outcome');
+    assert.equal(workflowExitCode('completed'), 0);
+    assert.equal(workflowExitCode('cancelled'), 1, 'a rejected approval is not a success either');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -266,6 +266,8 @@ export async function runTask(opts: RunOptions): Promise<{
   summary: string;
   artifacts: string[];
   traceabilityMatrix?: string;
+  /** The workflow's own outcome. Absent on the plain (non-workflow) path. */
+  status?: 'completed' | 'failed' | 'cancelled';
 }> {
   const runtime = await resolveRuntime(opts.runtimeId, opts.sandbox);
   const store = new ArtifactStore(join(opts.cwd, opts.config.artifacts));
@@ -364,6 +366,7 @@ export async function runTask(opts: RunOptions): Promise<{
       summary: `workflow "${opts.workflow}" ${result.status}`,
       artifacts: result.steps.flatMap((s) => s.artifacts),
       traceabilityMatrix: matrix,
+      status: result.status,
     };
   }
 
@@ -395,6 +398,17 @@ export async function runTask(opts: RunOptions): Promise<{
     summary: result.summary,
     artifacts: result.artifacts.map((a) => a.path),
   };
+}
+
+/**
+ * The process exit code for a run. A workflow that FAILED (or was cancelled) is
+ * not a success: before this, the CLI printed `✓ workflow "<name>" failed` and
+ * exited 0, so a CI job could not tell a failed delivery from a green one, and a
+ * failed black-box acceptance looked like a shipped feature. The plain
+ * (non-workflow) path has no workflow outcome and stays 0.
+ */
+export function workflowExitCode(status?: 'completed' | 'failed' | 'cancelled'): number {
+  return status === undefined || status === 'completed' ? 0 : 1;
 }
 
 /** List extensions from the registry dirs in the project config. */

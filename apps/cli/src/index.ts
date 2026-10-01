@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { listExtensions, loadConfig, runTask } from './commands.js';
+import { listExtensions, loadConfig, runTask, workflowExitCode } from './commands.js';
 import { initProject } from './init.js';
 import { createBoardProvider, runBoardCommand } from './board-command.js';
 import { eventLogFor, runOnce, type PilotConfig } from './run-command.js';
@@ -113,7 +113,7 @@ async function main(argv: string[]): Promise<number> {
       console.log(`  prompt: ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`);
       console.log('');
 
-      const { events, summary, traceabilityMatrix, artifacts } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox, resume });
+      const { events, summary, traceabilityMatrix, artifacts, status } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox, resume });
 
       for (const ev of events) console.log(`  ${ev}`);
       console.log('');
@@ -134,7 +134,9 @@ async function main(argv: string[]): Promise<number> {
         console.log('Artifacts:');
         console.log('  (none produced in this run)');
       }
-      return 0;
+      // A failed (or cancelled) workflow is not a success: the exit code is the
+      // only thing a CI job can read. The plain path has no status and stays 0.
+      return workflowExitCode(status);
     }
 
     case 'loop': {
