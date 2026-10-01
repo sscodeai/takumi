@@ -1,0 +1,7 @@
+runtime: fake
+registry:
+  skills: extensions/skills
+  tools: extensions/tools
+  workflows: extensions/workflows
+  runtimes: runtimes
+artifacts: .takumi/artifacts
