@@ -24,9 +24,12 @@ import {
   type ReviewFinding,
 } from './review-rules.js';
 import { randomUUID } from 'node:crypto';
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { requirementDigest, shortDigest } from './review-digest.js';
 const execAsync = promisify(exec);
+/** Runs a harness FILE without a shell, so a path in a manifest is never a shell string. */
+const execFileAsync = promisify(execFile);
 
 export interface WorkflowExecutionContext {
   /** Project working directory (steps run here). */
@@ -48,6 +51,15 @@ export interface WorkflowExecutionContext {
    * git itself, so a test can inject a runner that refuses.
    */
   git?: GitRunner;
+  /**
+   * The requirement digest a human CONFIRMED for this run, and the ref it covers (ADR-025).
+   *
+   * An `acceptance` step refuses to run when the document at its `requirementRef` does not hash to
+   * this digest: the confirmation and the acceptance must be about the same document, and a document
+   * edited after the confirmation fails the step by name. Absent means no confirmation is on record,
+   * which fails the step — an acceptance nobody confirmed is a machine grading its own work.
+   */
+  confirmedRequirement?: { ref: string; digest: string };
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
   /**
@@ -146,6 +158,50 @@ export function parseReviewVerdict(text: string): ParsedReviewVerdict {
   const unique = [...new Set(seen)];
   if (unique.length > 1) {
     return { error: `ambiguous REVIEW_VERDICT: the review emitted both ${unique.join(' and ')}` };
+  }
+  return { verdict: unique[0] };
+}
+
+/** The values an acceptance harness may report. */
+export const ACCEPT_VERDICT_VALUES = ['pass', 'fail'] as const;
+export type AcceptVerdict = (typeof ACCEPT_VERDICT_VALUES)[number];
+
+export interface ParsedAcceptVerdict {
+  verdict?: AcceptVerdict;
+  error?: string;
+}
+
+/**
+ * Read the acceptance harness's verdict from a STRUCTURED marker (ADR-025), never from its prose.
+ *
+ * The harness is written by the same side that wants the delivery accepted, so its sentences are
+ * not evidence. `ACCEPT_VERDICT: pass` is the only thing that makes the step pass, and fail-closed
+ * is the rule the rest of this engine already follows: a missing marker, an unknown value, or two
+ * conflicting markers all produce an error and NO verdict — which fails the step.
+ */
+export function parseAcceptVerdict(text: string): ParsedAcceptVerdict {
+  const seen: AcceptVerdict[] = [];
+  let unknown: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*ACCEPT_VERDICT\s*[:=]\s*(\S+)\s*$/i.exec(line);
+    if (!match) continue;
+    const raw = normaliseVerdictToken(match[1] ?? '');
+    const value = raw.toLowerCase();
+    if ((ACCEPT_VERDICT_VALUES as readonly string[]).includes(value)) {
+      seen.push(value as AcceptVerdict);
+    } else if (unknown === undefined) {
+      unknown = raw;
+    }
+  }
+  if (unknown !== undefined) {
+    return { error: `unrecognised ACCEPT_VERDICT value "${unknown}" (expected pass or fail)` };
+  }
+  if (seen.length === 0) {
+    return { error: 'the acceptance verdict marker "ACCEPT_VERDICT: <pass|fail>" was missing' };
+  }
+  const unique = [...new Set(seen)];
+  if (unique.length > 1) {
+    return { error: `ambiguous ACCEPT_VERDICT: the harness emitted both ${unique.join(' and ')}` };
   }
   return { verdict: unique[0] };
 }
@@ -299,6 +355,12 @@ export async function executeWorkflow(
   // Steps that did not run because their own dependencies were unmet. A skipped
   // step must propagate: it is not evidence that its dependency succeeded.
   const skippedIds = new Set<string>();
+  // Per-run sequential ids for ACCEPT artifacts, in manifest order (ACCEPT-001, ...). An acceptance
+  // is identified by the requirement it is about, so several in one workflow stay distinguishable.
+  const acceptanceIds = new Map<string, string>();
+  for (const s of workflow.steps) {
+    if (s.type === 'acceptance') acceptanceIds.set(s.id, `ACCEPT-${String(acceptanceIds.size + 1).padStart(3, '0')}`);
+  }
 
   try {
     // P2 parallel: pre-execute all no-dependency AGENT steps concurrently.
@@ -707,6 +769,157 @@ export async function executeWorkflow(
           ctx.onEvent?.(stepId, `independent review FAILED (${verdictLine}) — workflow aborted`);
         } else {
           ctx.onEvent?.(stepId, `independent review passed`);
+        }
+        done.add(stepId);
+        continue;
+      }
+
+      // Acceptance step (ADR-025): a verdict about ONE confirmed requirement document, produced by a
+      // harness that is NOT the implementation's own test.
+      //
+      // Three things make the verdict mean something, and each has its own refusal: the document at
+      // `requirementRef` must hash to the digest a human confirmed (an edited requirement fails by
+      // name), the harness must report a structured `ACCEPT_VERDICT` marker (prose decides nothing,
+      // and a missing marker fails), and the harness file is executed without a shell. Only a
+      // passing verdict writes an ACCEPT artifact — a failure writes none, so an artifact named
+      // ACCEPT cannot exist for a run that was not accepted.
+      if (step.type === 'acceptance') {
+        run.stepStatus[stepId] = 'running';
+        const requirementRef = step.requirementRef?.trim() ?? '';
+        const acceptanceRef = step.acceptanceRef?.trim() ?? '';
+        const reject = (message: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary: message, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `acceptance FAILED: ${message.split('\n')[0] ?? message}`);
+        };
+
+        // Defence in depth: the manifest validator already refuses both absences at load time.
+        if (requirementRef.length === 0 || acceptanceRef.length === 0) {
+          reject(`an acceptance requires a requirementRef and an acceptanceRef (got "${requirementRef}" / "${acceptanceRef}")`);
+          done.add(stepId);
+          continue;
+        }
+
+        const path = await import('node:path');
+        const fsMod = await import('node:fs');
+        let requirementText: string;
+        try {
+          requirementText = fsMod.readFileSync(path.join(ctx.cwd, requirementRef), 'utf8');
+        } catch (e) {
+          reject(
+            `the requirement document "${requirementRef}" could not be read (${e instanceof Error ? e.message : String(e)})`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        const digest = requirementDigest(requirementText);
+        if (ctx.confirmedRequirement === undefined) {
+          reject(
+            `no confirmed requirement is on record for this run, so this acceptance cannot be bound to one (the document at "${requirementRef}" hashes to ${shortDigest(digest)})`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        if (ctx.confirmedRequirement.digest !== digest) {
+          reject(
+            `the requirement document "${requirementRef}" is not the one that was confirmed (confirmed ${shortDigest(ctx.confirmedRequirement.digest)} at "${ctx.confirmedRequirement.ref}", the document now hashes to ${shortDigest(digest)}): re-confirm the edited document before it can be accepted`,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        let out = '';
+        let exitOk = true;
+        try {
+          const r = await execFileAsync('bash', [acceptanceRef], { cwd: ctx.cwd, timeout: step.timeoutMs ?? 300000 });
+          out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+        } catch (e) {
+          exitOk = false;
+          const shell = e as { stdout?: string; stderr?: string };
+          out = `${shell.stdout ?? ''}${shell.stderr ?? ''}` || (e instanceof Error ? e.message : String(e));
+        }
+        const verdict = parseAcceptVerdict(out);
+        const checks = [...out.matchAll(/^(ok|not ok)\s+\d+\s*-\s*(.+)$/gm)].map((m) => ({
+          result: m[1] === 'ok' ? 'pass' : 'fail',
+          check: (m[2] ?? '').trim(),
+        }));
+        const head = await (async (): Promise<string | undefined> => {
+          try {
+            const g = ctx.git ?? createGitRunner();
+            const r = await g.run(['rev-parse', 'HEAD']);
+            return r.exitCode === 0 ? r.stdout.trim() : undefined;
+          } catch {
+            return undefined;
+          }
+        })();
+        const accepted = exitOk && verdict.verdict === 'pass';
+        const id = acceptanceIds.get(stepId) ?? 'ACCEPT-001';
+        const requirements = extractTraceIds(requirementText).filter((t) => t.startsWith('REQ-'));
+        const summary = [
+          `acceptance ${accepted ? 'PASSED' : 'FAILED'}: ${accepted ? 'the confirmed requirement is satisfied' : (verdict.error ?? 'the harness reported a failing verdict')}`,
+          `harness: ${acceptanceRef}`,
+          `requirement: ${requirementRef} sha256:${shortDigest(digest)}`,
+          `confirmed: ${ctx.confirmedRequirement.ref} sha256:${shortDigest(ctx.confirmedRequirement.digest)}`,
+          `verdict: ${verdict.verdict ?? '(none)'}`,
+          `checks: ${checks.filter((c) => c.result === 'pass').length}/${checks.length} ok`,
+          `exit: ${exitOk ? 0 : '!0'}`,
+          out.slice(0, 1200),
+        ].join('\n');
+
+        if (accepted) {
+          const artifact = [
+            `# ${id}`,
+            '',
+            '```yaml',
+            `id: ${id}`,
+            'kind: acceptance',
+            'requirement:',
+            `  ref: ${requirementRef}`,
+            `  digest: sha256:${digest}`,
+            `  requirements: [${requirements.join(', ')}]`,
+            'artifact:',
+            `  head: ${head ?? 'unknown'}`,
+            'acceptance:',
+            `  harness: ${acceptanceRef}`,
+            '  verdict: pass',
+            `  verdictMarker: "ACCEPT_VERDICT: ${verdict.verdict}"`,
+            ...(checks.length === 0 ? ['  checks: []'] : ['  checks:', ...checks.map((c) => `    - "${c.result}: ${c.check.replace(/"/g, "'")}"`)]),
+            'confirmed:',
+            `  ref: ${ctx.confirmedRequirement.ref}`,
+            `  digest: sha256:${ctx.confirmedRequirement.digest}`,
+            'invalidatedBy:',
+            '  - requirement-digest-change',
+            '  - head-move',
+            '```',
+            '',
+          ].join('\n');
+          let artifactPath: string | undefined;
+          try {
+            const art = await ctx.artifacts.write({
+              taskId: `${runId}:${stepId}`,
+              kind: 'acceptance',
+              fileName: `${id}.md`,
+              content: artifact,
+              contentType: 'text/markdown',
+              trace: requirements,
+            });
+            artifactPath = art.path;
+          } catch (e) {
+            ctx.onEvent?.(stepId, `artifact persist failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          run.stepStatus[stepId] = 'completed';
+          stepResults.push({
+            stepId,
+            status: 'completed',
+            summary,
+            artifacts: artifactPath === undefined ? [] : [artifactPath],
+            tests: [],
+          });
+          ctx.onEvent?.(stepId, `acceptance PASSED (${checks.length} check(s) ok) — ${id} written`);
+        } else {
+          reject(summary);
         }
         done.add(stepId);
         continue;

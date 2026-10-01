@@ -21,6 +21,7 @@ export const WORKFLOW_STEP_TYPES = [
   'quality_gate',
   'independent_review',
   'rule_review',
+  'acceptance',
   'delivery',
 ] as const;
 
@@ -65,6 +66,20 @@ export interface WorkflowStep {
   headRef?: string;
   /** `rule_review`: rule configuration; absent means the deterministic defaults. */
   rules?: ReviewRules;
+  /**
+   * `acceptance`: the CONFIRMED requirement document this acceptance is about, as a path relative to
+   * the project (ADR-025). Required: an acceptance that is not bound to a requirement is not an
+   * acceptance — it is a machine grading its own work.
+   */
+  requirementRef?: string;
+  /**
+   * `acceptance`: the harness command the step runs, relative to the project. Required: with
+   * nothing to run there is no verdict to report.
+   *
+   * Executed with the file name resolved by `bash` (the PoC-2 harness is a shell script), so a path
+   * with a space is not a shell-injection question — no shell parses it.
+   */
+  acceptanceRef?: string;
 }
 
 export interface WorkflowManifestIssue {
@@ -104,6 +119,24 @@ export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManif
     }
     if (step?.type === 'rule_review' && (typeof step.baseRef !== 'string' || step.baseRef.trim().length === 0)) {
       issues.push({ stepId, message: `step ${stepId} is a rule_review and requires a non-empty baseRef` });
+    }
+    if (step?.type === 'acceptance') {
+      // An acceptance is a verdict about ONE requirement document, judged by a harness that lives
+      // outside the thing it judges. Refusing both absences here means a manifest cannot ship an
+      // acceptance that is decorative: it fails at load, with the reason, instead of at the end of
+      // a long run.
+      if (typeof step.requirementRef !== 'string' || step.requirementRef.trim().length === 0) {
+        issues.push({
+          stepId,
+          message: `step ${stepId} is an acceptance and requires a non-empty requirementRef (the confirmed requirement document it is about)`,
+        });
+      }
+      if (typeof step.acceptanceRef !== 'string' || step.acceptanceRef.trim().length === 0) {
+        issues.push({
+          stepId,
+          message: `step ${stepId} is an acceptance and requires a non-empty acceptanceRef (the harness to run)`,
+        });
+      }
     }
   }
   return issues;

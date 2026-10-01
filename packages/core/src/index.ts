@@ -38,8 +38,17 @@ export {
   groupByLevel,
   validateWorkflowManifest,
 } from './workflow.js';
-export { executeWorkflow, renderPrompt, resolveStepPrompt, parseReviewVerdict } from './workflow-engine.js';
+export {
+  ACCEPT_VERDICT_VALUES,
+  executeWorkflow,
+  renderPrompt,
+  resolveStepPrompt,
+  parseAcceptVerdict,
+  parseReviewVerdict,
+} from './workflow-engine.js';
 export type {
+  AcceptVerdict,
+  ParsedAcceptVerdict,
   WorkflowExecutionContext,
   WorkflowRunResult,
   WorkflowStepResult,
