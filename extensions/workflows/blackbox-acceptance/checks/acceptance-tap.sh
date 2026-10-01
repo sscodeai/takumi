@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# PoC-1 acceptance stand-in harness for the blackbox-acceptance workflow.
+# The acceptance harness for the blackbox-acceptance workflow (ADR-025).
 #
-# This is a REAL fail-closed harness, not decoration. It runs with cwd = the
-# project root and prints TAP so the quality_gate step that invokes it can parse
-# the result. Every check prints `ok N - ...` or `not ok N - ...`, and the run
-# exits non-zero if any check fails. Unknown or unreadable state is a failure.
+# A REAL fail-closed harness, not decoration. It runs with cwd = the project root, and it judges the
+# artefact-level evidence the run produced. Two signals come out of it:
 #
-# It is the PoC-1 stand-in for the first-class `acceptance` step type that
-# PoC-2 adds; that step will bind the verdict to a requirement digest.
+#   * TAP lines (`ok N - …` / `not ok N - …`) plus a `# tests/# pass/# fail` summary, so the shape of
+#     the result is readable by both the engine's test-report parser and a human;
+#   * one structured `ACCEPT_VERDICT: pass|fail` marker, which is the ONLY thing the acceptance step
+#     reads as a verdict — the engine's prose decides nothing, and a missing marker fails the step.
+#
+# Scope, honestly stated: with the `fake` runtime the agent steps' artifacts are the prompt echoed
+# back, so checks 4-6 prove the run's wiring and the harness's own fail-closed behaviour, not the
+# quality of an intake. Checks 1-3 are about the CONFIRMED requirement document, which is a real
+# human artefact. Replacing the fake runtime is what turns this into a behavioural acceptance; the
+# step type, the digest binding and the refusal paths do not change when it is replaced.
 
 set -u
 
-REQ_DOC=".takumi/artifacts/req/req_intake.md"
+REQ_DOC="docs/requirements/poc-blackbox-acceptance.yaml"
+INTAKE_DOC=".takumi/artifacts/req/req_intake.md"
 IMPL_DOC=".takumi/artifacts/implementation/implementation.md"
 UNIT_DOC=".takumi/artifacts/unit/unit_and_integration_tests.md"
 
@@ -31,47 +38,42 @@ not_ok() {
   printf 'not ok %d - %s\n' "$N" "$1"
 }
 
-# (a) the requirement intake artifact exists.
-if [ -f "$REQ_DOC" ]; then
-  ok "requirement intake artifact exists: $REQ_DOC"
+check_file() {
+  if [ -f "$1" ]; then ok "$2"; else not_ok "$2 (missing: $1)"; fi
+}
+
+check_grep() {
+  if grep -Eq "$1" "$2" 2>/dev/null; then ok "$3"; else not_ok "$3 (no match for /$1/ in $2)"; fi
+}
+
+# 1. the confirmed requirement document exists and is a structured requirement document.
+check_file "$REQ_DOC" "the confirmed requirement document exists: $REQ_DOC"
+check_grep '^[[:space:]]*requirements:[[:space:]]*$' "$REQ_DOC" "the requirement document has a requirements list"
+check_grep '^[[:space:]]*-[[:space:]]*id:[[:space:]]*REQ-[0-9]+' "$REQ_DOC" "the requirement document carries REQ-nnn ids"
+
+# 2. the open decisions are recorded, and 3. each one has a chosen option. An acceptance of a
+#    document whose ambiguities were never decided accepts something nobody agreed to.
+check_grep '^[[:space:]]*-[[:space:]]*id:[[:space:]]*AMB-[0-9]+' "$REQ_DOC" "the requirement document records its open decisions (AMB-nnn)"
+AMB_COUNT=$(grep -Ec '^[[:space:]]*-[[:space:]]*id:[[:space:]]*AMB-[0-9]+' "$REQ_DOC" 2>/dev/null)
+CHOSEN_COUNT=$(grep -Ec '^[[:space:]]*chosen:[[:space:]]*\S' "$REQ_DOC" 2>/dev/null)
+if [ "$AMB_COUNT" -gt 0 ] && [ "$CHOSEN_COUNT" -ge "$AMB_COUNT" ]; then
+  ok "every open decision has a chosen option ($CHOSEN_COUNT/$AMB_COUNT)"
 else
-  not_ok "requirement intake artifact is missing: $REQ_DOC"
+  not_ok "not every open decision has a chosen option ($CHOSEN_COUNT/$AMB_COUNT)"
 fi
 
-# (b) the requirement document records open ambiguities. A document with no
-# `ambiguities` key is not a structured requirement document.
-if grep -Eq '^[[:space:]]*ambiguities[[:space:]]*:' "$REQ_DOC" 2>/dev/null; then
-  ok "requirement document contains an ambiguities key"
-else
-  not_ok "requirement document has no ambiguities key: $REQ_DOC"
-fi
+# 4-6. the run's own artefacts exist. Wiring checks under the fake runtime; see the note above.
+check_file "$INTAKE_DOC" "the intake artifact exists: $INTAKE_DOC"
+check_file "$IMPL_DOC" "the implementation artifact exists: $IMPL_DOC"
+check_file "$UNIT_DOC" "the unit and integration test artifact exists: $UNIT_DOC"
 
-# (c) the requirement document carries at least one requirement id.
-if grep -Eq 'REQ-[0-9]+' "$REQ_DOC" 2>/dev/null; then
-  ok "requirement document contains at least one REQ- id"
-else
-  not_ok "requirement document contains no REQ- id: $REQ_DOC"
-fi
-
-# (d) the implementation artifact exists.
-if [ -f "$IMPL_DOC" ]; then
-  ok "implementation artifact exists: $IMPL_DOC"
-else
-  not_ok "implementation artifact is missing: $IMPL_DOC"
-fi
-
-# (e) the unit and integration test artifact exists.
-if [ -f "$UNIT_DOC" ]; then
-  ok "unit and integration test artifact exists: $UNIT_DOC"
-else
-  not_ok "unit and integration test artifact is missing: $UNIT_DOC"
-fi
-
-printf '# tests 5\n'
+printf '# tests %d\n' "$N"
 printf '# pass %d\n' "$PASS"
 printf '# fail %d\n' "$FAIL"
 
 if [ "$FAIL" -eq 0 ]; then
+  printf 'ACCEPT_VERDICT: pass\n'
   exit 0
 fi
+printf 'ACCEPT_VERDICT: fail\n'
 exit 1

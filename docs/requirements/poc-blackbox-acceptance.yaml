@@ -1,0 +1,113 @@
+# The CONFIRMED requirement document for the black-box acceptance PoC (ADR-025).
+#
+# This is the artefact the human confirms and the acceptance step binds to: its digest is the
+# confirmation token. Editing anything that changes what it SAYS changes the digest, and an
+# acceptance whose document no longer hashes to the confirmed token is refused by name.
+#
+# The raw request it was derived from is docs/requirements/poc-blackbox-acceptance.md. The
+# `chosen` values below are the options the human decided at confirmation time; the `default`
+# values were the intake's proposal and are kept so a reader can see what was changed.
+#
+# Format is deliberately boring YAML: it has to be writable by a human and hashable by a machine.
+
+requirement:
+  id: REQ-DOC-001
+  title: Employee CSV summary report
+  source: docs/requirements/poc-blackbox-acceptance.md
+  confirmed:
+    by: moon
+    at: "2026-10-01"
+    method: digest-token
+    token: see `takumi requirement digest docs/requirements/poc-blackbox-acceptance.yaml`
+
+requirements:
+  - id: REQ-001
+    title: Summarise an employee CSV by department
+    description: >
+      Read a CSV with columns employee_id,name,department,start_date,annual_salary and print a
+      per-department summary with the number of employees, the total annual salary and the average
+      annual salary rounded to whole currency units, plus the overall headcount and total salary.
+    acceptance_criteria:
+      - Running the tool on a CSV prints one line per department with count, total and average.
+      - The printed department totals sum to the printed overall total.
+      - A 50,000-row file completes in a few seconds on a developer laptop with no network.
+    priority: High
+    source: "Request: \"a small command-line tool that reads a CSV export of employee records\""
+  - id: REQ-002
+    title: Report malformed rows instead of dying silently
+    description: >
+      A row that cannot be parsed (missing column, non-numeric salary, unparseable date) is skipped
+      and counted, and the count is printed with the summary. The run still exits 0.
+    acceptance_criteria:
+      - A file with 3 malformed rows in 100 prints "3 malformed rows skipped" and the summary of 97.
+      - The exit code is 0 when only malformed rows are skipped.
+    priority: High
+    source: "Open decision: malformed rows"
+  - id: REQ-003
+    title: Resolve duplicate employee_id deterministically
+    description: >
+      When the same employee_id appears more than once, the row with the latest start_date wins; a
+      tie is broken by the last occurrence in file order. The number of duplicate ids resolved is
+      printed.
+    acceptance_criteria:
+      - A file with one duplicated id prints the row with the latest start_date.
+      - The count of resolved duplicates is printed.
+    priority: Medium
+    source: "Open decision: duplicate employee_id"
+  - id: REQ-004
+    title: Write to stdout, optionally to a file
+    description: >
+      The summary goes to stdout. An optional path argument writes the same text to that file and
+      stdout stays unchanged.
+    acceptance_criteria:
+      - With no path argument nothing is written to disk.
+      - With a path argument the file content equals stdout.
+    priority: Medium
+    source: "Open decision: output destination"
+  - id: REQ-005
+    title: Round half-up in the file's single currency
+    description: >
+      No currency is assumed or printed; averages are rounded half-up to whole units and the
+      per-department totals are the sum of the rounded per-row salaries.
+    acceptance_criteria:
+      - A department with two salaries of 100.5 and 101.4 reports a total of 202 and an average of 101.
+    priority: Low
+    source: "Open decision: currency and rounding"
+
+ambiguities:
+  - id: AMB-001
+    question: What happens to a malformed row?
+    options:
+      - "Stop with an error"
+      - "Skip the row, count it, and report the count"
+      - "Skip the row and write it to a rejected-rows file"
+    default: "Skip the row, count it, and report the count"
+    chosen: "Skip the row, count it, and report the count"
+    blocking: true
+  - id: AMB-002
+    question: Which row wins when employee_id repeats?
+    options:
+      - "First row wins"
+      - "Last row wins"
+      - "The row with the latest start_date wins"
+      - "Treat it as an error"
+    default: "First row wins"
+    chosen: "The row with the latest start_date wins"
+    blocking: true
+  - id: AMB-003
+    question: Where does the summary go?
+    options:
+      - "stdout only"
+      - "stdout, plus an optional file path"
+    default: "stdout, plus an optional file path"
+    chosen: "stdout, plus an optional file path"
+    blocking: false
+  - id: AMB-004
+    question: How is the average rounded, and in what currency?
+    options:
+      - "Half-up, no currency printed"
+      - "Truncate, no currency printed"
+      - "Half-up, currency printed with a per-run argument"
+    default: "Half-up, no currency printed"
+    chosen: "Half-up, no currency printed"
+    blocking: true

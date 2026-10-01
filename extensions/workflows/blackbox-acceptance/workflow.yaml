@@ -19,65 +19,34 @@ steps:
   - id: ambiguity_confirmation
     type: approval
     prompt: |
-      CONFIRM REQUIREMENT CONTENT, NOT A STEP NAME.
+      CONFIRM THE REQUIREMENT DOCUMENT, NOT A STEP NAME.
 
-      Requirement document under confirmation: docs/requirements/poc-blackbox-acceptance.md
-      SHA-256 of that document (canonical text as committed): sha256:ad93ff20fee08509934bddfb88ccead2d17633c4be3ab0a0844fe64a96a3776d
+      The document under confirmation is docs/requirements/poc-blackbox-acceptance.yaml. It carries
+      every requirement (REQ-nnn) and every decision the intake found open (AMB-nnn), each with 2-4
+      bounded options and, in `chosen`, the option a human decided.
 
-      The requirement document is reproduced below so this prompt carries the
-      content itself, not a pointer to it:
+      How the confirmation is recorded (ADR-025): run
 
-      --- BEGIN REQUIREMENT DOCUMENT ---
-      # PoC fixture: employee CSV summary report
+        takumi requirement digest docs/requirements/poc-blackbox-acceptance.yaml
 
-      This file is a **PoC fixture** for the black-box acceptance flow. It is the
-      natural-language request fed to the `blackbox-acceptance` workflow's
-      `req_intake` step. It is deliberately under-specified so the intake step has
-      real ambiguity to surface.
-
-      The canonical requirement document format and location are **undecided** (see
-      open question 2 in `docs/design/blackbox-acceptance-scout.md`). This fixture is
-      an input request, not that canonical document.
-
-      ## Request
-
-      We need a small command-line tool that reads a CSV export of employee records
-      and prints a summary report we can paste into a weekly status email.
-
-      Input columns are `employee_id,name,department,start_date,annual_salary`.
-
-      For each department the report must show the number of employees, the total
-      annual salary, and the average annual salary rounded to whole currency units.
-      It must also show the overall headcount and total salary.
-
-      The tool must run on a developer laptop with no services or network access.
-      It must be usable by any engineer on the team, and it must finish on a
-      50,000-row file in a few seconds.
-
-      ## What is left open
-
-      - **Malformed rows.** Stop with an error, or skip the bad row and report the
-        count?
-      - **Duplicate `employee_id`.** First row wins, last row wins, or an error?
-      - **Output destination.** stdout only, or stdout plus an optional file path?
-      - **Salary currency and rounding.** Which currency, and round half-up or
-        truncate before summing?
-      --- END REQUIREMENT DOCUMENT ---
+      and approve that token. The token is the digest of the document's text, and the acceptance
+      step refuses any document that does not hash to it -- so an edit after this confirmation is
+      caught by name instead of being accepted quietly.
 
       Before approving, check:
-      1. The requirement document above is the requirement you want built.
-      2. The intake step's own requirement artifact at
-         .takumi/artifacts/req/req_intake.md records each open decision as an
-         AMB-nnn entry with 2-4 bounded options and a default. If an open decision
-         is missing from that artifact, REJECT and return it to intake.
-      3. For every AMB-nnn entry, the chosen option. Record it in the run notes as
-         AMB-nnn: <chosen option>. Pre-filled defaults are acceptable for this
-         PoC; a bounded-choice UI is a later change.
+      1. Every AMB-nnn entry has a `chosen` option that is one of its own listed `options`. The
+         acceptance harness FAILS on a document that still carries an undecided decision, so an
+         approval of one is an approval of something nobody settled.
+      2. Every REQ-nnn has at least one acceptance criterion a third party could check without
+         reading the implementation.
+      3. The document is the requirement you want built.
 
-      NOTE (PoC-1 limitation, not a workaround): the engine does not interpolate
-      {placeholders} into an approval prompt, so this document and digest are
-      embedded here statically rather than injected from the intake artifact.
-      Confirming the dynamically produced intake artifact itself is PoC-2 work.
+      LIMITATION, stated rather than worked around (PoC-2): the engine does not interpolate
+      {placeholders} into an approval prompt, and the approval callback returns a boolean over
+      three hard-coded options (approve/reject/view). A per-ambiguity bounded-choice UI -- one
+      question at a time, with the chosen option written back into the document -- is design
+      change 8 and is not in this slice. Today the human decides the options in the document and
+      approves its digest.
     dependsOn: [req_intake]
   - id: implementation
     type: agent
@@ -120,14 +89,14 @@ steps:
       reviewed.
     dependsOn: [quality_gate]
   - id: artifact_acceptance
-    type: quality_gate
-    # PoC-1 STAND-IN: this is a quality_gate running a real TAP harness because
-    # the `acceptance` step type does not exist yet. PoC-2 replaces this step
-    # with a first-class `acceptance` step bound to a requirement digest. The
-    # harness fails closed: a missing artifact, a missing ambiguities key, a
-    # missing requirement id, or missing test artifacts all produce `not ok`
-    # lines and a non-zero exit.
-    prompt: bash extensions/workflows/blackbox-acceptance/checks/acceptance-tap.sh
+    # ADR-025: a first-class acceptance step. It is bound to the CONFIRMED requirement document (the
+    # human's digest token travels in --confirmed-requirement) and to a harness that is not the
+    # implementation's own test. The step fails closed on an edited requirement, on a missing
+    # confirmation, and on a missing/failing ACCEPT_VERDICT marker; only a passing verdict writes the
+    # ACCEPT artifact.
+    type: acceptance
+    requirementRef: docs/requirements/poc-blackbox-acceptance.yaml
+    acceptanceRef: extensions/workflows/blackbox-acceptance/checks/acceptance-tap.sh
     dependsOn: [rule_review]
     timeoutMs: 120000
   - id: delivery
