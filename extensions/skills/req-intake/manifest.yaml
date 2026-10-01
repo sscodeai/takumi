@@ -1,0 +1,9 @@
+name: req-intake
+kind: skill
+version: 0.1.0
+description: "Requirement intake for black-box acceptance: turn a natural-language request into a structured requirement document with explicit, bounded open ambiguities."
+prompts:
+  intake: prompts/intake.md
+  confirm: prompts/confirm.md
+resources:
+- SKILL.md
