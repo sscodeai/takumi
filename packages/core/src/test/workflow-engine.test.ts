@@ -152,6 +152,36 @@ test('workflow: failed dependency skips dependents', async () => {
   }
 });
 
+test('workflow: a skipped step stops its OWN dependents, not only the failed step direct children', async () => {
+  const c = ctx();
+  try {
+    const failing = new TestRuntime(() => {
+      throw new Error('hard fail');
+    });
+    const wf: WorkflowDefinition = {
+      name: 'dep-fail-transitive',
+      version: '0.1.0',
+      description: 'one failure must stop the whole chain',
+      steps: [
+        { id: 'a', type: 'agent', prompt: 'a' },
+        { id: 'b', type: 'agent', prompt: 'b', dependsOn: ['a'] },
+        { id: 'c', type: 'agent', prompt: 'c', dependsOn: ['b'] },
+      ],
+    };
+    const res = await executeWorkflow(wf, { cwd: c.dir, runtime: failing, artifacts: c.exec.artifacts, onApproval: () => true });
+    assert.equal(res.status, 'failed');
+    assert.equal(res.steps.find((s) => s.stepId === 'b')?.status, 'skipped');
+    // Before the fix, `c` RAN: the skip test consulted only the FAILED set, so a
+    // skipped dependency looked satisfied. That is how a failed quality_gate let a
+    // later acceptance step and the delivery step run.
+    const cStep = res.steps.find((s) => s.stepId === 'c');
+    assert.equal(cStep?.status, 'skipped', 'a step whose dependency was skipped must not run');
+    assert.match(cStep?.summary ?? '', /dependency skipped/);
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
 test('renderPrompt: substitutes {vars} and leaves unknown intact', () => {
   assert.equal(renderPrompt('hello {name}', { name: 'takumi' }), 'hello takumi');
   assert.equal(renderPrompt('keep {unknown}', {}), 'keep {unknown}');

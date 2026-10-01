@@ -296,6 +296,9 @@ export async function executeWorkflow(
   const byId = new Map(workflow.steps.map((s) => [s.id, s]));
   const done = new Set<string>();
   const failedIds = new Set<string>();
+  // Steps that did not run because their own dependencies were unmet. A skipped
+  // step must propagate: it is not evidence that its dependency succeeded.
+  const skippedIds = new Set<string>();
 
   try {
     // P2 parallel: pre-execute all no-dependency AGENT steps concurrently.
@@ -352,16 +355,25 @@ export async function executeWorkflow(
         run.stepStatus[stepId] = pre.status;
         stepResults.push(pre);
         if (pre.status === 'completed') done.add(stepId);
+        else if (pre.status === 'skipped') skippedIds.add(stepId);
         else failedIds.add(stepId);
         ctx.onEvent?.(stepId, `parallel result: ${pre.status}`);
         continue;
       }
 
-      // Skip a step whose dependencies failed.
+      // Skip a step whose dependencies failed OR were themselves skipped: a step
+      // that did not run cannot be a satisfied dependency. Checking only the
+      // failed set let a failure stop its DIRECT children while the rest of the
+      // pipeline still ran — observed with a failed quality_gate whose dependent
+      // rule_review was skipped, after which artifact_acceptance and delivery both
+      // executed and reported success.
       const deps = step.dependsOn ?? [];
-      if (deps.some((d) => failedIds.has(d))) {
+      const unmet = deps.filter((d) => failedIds.has(d) || skippedIds.has(d));
+      if (unmet.length > 0) {
+        const because = unmet.some((d) => failedIds.has(d)) ? 'dependency failed' : 'dependency skipped';
         run.stepStatus[stepId] = 'skipped';
-        stepResults.push({ stepId, status: 'skipped', summary: 'skipped (dependency failed)', artifacts: [], tests: [] });
+        skippedIds.add(stepId);
+        stepResults.push({ stepId, status: 'skipped', summary: `skipped (${because}: ${unmet.join(', ')})`, artifacts: [], tests: [] });
         continue;
       }
 
