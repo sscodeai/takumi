@@ -88,7 +88,8 @@ The harness fails closed, and its output shape is one the engine's own parser re
 ## 4. Defects found by running it
 
 None of these were predicted by the design. All are reproduced with the commands
-below; none is fixed in this slice.
+below; findings 1-4 were fixed in the four commits that follow this document
+(`e67aa81`, `299acea`, `c317eb7`, `e3d3545`, recorded as ledger entries 28-31).
 
 ### Finding 1 — the quality gate cannot pass over the repository's own suite (core)
 
@@ -208,3 +209,40 @@ one-file fix with a test that fails before it:
 Each with its own commit and its own row in `docs/bugs-fixed.md`, per the ledger's
 own rule. Only after that does PoC-2 (the `acceptance` step type bound to a
 requirement digest) rest on a gate that can actually stop a delivery.
+
+## 7. After the four fixes: the same run, both directions
+
+The four fixes above were made (`e67aa81`, `299acea`, `c317eb7`, `e3d3545`; ledger
+entries 28-31) and the same workflow was run again, unchanged:
+
+```
+$ node apps/cli/dist/index.js run docs/requirements/poc-blackbox-acceptance.md \
+    --runtime fake --workflow blackbox-acceptance --verbose
+  workflow[quality_gate]: quality gate PASSED (0 failing)
+  workflow[rule_review]: rule review passed (0 note(s))
+  workflow[artifact_acceptance]: quality gate PASSED (0 failing)
+  workflow[delivery]: delivery manifest written (4 artifacts)
+  step quality_gate: completed — quality_gate PASSED: 0 failing over 616 tests, exit 0
+  step rule_review: completed — rule_review PASSED: no findings in e67aa81..299acea
+  step artifact_acceptance: completed — quality_gate PASSED: 0 failing over 5 tests, exit 0
+  step delivery: completed — delivery bundle ready (4 artifacts)
+✓ workflow "blackbox-acceptance" completed
+EXIT=0
+```
+
+`616 tests` is the repaired count (606 before this slice, plus the 10 regression
+tests the four fixes added) — the gate now reports the run that happened.
+
+The failing direction, on a fixture workflow whose gate cannot pass:
+
+```
+$ node …/apps/cli/dist/index.js run "x" --runtime fake --workflow failing-gate
+  workflow[gate]: quality gate FAILED (1 failing) — workflow aborted
+  step gate: failed — quality_gate FAILED: 1 failing over 1 tests, exit !0
+  step ship: skipped — skipped (dependency failed: gate)
+✓ workflow "failing-gate" failed
+EXIT=1
+```
+
+So a failed gate now stops the steps behind it and the process says so — the two
+properties PoC-2's acceptance step depends on.
