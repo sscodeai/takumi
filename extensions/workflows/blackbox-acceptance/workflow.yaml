@@ -1,0 +1,136 @@
+name: blackbox-acceptance
+version: 0.1.0
+description: >
+  Black-box acceptance PoC-1 (zero core change). A natural-language request
+  becomes a structured, human-confirmed requirement document; the AI chooses
+  language/architecture/stack and implements; the human never reads the design
+  or the code; the run ends with a behavioural acceptance harness and a
+  delivery manifest.
+runtime: fake
+requiredSkills:
+  - req-intake
+steps:
+  - id: req_intake
+    type: agent
+    skill: req-intake
+    # First prompt key in extensions/skills/req-intake/manifest.yaml is `intake`.
+    # {input} is the request text the CLI was given.
+    prompt: "{input}"
+  - id: ambiguity_confirmation
+    type: approval
+    prompt: |
+      CONFIRM REQUIREMENT CONTENT, NOT A STEP NAME.
+
+      Requirement document under confirmation: docs/requirements/poc-blackbox-acceptance.md
+      SHA-256 of that document (canonical text as committed): sha256:ad93ff20fee08509934bddfb88ccead2d17633c4be3ab0a0844fe64a96a3776d
+
+      The requirement document is reproduced below so this prompt carries the
+      content itself, not a pointer to it:
+
+      --- BEGIN REQUIREMENT DOCUMENT ---
+      # PoC fixture: employee CSV summary report
+
+      This file is a **PoC fixture** for the black-box acceptance flow. It is the
+      natural-language request fed to the `blackbox-acceptance` workflow's
+      `req_intake` step. It is deliberately under-specified so the intake step has
+      real ambiguity to surface.
+
+      The canonical requirement document format and location are **undecided** (see
+      open question 2 in `docs/design/blackbox-acceptance-scout.md`). This fixture is
+      an input request, not that canonical document.
+
+      ## Request
+
+      We need a small command-line tool that reads a CSV export of employee records
+      and prints a summary report we can paste into a weekly status email.
+
+      Input columns are `employee_id,name,department,start_date,annual_salary`.
+
+      For each department the report must show the number of employees, the total
+      annual salary, and the average annual salary rounded to whole currency units.
+      It must also show the overall headcount and total salary.
+
+      The tool must run on a developer laptop with no services or network access.
+      It must be usable by any engineer on the team, and it must finish on a
+      50,000-row file in a few seconds.
+
+      ## What is left open
+
+      - **Malformed rows.** Stop with an error, or skip the bad row and report the
+        count?
+      - **Duplicate `employee_id`.** First row wins, last row wins, or an error?
+      - **Output destination.** stdout only, or stdout plus an optional file path?
+      - **Salary currency and rounding.** Which currency, and round half-up or
+        truncate before summing?
+      --- END REQUIREMENT DOCUMENT ---
+
+      Before approving, check:
+      1. The requirement document above is the requirement you want built.
+      2. The intake step's own requirement artifact at
+         .takumi/artifacts/req/req_intake.md records each open decision as an
+         AMB-nnn entry with 2-4 bounded options and a default. If an open decision
+         is missing from that artifact, REJECT and return it to intake.
+      3. For every AMB-nnn entry, the chosen option. Record it in the run notes as
+         AMB-nnn: <chosen option>. Pre-filled defaults are acceptable for this
+         PoC; a bounded-choice UI is a later change.
+
+      NOTE (PoC-1 limitation, not a workaround): the engine does not interpolate
+      {placeholders} into an approval prompt, so this document and digest are
+      embedded here statically rather than injected from the intake artifact.
+      Confirming the dynamically produced intake artifact itself is PoC-2 work.
+    dependsOn: [req_intake]
+  - id: implementation
+    type: agent
+    prompt: |
+      You are the implementer. The confirmed requirement document is the
+      approved content above and the intake artifact at
+      .takumi/artifacts/req/req_intake.md. You choose the language,
+      architecture and stack. No human will read your design or your code.
+
+      Implement the request end to end in this project directory, following the
+      confirmed requirement document and the chosen options for every AMB-nnn
+      entry. Write the real source files, not a plan. When done, summarise the
+      files you created, the stack you chose and why, and how each acceptance
+      criterion is met.
+    dependsOn: [ambiguity_confirmation]
+  - id: unit_and_integration_tests
+    type: agent
+    prompt: |
+      Write and run unit and integration tests for the implementation from the
+      previous step. Cover every acceptance criterion in the confirmed
+      requirement document, including the error and boundary behaviour chosen
+      for each AMB-nnn entry. Report the exact test command and its result.
+    dependsOn: [implementation]
+  - id: quality_gate
+    type: quality_gate
+    # The project's test command. The gate fails closed on a non-zero exit, an
+    # unrecognised output shape, a hard-fail marker, failing tests, zero tests,
+    # or an all-skipped run.
+    prompt: pnpm test
+    dependsOn: [unit_and_integration_tests]
+    timeoutMs: 600000
+  - id: rule_review
+    type: rule_review
+    # baseRef is required by validateWorkflowManifest. HEAD~1 keeps the change
+    # set non-empty; the engine resolves both refs to SHAs before judging.
+    baseRef: HEAD~1
+    prompt: |
+      Deterministic rule review of the delivered change set. Fail closed on a
+      block finding, on a human decision, or on a change set that cannot be
+      reviewed.
+    dependsOn: [quality_gate]
+  - id: artifact_acceptance
+    type: quality_gate
+    # PoC-1 STAND-IN: this is a quality_gate running a real TAP harness because
+    # the `acceptance` step type does not exist yet. PoC-2 replaces this step
+    # with a first-class `acceptance` step bound to a requirement digest. The
+    # harness fails closed: a missing artifact, a missing ambiguities key, a
+    # missing requirement id, or missing test artifacts all produce `not ok`
+    # lines and a non-zero exit.
+    prompt: bash extensions/workflows/blackbox-acceptance/checks/acceptance-tap.sh
+    dependsOn: [rule_review]
+    timeoutMs: 120000
+  - id: delivery
+    type: delivery
+    prompt: Package the run's artifacts into a delivery manifest.
+    dependsOn: [artifact_acceptance]
