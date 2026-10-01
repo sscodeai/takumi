@@ -364,13 +364,13 @@ test('provider options: the documented ones are FORWARDED, not dropped at the fa
 
   const gitlab = gitlabBoardOptions({
     providerId: 'gitlab',
-    providerOptions: { project: 'group/project', labelPrefix: 'tk', trustedAuthors: 'moon, sscodeai' },
+    providerOptions: { project: 'group/project', labelPrefix: 'tk', trustedAuthors: 'ss, sscodeai' },
     json: false,
   });
   assert.deepEqual(gitlab, {
     project: 'group/project',
     labelPrefix: 'tk',
-    trustedAuthors: ['moon', 'sscodeai'],
+    trustedAuthors: ['ss', 'sscodeai'],
   });
 
   const jira = jiraBoardOptions({

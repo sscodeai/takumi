@@ -105,7 +105,7 @@ test('GitLabBoardProvider: passes the shared task-board contract suite (injected
     title: 'Ship the GitLab adapter',
     description: 'Issue body becomes BoardWorkItem.body',
     labels: ['takumi-ready', 'team-a'],
-    assignees: ['moon'],
+    assignees: ['ss'],
   });
   // No token anywhere: the transport is injected, so nothing authenticates and
   // nothing leaves the process.
@@ -162,7 +162,7 @@ test('GitLabBoardProvider: passes the shared task-board contract suite (injected
 });
 
 test('GitLabBoardProvider: the exact request shape of every port method', async () => {
-  const { fake, provider } = board({ iid: 7, title: 'Work', description: 'Detail', labels: ['takumi-ready'], assignees: ['moon'] });
+  const { fake, provider } = board({ iid: 7, title: 'Work', description: 'Detail', labels: ['takumi-ready'], assignees: ['ss'] });
   const issue = `${ISSUES}/7`;
   const notes = `${issue}/notes?per_page=100&sort=asc`;
 
@@ -180,7 +180,7 @@ test('GitLabBoardProvider: the exact request shape of every port method', async 
     url: `https://gitlab.test/${PROJECT}/-/issues/7`,
     state: 'ready',
     labels: ['takumi-ready'],
-    assignees: ['moon'],
+    assignees: ['ss'],
     // The double's clock is deterministic (origin + 1s per mutation); the seed is tick 1.
     updatedAt: '2026-01-01T00:00:01.000Z',
   });
