@@ -225,6 +225,69 @@ test('quality gate step: a green suite whose test NAME mentions a build failure 
   }
 });
 
+// --- every summary block counts, not just the first -------------------------
+
+test('quality gate: every TAP block is counted, not only the first', () => {
+  // A monorepo prints one block per package. Reading only the first reported 289
+  // of this repository's 606 tests, so the count described a run that never happened.
+  const out = [
+    '# tests 289',
+    '# pass 289',
+    '# fail 0',
+    'ok 1 - a',
+    '',
+    '# tests 5',
+    '# pass 5',
+    '# fail 0',
+    'ok 1 - b',
+    '',
+  ].join('\n');
+  assert.deepEqual(parseTestReport(out), { shape: 'tap', total: 294, failed: 0, skipped: 0 });
+});
+
+test('quality gate: a failure in a LATER package is not invisible', () => {
+  const out = [
+    '# tests 10',
+    '# pass 10',
+    '# fail 0',
+    '',
+    '# tests 3',
+    '# pass 1',
+    '# fail 2',
+    'not ok 2 - broken',
+    'not ok 3 - also broken',
+    '',
+  ].join('\n');
+  const report = parseTestReport(out);
+  assert.deepEqual(report, { shape: 'tap', total: 13, failed: 2, skipped: 0 });
+  assert.equal(judgeGate(report, { exitOk: false, hardFail: false }).passed, false);
+});
+
+test('quality gate: jest / vitest workspace summaries are summed', () => {
+  const out = ['Tests:       6 passed, 6 total', 'Tests:       1 failed, 5 passed, 6 total', ''].join('\n');
+  assert.deepEqual(parseTestReport(out), { shape: 'jest', total: 12, failed: 1, skipped: 0 });
+});
+
+test('quality gate: Maven per-class lines are summed, the module summary is not added again', () => {
+  const out = [
+    '[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.05 s - in com.foo.BarTest',
+    '[INFO] Tests run: 2, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.02 s - in com.foo.BazTest',
+    '[INFO] Results:',
+    '[INFO] Tests run: 5, Failures: 1, Errors: 0, Skipped: 0',
+    '',
+  ].join('\n');
+  assert.deepEqual(
+    parseTestReport(out),
+    { shape: 'maven', total: 5, failed: 1, skipped: 0 },
+    'the per-class lines are the tests; the module summary repeats them',
+  );
+});
+
+test('quality gate: gradle multi-project summaries are summed', () => {
+  const out = ['4 tests completed, 0 failed', '2 tests completed, 1 failed', ''].join('\n');
+  assert.deepEqual(parseTestReport(out), { shape: 'gradle', total: 6, failed: 1, skipped: 0 });
+});
+
 test('quality gate step: unparseable output fails with the command and output tail in the summary', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'qg-unrecognised-'));
   try {

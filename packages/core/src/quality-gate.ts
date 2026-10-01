@@ -23,6 +23,11 @@ function counts(total: number, failed: number, skipped: number): Counts {
   return { total, failed, skipped };
 }
 
+/** Sum a run's several summary blocks (one per package, module or project). */
+function sum(list: Counts[]): Counts {
+  return list.reduce((acc, c) => counts(acc.total + c.total, acc.failed + c.failed, acc.skipped + c.skipped), counts(0, 0, 0));
+}
+
 /**
  * A runner's own reporting lines: TAP test results (`ok N - …`, `not ok N - …`),
  * TAP subtest names and diagnostics (`# …`).
@@ -54,6 +59,10 @@ export function detectHardFailure(out: string): boolean {
  * (`= 1 failed, 2 passed in 0.4s` and the bare `N passed` form), Maven
  * (`Tests run: N, Failures: N, Errors: N, Skipped: N`) and gradle/JUnit
  * (`N tests completed, M failed`). Everything else is `unrecognised`.
+ *
+ * Every summary block in the output is counted, not just the first one: a
+ * monorepo prints one block per package, and reporting only the first block
+ * claims fewer tests ran than really did.
  */
 export function parseTestReport(out: string): TestReport {
   const maven = parseMaven(out);
@@ -78,33 +87,54 @@ export function parseTestReport(out: string): TestReport {
   };
 }
 
-/** Maven surefire: `Tests run: 2, Failures: 0, Errors: 1, Skipped: 0`. */
+/**
+ * Maven surefire: `Tests run: 2, Failures: 0, Errors: 1, Skipped: 0`.
+ *
+ * Surefire prints one line per test CLASS (`… Time elapsed: 0.05 s - in
+ * com.foo.BarTest`) and then a summary line per module. Summing both would count
+ * every module twice, so the per-class lines win when they are present; otherwise
+ * the module summary lines are summed (a reactor prints one per module).
+ */
 function parseMaven(out: string): Counts | undefined {
-  const m = out.match(/Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)(?:,\s*Skipped:\s*(\d+))?/);
-  if (!m) return undefined;
-  return counts(
-    parseInt(m[1] ?? '0', 10),
-    parseInt(m[2] ?? '0', 10) + parseInt(m[3] ?? '0', 10),
-    parseInt(m[4] ?? '0', 10),
-  );
+  const re = /Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)(?:,\s*Skipped:\s*(\d+))?[^\n]*/g;
+  const perClass: Counts[] = [];
+  const summaries: Counts[] = [];
+  for (const m of out.matchAll(re)) {
+    const c = counts(
+      parseInt(m[1] ?? '0', 10),
+      parseInt(m[2] ?? '0', 10) + parseInt(m[3] ?? '0', 10),
+      parseInt(m[4] ?? '0', 10),
+    );
+    if (/Time elapsed| - in /i.test(m[0])) perClass.push(c);
+    else summaries.push(c);
+  }
+  if (perClass.length > 0) return sum(perClass);
+  if (summaries.length > 0) return sum(summaries);
+  return undefined;
 }
 
 /**
  * TAP (`node --test`): `# tests N`, `# fail N`, `# skip N`, `not ok N`.
  * A `not ok` line without a `# tests` summary still counts as a failure.
+ *
+ * A monorepo prints one block per package: EVERY block is read. Reading only the
+ * first one vetted 289 of this repository's 606 tests and reported the rest as
+ * absent — a summary that hid what actually ran.
  */
 function parseTap(out: string): Counts | undefined {
-  const testLine = out.match(/^#\s*tests\s*:?\s*(\d+)/m);
-  const failLine = out.match(/^#\s*fail\s*:?\s*(\d+)/m);
-  const skipLine = out.match(/^#\s*skip\s*:?\s*(\d+)/m);
+  const total_ = (re: RegExp) => [...out.matchAll(re)].reduce((n, m) => n + parseInt(m[1] ?? '0', 10), 0);
+  const has = (re: RegExp) => re.test(out);
+  const testLine = /^#\s*tests\s*:?\s*\d+/m;
+  const failLine = /^#\s*fail\s*:?\s*\d+/m;
+  const skipLine = /^#\s*skip\s*:?\s*\d+/m;
   const notOk = (out.match(/^not ok\b/gm) ?? []).length;
-  if (!testLine && !failLine && !skipLine && notOk === 0) return undefined;
+  if (!has(testLine) && !has(failLine) && !has(skipLine) && notOk === 0) return undefined;
 
-  const failed = failLine ? parseInt(failLine[1] ?? '0', 10) : notOk;
-  const skipped = skipLine ? parseInt(skipLine[1] ?? '0', 10) : 0;
+  const failed = has(failLine) ? total_(/^#\s*fail\s*:?\s*(\d+)/gm) : notOk;
+  const skipped = has(skipLine) ? total_(/^#\s*skip\s*:?\s*(\d+)/gm) : 0;
   // Without a `# tests` line, a failing TAP run reports no usable total; use the
   // failure count so `failed > 0` still drives the verdict.
-  const total = testLine ? parseInt(testLine[1] ?? '0', 10) : failed;
+  const total = has(testLine) ? total_(/^#\s*tests\s*:?\s*(\d+)/gm) : failed;
   return counts(total, failed, skipped);
 }
 
@@ -112,32 +142,41 @@ function parseTap(out: string): Counts | undefined {
  * jest (`Tests: 1 failed, 2 skipped, 3 passed, 6 total`) and vitest
  * (`Tests  1 failed | 5 passed (6)`). `Test Suites:` / `Test Files:` lines are
  * ignored by construction — they do not start with `Tests`.
+ *
+ * A workspace prints one `Tests` line per project: every line is summed, so a
+ * later project's failures are not invisible.
  */
 function parseJest(out: string): Counts | undefined {
-  const line = out.match(/^\s*Tests:\s*(.+)$/m) ?? out.match(/^\s*Tests\s{2,}(.+)$/m);
-  if (!line) return undefined;
-  const body = line[1] ?? '';
+  const bodies = [
+    ...[...out.matchAll(/^\s*Tests:\s*(.+)$/gm)].map((m) => m[1] ?? ''),
+    ...[...out.matchAll(/^\s*Tests\s{2,}(.+)$/gm)].map((m) => m[1] ?? ''),
+  ];
+  if (bodies.length === 0) return undefined;
 
   let failed = 0;
   let skipped = 0;
   let passed = 0;
-  for (const m of body.matchAll(/(\d+)\s+(failed|skipped|passed|todo)/g)) {
-    const n = parseInt(m[1] ?? '0', 10);
-    switch (m[2]) {
-      case 'failed':
-        failed += n;
-        break;
-      case 'skipped':
-      case 'todo':
-        skipped += n;
-        break;
-      case 'passed':
-        passed += n;
-        break;
+  let total = 0;
+  for (const body of bodies) {
+    for (const m of body.matchAll(/(\d+)\s+(failed|skipped|passed|todo)/g)) {
+      const n = parseInt(m[1] ?? '0', 10);
+      switch (m[2]) {
+        case 'failed':
+          failed += n;
+          break;
+        case 'skipped':
+        case 'todo':
+          skipped += n;
+          break;
+        case 'passed':
+          passed += n;
+          break;
+      }
     }
+    const totalMatch = body.match(/(\d+)\s+total/) ?? body.match(/\((\d+)\)/);
+    total += totalMatch ? parseInt(totalMatch[1] ?? '0', 10) : 0;
   }
-  const totalMatch = body.match(/(\d+)\s+total/) ?? body.match(/\((\d+)\)/);
-  const total = totalMatch ? parseInt(totalMatch[1] ?? '0', 10) : failed + skipped + passed;
+  if (total === 0) total = failed + skipped + passed;
   return counts(total, failed, skipped);
 }
 
@@ -166,11 +205,16 @@ function parsePytest(out: string): Counts | undefined {
   return counts(passed + failed + skipped, failed, skipped);
 }
 
-/** gradle / JUnit XML console summary: `N tests completed, M failed`. */
+/**
+ * gradle / JUnit XML console summary: `N tests completed, M failed`.
+ * A multi-project build prints one line per subproject: every line is summed.
+ */
 function parseGradle(out: string): Counts | undefined {
-  const m = out.match(/(\d+)\s+tests? completed,\s*(\d+)\s+failed(?:,\s*(\d+)\s+skipped)?/i);
-  if (!m) return undefined;
-  return counts(parseInt(m[1] ?? '0', 10), parseInt(m[2] ?? '0', 10), parseInt(m[3] ?? '0', 10));
+  const blocks: Counts[] = [];
+  for (const m of out.matchAll(/(\d+)\s+tests? completed,\s*(\d+)\s+failed(?:,\s*(\d+)\s+skipped)?/gi)) {
+    blocks.push(counts(parseInt(m[1] ?? '0', 10), parseInt(m[2] ?? '0', 10), parseInt(m[3] ?? '0', 10)));
+  }
+  return blocks.length > 0 ? sum(blocks) : undefined;
 }
 
 /**
