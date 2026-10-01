@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { listExtensions, loadConfig, runTask, workflowExitCode } from './commands.js';
+import { listExtensions, loadConfig, requirementConfirmation, runTask, workflowExitCode } from './commands.js';
 import { initProject } from './init.js';
 import { createBoardProvider, runBoardCommand } from './board-command.js';
 import { eventLogFor, runOnce, type PilotConfig } from './run-command.js';
@@ -55,6 +55,27 @@ async function main(argv: string[]): Promise<number> {
       return 1;
     }
 
+    case 'requirement': {
+      const sub = rest[0];
+      if (sub === 'digest') {
+        const ref = rest[1];
+        if (ref === undefined || ref.length === 0) {
+          console.error('usage: takumi requirement digest <ref>');
+          return 1;
+        }
+        try {
+          const token = requirementConfirmation(cwd, ref);
+          console.log(`${token.ref}\nsha256:${token.digest}`);
+          return 0;
+        } catch (e) {
+          console.error(e instanceof Error ? e.message : String(e));
+          return 1;
+        }
+      }
+      console.log('usage: takumi requirement digest <ref>');
+      return 1;
+    }
+
     case 'board': {
       return await runBoardCommand(rest);
     }
@@ -70,6 +91,8 @@ async function main(argv: string[]): Promise<number> {
       let verbose = false;
       let sandbox: 'none' | 'unshare' | undefined;
       let resume = false;
+      let requirement: string | undefined;
+      let confirmedRequirement: string | undefined;
 
       for (let i = 0; i < rest.length; i++) {
         const arg = rest[i] ?? '';
@@ -83,12 +106,20 @@ async function main(argv: string[]): Promise<number> {
           sandbox = (rest[++i] as 'none' | 'unshare') ?? 'none';
         } else if (arg === '--resume') {
           resume = true;
+        } else if (arg === '--requirement') {
+          requirement = rest[++i];
+        } else if (arg === '--confirmed-requirement') {
+          confirmedRequirement = rest[++i];
         } else if (arg.startsWith('--runtime=')) {
           runtimeId = arg.slice('--runtime='.length);
         } else if (arg.startsWith('--workflow=')) {
           workflow = arg.slice('--workflow='.length);
         } else if (arg.startsWith('--sandbox=')) {
           sandbox = arg.slice('--sandbox='.length) as 'none' | 'unshare';
+        } else if (arg.startsWith('--requirement=')) {
+          requirement = arg.slice('--requirement='.length);
+        } else if (arg.startsWith('--confirmed-requirement=')) {
+          confirmedRequirement = arg.slice('--confirmed-requirement='.length);
         } else {
           positional.push(arg);
         }
@@ -96,6 +127,21 @@ async function main(argv: string[]): Promise<number> {
 
       const config = loadConfig(cwd);
       const promptArg = positional.join(' ');
+
+      // ADR-025: a workflow that runs an `acceptance` step needs the digest a human confirmed, and
+      // that digest is the token of the confirmation. The CLI therefore asks for it explicitly
+      // instead of assuming the file it finds is the one that was approved — the whole point of the
+      // binding is that an edit between confirmation and run is caught by name.
+      let confirmation: { ref: string; digest: string } | undefined;
+      if (requirement !== undefined || confirmedRequirement !== undefined) {
+        if (requirement === undefined || confirmedRequirement === undefined) {
+          console.error(
+            '--requirement and --confirmed-requirement go together: run `takumi requirement digest <ref>` to get the digest a human confirmed, then pass both',
+          );
+          return 1;
+        }
+        confirmation = { ref: requirement, digest: confirmedRequirement.trim().replace(/^sha256:/i, '').toLowerCase() };
+      }
 
       // Support: takumi run "prompt" | takumi run requirements.md (read file)
       let prompt = promptArg;
@@ -113,7 +159,7 @@ async function main(argv: string[]): Promise<number> {
       console.log(`  prompt: ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`);
       console.log('');
 
-      const { events, summary, traceabilityMatrix, artifacts, status } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox, resume });
+      const { events, summary, traceabilityMatrix, artifacts, status } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox, resume, confirmedRequirement: confirmation });
 
       for (const ev of events) console.log(`  ${ev}`);
       console.log('');
@@ -173,10 +219,14 @@ Usage:
   takumi board --check | --bootstrap    Report or create the board's states (ADR-008)
   takumi pilot --once                  One tick of the unattended runner (ADR-009)
   takumi extension list                List discovered extensions
+  takumi requirement digest <ref>      Print the confirmation token for a requirement document
 
 Examples:
   takumi run "Implement user authentication API"
   takumi run requirements.md --runtime fake --workflow jp-si-standard
+  takumi requirement digest docs/requirements/feature.yaml
+  takumi run docs/requirements/feature.yaml --workflow blackbox-acceptance \
+    --requirement docs/requirements/feature.yaml --confirmed-requirement sha256:<digest>
 `);
       return 0;
 

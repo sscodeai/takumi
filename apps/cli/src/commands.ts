@@ -7,6 +7,7 @@ import {
   discoverExtensions,
   executeWorkflow,
   renderTraceabilityMatrix,
+  requirementDigest,
   validateWorkflowManifest,
   WorkflowDefinition,
   WorkflowStepResult,
@@ -259,6 +260,11 @@ export interface RunOptions {
   sandbox?: 'none' | 'unshare';
   /** Durable resume: continue from the last audit record's completed steps. */
   resume?: boolean;
+  /**
+   * ADR-025: the requirement digest a human confirmed, and the ref it covers. Required by a workflow
+   * that runs an `acceptance` step — the step refuses to accept a document that does not hash to it.
+   */
+  confirmedRequirement?: { ref: string; digest: string };
 }
 
 export async function runTask(opts: RunOptions): Promise<{
@@ -327,6 +333,7 @@ export async function runTask(opts: RunOptions): Promise<{
         artifacts: store,
         skillsRoot: join(opts.cwd, opts.config.registry.skills),
         resume: resumeCtx,
+        ...(opts.confirmedRequirement === undefined ? {} : { confirmedRequirement: opts.confirmedRequirement }),
         onApproval: async (req) => {
           const line = `approval required [${req.stepId}]: ${req.prompt}`;
           events.push(line);
@@ -409,6 +416,19 @@ export async function runTask(opts: RunOptions): Promise<{
  */
 export function workflowExitCode(status?: 'completed' | 'failed' | 'cancelled'): number {
   return status === undefined || status === 'completed' ? 0 : 1;
+}
+
+/**
+ * The confirmation token for a requirement document (ADR-025): the ref and the digest of its text.
+ * Printing it is how a human gets something concrete to confirm; passing it back into a run is how
+ * the acceptance step proves the document it judged is still the one that was confirmed.
+ */
+export function requirementConfirmation(cwd: string, ref: string): { ref: string; digest: string } {
+  const path = join(cwd, ref);
+  if (!existsSync(path)) {
+    throw new Error(`the requirement document "${ref}" does not exist in ${cwd}`);
+  }
+  return { ref, digest: requirementDigest(readFileSync(path, 'utf8')) };
 }
 
 /** List extensions from the registry dirs in the project config. */
