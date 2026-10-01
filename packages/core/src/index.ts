@@ -47,7 +47,7 @@ export type {
   ReviewVerdict,
 } from './workflow-engine.js';
 
-export { parseTestReport, judgeGate } from './quality-gate.js';
+export { detectHardFailure, parseTestReport, judgeGate } from './quality-gate.js';
 export type { TestReport, TestShape } from './quality-gate.js';
 
 export { ArtifactStore } from './artifact-store.js';

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ArtifactStore, executeWorkflow, judgeGate, parseTestReport, WorkflowDefinition } from '../index.js';
+import { ArtifactStore, detectHardFailure, executeWorkflow, judgeGate, parseTestReport, WorkflowDefinition } from '../index.js';
 import { TestRuntime } from '../test-utils.js';
 
 // The quality gate must FAIL CLOSED: output it cannot parse is not evidence of
@@ -147,7 +147,83 @@ test('quality gate: Maven skipped-only run fails closed', () => {
   assert.match(verdict.reason, /every test was skipped/i);
 });
 
-// --- integration: the step summary must stay diagnosable -------------------
+// --- the hard-fail detector must read the BUILD, not the runner's test names --
+
+test('quality gate: a build-failure marker inside a test NAME is not a build failure', () => {
+  // Subtest names are the runner's reporting. This repository's own suite contains
+  // the name below, so a detector that reads test names fails a green run — the
+  // repository could never pass its own quality gate.
+  const out = [
+    'TAP version 13',
+    '# Subtest: quality gate: Maven BUILD FAILURE is a hard fail',
+    'ok 188 - quality gate: Maven BUILD FAILURE is a hard fail',
+    '  ---',
+    '  duration_ms: 1.2',
+    '  ...',
+    '1..1',
+    '# tests 1',
+    '# pass 1',
+    '# fail 0',
+    '',
+  ].join('\n');
+  assert.equal(detectHardFailure(out), false, 'the runner reporting a test name is not the build failing');
+  const report = parseTestReport(out);
+  assert.equal(report.shape, 'tap');
+  const verdict = judgeGate(report, { exitOk: true, hardFail: detectHardFailure(out) });
+  assert.equal(verdict.passed, true, `a green suite must pass (got: ${verdict.reason})`);
+});
+
+test('quality gate: a real build failure is still a hard fail', () => {
+  for (const marker of ['[ERROR] BUILD FAILURE', 'BUILD FAILED in 2s', 'FATAL: could not start the toolchain']) {
+    const out = `${marker}\nTests:       6 passed, 6 total\n`;
+    assert.equal(detectHardFailure(out), true, `"${marker}" must still be detected`);
+    assert.equal(judgeGate(parseTestReport(out), { exitOk: true, hardFail: detectHardFailure(out) }).passed, false);
+  }
+});
+
+test('quality gate step: a green suite whose test NAME mentions a build failure passes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qg-name-'));
+  try {
+    writeFileSync(
+      join(dir, 'named.sh'),
+      [
+        '#!/bin/sh',
+        'echo "TAP version 13"',
+        'echo "# Subtest: quality gate: Maven BUILD FAILURE is a hard fail"',
+        'echo "ok 1 - quality gate: Maven BUILD FAILURE is a hard fail"',
+        'echo "1..1"',
+        'echo "# tests 1"',
+        'echo "# pass 1"',
+        'echo "# fail 0"',
+        'exit 0',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(dir, 'named.sh'), 0o755);
+    const rt = new TestRuntime(() => 'ok', undefined, 'qg-name');
+    const wf: WorkflowDefinition = {
+      name: 'qg-name',
+      version: '0.1.0',
+      description: '',
+      steps: [{ id: 'gate', type: 'quality_gate', prompt: 'sh named.sh' }],
+    };
+    const res = await executeWorkflow(wf, {
+      cwd: dir,
+      runtime: rt,
+      artifacts: new ArtifactStore(join(dir, '.takumi/a')),
+      onApproval: () => true,
+    });
+    const gate = res.steps.find((s) => s.stepId === 'gate');
+    assert.equal(
+      gate?.status,
+      'completed',
+      `a green suite must pass even when a test name says BUILD FAILURE (got: ${gate?.summary?.slice(0, 160)})`,
+    );
+    assert.equal(res.status, 'completed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('quality gate step: unparseable output fails with the command and output tail in the summary', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'qg-unrecognised-'));

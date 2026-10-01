@@ -13,7 +13,7 @@ import {
   validateCapabilities,
 } from './index.js';
 import { groupByLevel } from './workflow.js';
-import { judgeGate, parseTestReport } from './quality-gate.js';
+import { detectHardFailure, judgeGate, parseTestReport } from './quality-gate.js';
 import { createGitRunner, type GitRunner } from './git-runner.js';
 import { ProviderError } from './provider-error.js';
 import { collectReviewInput, verdictFromFindings } from './review.js';
@@ -477,10 +477,11 @@ export async function executeWorkflow(
         // `fails > 0 ? fails : 1` fallback: no known summary = no evidence).
         // A gate with ZERO tests is NOT green (Quality Gate must be enforced:
         // no tests at all = the gate has nothing to vouch for → ABORT).
-        const allOut = out.toUpperCase();
         const report = parseTestReport(out);
-        // Maven BUILD FAILURE (e.g. compile error before any test runs) is a hard fail.
-        const hardFail = /BUILD FAILURE|BUILD FAILED|FATAL/i.test(allOut);
+        // A build that gave up (compile error, toolchain refusal) is a hard fail.
+        // Judged on the BUILD's output, not on the runner's reporting lines: a
+        // test name mentioning a build failure is not a build failure.
+        const hardFail = detectHardFailure(out);
         const verdict = judgeGate(report, { exitOk, hardFail });
         const gatePassed = verdict.passed;
         const fails = report.shape === 'unrecognised' ? 0 : report.failed;

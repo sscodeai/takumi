@@ -24,6 +24,29 @@ function counts(total: number, failed: number, skipped: number): Counts {
 }
 
 /**
+ * A runner's own reporting lines: TAP test results (`ok N - …`, `not ok N - …`),
+ * TAP subtest names and diagnostics (`# …`).
+ *
+ * These carry the TEST NAMES, and a suite that tests this very detection names
+ * the marker in a test name — `quality gate: Maven BUILD FAILURE is a hard fail`
+ * is a real subtest in this repository. A detector that reads those lines fails a
+ * green suite: the repository's own 606-test run could never pass its own quality
+ * gate. The markers that matter are printed by the build itself (`[ERROR] BUILD
+ * FAILURE`, `BUILD FAILED in 2s`), which are not TAP reporting lines.
+ */
+const RUNNER_REPORTING_LINE = /^[ \t]*(?:#.*|ok\b.*|not ok\b.*)$/gm;
+
+/**
+ * Whether the output carries a hard failure of the BUILD (not of a test): a
+ * compile error, a toolchain that refused to start, a build that gave up before
+ * the tests ran. Judged on the build's own output, with the runner's reporting
+ * lines removed.
+ */
+export function detectHardFailure(out: string): boolean {
+  return /BUILD FAILURE|BUILD FAILED|FATAL/i.test(out.replace(RUNNER_REPORTING_LINE, ''));
+}
+
+/**
  * Parse the test outcome out of raw runner output.
  *
  * Recognised shapes: TAP (`# tests N` / `# fail N` / `# skip N` / `not ok`),
