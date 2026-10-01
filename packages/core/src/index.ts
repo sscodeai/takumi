@@ -56,8 +56,10 @@ export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
 export { carryStateRecordForward } from './board-state-record.js';
 export {
+  NO_REQUIREMENT,
   REVIEWER_DETERMINISTIC_RULES,
   policyHash,
+  requirementDigest,
   reviewDigest,
   rulesetHash,
   shortDigest,

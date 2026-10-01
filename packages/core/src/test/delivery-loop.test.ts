@@ -925,6 +925,7 @@ test('runDeliveryLoop: an approval that no longer matches the run is REFUSED, by
       policy: '0'.repeat(64),
       ruleset: '0'.repeat(64),
       reviewer: 'reviewer:fixture',
+      requirement: '0'.repeat(64),
       at: '2026-09-15T00:00:00.000Z',
     },
   });
