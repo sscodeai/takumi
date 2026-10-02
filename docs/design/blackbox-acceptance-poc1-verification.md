@@ -23,8 +23,8 @@ found defects that were NOT predicted by the design.
 | `extensions/skills/req-intake/SKILL.md` | The document schema and the hard rule that every open decision point becomes an `AMB-nnn` entry with 2-4 bounded options and a default. |
 | `extensions/skills/req-intake/prompts/intake.md` | Request text → one YAML document with `requirements[]` (`REQ-nnn`) and `ambiguities[]` (`AMB-nnn`). |
 | `extensions/skills/req-intake/prompts/confirm.md` | Renders the document plus the sha256 of its canonical text so a human confirms content, not a step name. |
-| `extensions/workflows/blackbox-acceptance/workflow.yaml` | The eight steps, using only the seven step types that existed at PoC-1 (PoC-2 replaced the `quality_gate` stand-in with the real `acceptance` step — see section 8). |
-| `extensions/workflows/blackbox-acceptance/checks/acceptance-tap.sh` | The PoC-1 acceptance stand-in: a real fail-closed TAP harness. |
+| `extensions/workflows/blackbox-acceptance/workflow.yaml` | The eight steps of PoC-1, using only the seven step types that existed then (PoC-2 replaced the `quality_gate` stand-in with the real `acceptance` step, and PoC-3 added the `judge_forge` step — see sections 8 and 9). |
+| `extensions/workflows/blackbox-acceptance/checks/acceptance-tap.sh` | The PoC-1/PoC-2 acceptance stand-in: a real fail-closed TAP harness. Removed in PoC-3, which replaced it with a forged judge (the literal-harness path stays supported and covered by `packages/core/src/test/acceptance-step.test.ts`). |
 | `takumi.yaml` | The repository root becomes a takumi project, so takumi can run on itself. |
 | `docs/requirements/poc-blackbox-acceptance.md` | The PoC input fixture (an employee-CSV summary request with four genuinely open decisions). |
 
@@ -323,3 +323,83 @@ real runtime (with `fake` the agent artifacts are the prompt echoed back, which 
 checks 1-3 are about the confirmed document and 4-6 are labelled as wiring checks); and nothing about
 the bounded-choice confirmation UI, which does not exist yet — the human reads the document and
 approves its token.
+
+## 9. PoC-3: the forged judge, and the difference it makes
+
+PoC-3 added the third ring (ADR-026): a `judge_forge` step that generates the acceptance judge from
+the confirmed requirement's `deliverable` contract — how to run the deliverable, the output shape, the
+relations a judge must be able to check, and a differential anchor — outside the implementation
+worktree and without reading the implementation. The workflow now forges its judge and the acceptance
+step runs that judge (`acceptanceRef: "{judgePath}"`), refusing any other harness.
+
+The deliverable for the demonstration is `examples/blackbox-poc/csv-summary.mjs` (a reference tool),
+its sibling `csv-summary-broken.mjs` (one defect: the overall total adds the rounded DEPARTMENT
+AVERAGES instead of the department totals) and `csv-summary.test.mjs` — the tool's OWN test, written
+to the implementer's blind spot, so it passes for both.
+
+**The reference deliverable:**
+
+```
+$ takumi requirement digest docs/requirements/poc-blackbox-acceptance.yaml   # the confirmation token
+sha256:867d9fa97c4d8c49841ae02aa0e4f907e3f5e8d468f36a85288ce0aac439f02d
+
+  step quality_gate: completed — quality_gate PASSED: 0 failing over 2 tests, exit 0
+  step rule_review: completed — rule_review PASSED: 1 note(s) in e0bcb54c6074..56ec4b340448
+  step judge_forge: completed — judge forged: …/.takumi/acceptance/judge_forge/judge.sh
+                                sha256:6bf3582e4530 (outside …/.takumi/worktree)
+  step artifact_acceptance: completed — acceptance PASSED: the confirmed requirement is satisfied
+  step delivery: completed — delivery bundle ready (5 artifacts)
+✓ workflow "blackbox-acceptance" completed            EXIT=0
+```
+
+**The same deliverable with one behavioural defect — and the tool's own tests still green:**
+
+```
+  step quality_gate: completed — quality_gate PASSED: 0 failing over 2 tests, exit 0   ← the implementer's tests
+  step judge_forge: completed — judge forged: … sha256:6bf3582e4530 (outside …/.takumi/worktree)
+  step artifact_acceptance: failed — acceptance FAILED: the harness reported a failing verdict
+  step delivery: skipped — skipped (dependency failed: artifact_acceptance)
+✓ workflow "blackbox-acceptance" failed               EXIT=1
+
+  ok 1 - REL-001 row-order-invariance: reshuffling the rows changes nothing
+  not ok 2 - REL-002 additivity: department totals sum to 428 but the report says 214
+  not ok 3 - REL-003 duplicate-resolution: headcount 4 (expected 4), total 269 (expected 323 = base 214 + 200 - replaced 91)
+  ok 4 - REL-004 malformed-row-accounting: 3 malformed rows skipped and counted, totals unchanged
+  ok 5 - DIFF-001 independent-aggregation: an independent recomputation matches the report
+  ok 6 - DOC-001 every open decision has a chosen option (4/4)
+  # not mechanised: the 50,000-row performance criterion (REQ-001)
+  # not mechanised: the count of resolved duplicates being printed (REQ-003)
+  # not mechanised: the optional output-file argument (REQ-004)
+  ACCEPT_VERDICT: fail
+```
+
+That difference — the gate green, the judge red, no ACCEPT artifact, delivery skipped, exit 1 — is
+the whole argument for the third ring: a judge derived from the requirement catches a defect the
+implementer's own tests were written not to see.
+
+**A relation the forge does not implement is a refusal, not a gap.** With `REL-005
+i18n-collation-invariance` temporarily declared in the document and a fresh token:
+
+```
+  step judge_forge: failed — the judge forge did not report success (no "JUDGE_FORGE: ok" marker)
+  step artifact_acceptance: skipped — skipped (dependency failed: judge_forge)
+  step delivery: skipped — skipped (dependency skipped: artifact_acceptance)
+✓ workflow "blackbox-acceptance" failed               EXIT=1
+
+  this forge does not implement: i18n-collation-invariance — refusing to build a judge with a gap
+  in it (implemented: row-order-invariance additivity duplicate-resolution malformed-row-accounting)
+```
+
+Two defects were found by these runs and are fixed with their own commits: the repository's own
+secret heuristic read a fixture path as a credential and stopped the delivery for a human (ledger
+#32, `56ec4b3`), and the worktree path handed to the judge was not resolved, so a relative
+`--worktree` left the judge judging an empty report (ledger #33, `966c5b8`).
+
+What PoC-3 does NOT prove, stated as plainly as the rest: the separation is structural, not a
+permission — an agent with filesystem access could still read `<project>/.takumi/acceptance/…` by
+guessing the path, and no sandbox claim is made here. The deliverable was placed in the worktree BY
+HAND for this demonstration, because the `fake` runtime's agent steps echo their prompts: what is
+proven is the judge's behaviour, not an agent's. The four relations and one anchor are the honest
+measure of what this acceptance covers; the prose criteria the judge reports as not mechanised are
+what it does not.
+
