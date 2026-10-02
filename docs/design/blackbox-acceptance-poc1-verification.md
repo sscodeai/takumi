@@ -486,4 +486,96 @@ or an anchor happens to disagree. That gap is recorded in ADR-027 and is the nex
 in the judge's vocabulary. Nothing in the command is language-specific, and nothing verifies the
 language either: a Chinese or Japanese document renders as written and is judged the same way.
 
+## 11. A decision the human recorded is a decision the implementation must honour (ADR-028)
+
+Section 10 recorded the gap plainly: the judge checked that every decision was RECORDED (DOC-001) and
+that the declared relations held, but nothing derived a check from the `chosen` option — so a document
+that chose "first row wins" and an implementation that keeps the last row would pass.
+
+The document now says which check SETTLES which decision, and the check's fixture and expected values
+come from the answer:
+
+```yaml
+    - id: REL-003
+      relation: duplicate-resolution
+      decides: AMB-002          # this relation is the one that settles AMB-002
+    - id: REL-004
+      relation: malformed-row-accounting
+      decides: AMB-001
+    - id: DIFF-001
+      anchor: independent-aggregation
+      decides: AMB-004          # the rounding rule the judge recomputes with
+```
+
+The forge refuses, before any judge exists, when the binding is incomplete or unmechanisable. Each
+refusal was produced by a real invocation:
+
+```
+$ … forge …                                        # REL-003's `decides: AMB-002` removed
+blocking decision(s) AMB-002 are exercised by no declared relation or anchor: add "decides: AMB-nnn"
+to the check that settles them — a blocking decision nothing checks does not bind the implementation
+
+$ … forge …                                        # a relation pointing at a decision that is not there
+"REL-003" exercises "AMB-099", which is not a decision in this document: a check bound to nothing
+decides nothing
+
+$ … forge …                                        # AMB-002 answered "Ask the user at runtime"
+the decision AMB-002 chose "Ask the user at runtime", which the relation REL-003 cannot mechanise —
+this forge can decide "The row with the latest start_date wins" "First row wins" "Last row wins"
+"Treat it as an error": either change the option in the document or implement it in the forge, but a
+decision nobody can check is not a decision
+
+$ … forge …                                        # no relation exercises a rounding decision
+no declared relation or anchor exercises a rounding decision, so the judge would have to assume how
+salaries are rounded: point a relation or anchor at the decision that settles it
+```
+
+What makes it evidence rather than ceremony is the FLIP: the same implementation, the same fixtures,
+only the human's answer changed — and the verdict moves.
+
+| the document chose | the implementation (unchanged) | the run |
+| --- | --- | --- |
+| the row with the latest start_date wins | keeps the latest start_date | `9/9 ok` → `acceptance PASSED` → `ACCEPT-001` written, delivery ready | 
+| First row wins | keeps the latest start_date | `not ok REL-003 … late-date total 537 want 428` / `not ok DEC-002 AMB-002 NOT honoured: "First row wins" (checked by REL-003, which failed)` → `delivery skipped` | 
+| the row with the latest start_date wins *(restored)* | keeps the latest start_date | `acceptance PASSED`, `ACCEPT-001` carries all nine checks |
+
+The real runs, verbatim from the middle row:
+
+```
+$ … run … --confirmed-requirement sha256:23d93ab3417d…      # the document the flip was confirmed as
+  step judge_forge: completed — judge forged: …/judge.sh sha256:44c838119fda (outside …/worktree)
+  step artifact_acceptance: failed — acceptance FAILED: the harness reported a failing verdict
+    not ok 3 - REL-003 duplicate-resolution: the chosen option "first-row" does not hold
+      (headcount 4 want 4, late-date total 537 want 428, early-date total 428 want 428)
+    ok 7 - DEC-001 AMB-001 honoured: "Skip the row, count it, and report the count" (checked by REL-004)
+    not ok 8 - DEC-002 AMB-002 NOT honoured: "First row wins" (checked by REL-003, which failed)
+    ok 9 - DEC-003 AMB-004 honoured: "Half-up, no currency printed" (checked by DIFF-001)
+  step delivery: skipped — skipped (dependency failed: artifact_acceptance)
+✓ workflow "blackbox-acceptance" failed                       EXIT=1
+```
+
+And the ACCEPT artifact is now legible from the human's side — the checks list says which decision each
+binding settled:
+
+```
+  checks:
+    - "pass: REL-003 duplicate-resolution: 'latest-start-date' holds on both duplicate fixtures (headcount 4, totals 537 / 428)"
+    - "pass: DEC-001 AMB-001 honoured: 'Skip the row, count it, and report the count' (checked by REL-004)"
+    - "pass: DEC-002 AMB-002 honoured: 'The row with the latest start_date wins' (checked by REL-003)"
+    - "pass: DEC-003 AMB-004 honoured: 'Half-up, no currency printed' (checked by DIFF-001)"
+```
+
+Two further runs of the same kind are in the regression suite (`judge-forge-decisions.test.ts`, 12
+tests, all passing): the malformed-row answer "Stop with an error" fails DEC-001 against an
+implementation that skips and counts, and the rounding answer "Truncate" fails DIFF-001 and DEC-003.
+
+Honest limits, stated rather than worked around: the binding is DECLARED by a human in the document and
+nothing verifies that the check really exercises the decision it claims (a "decoration binding" is not
+caught); the matching is on the option's text, so re-wording an option without touching the forge
+refuses rather than mis-checks; AMB-003 (where the summary goes) is not mechanised and is reported as
+`# not mechanised (non-blocking decision)` — never as ok — so an implementation that writes a file when
+the document chose stdout-only is still accepted; and the fixture rows themselves are still fixed in the
+forge, with only the algebra around them driven by the answer.
+
+
 
