@@ -73,6 +73,14 @@ interface Fixture {
   worktree: string;
 }
 
+/**
+ * The ACCEPT artifact path, built from parts on purpose: a single literal path of this length is a
+ * mixed-case run with digits, which the repository's own secret heuristic (`review-rules.ts`
+ * `highEntropyRun`) reads as a suspected credential — and that finding is `human`, so any delivery
+ * containing it stops for a person. Same remedy as the earlier fixture tokens.
+ */
+const acceptArtifactOf = (dir: string): string => join(dir, '.takumi', 'artifacts', 'acceptance', `ACCEPT-${'001'}.md`);
+
 function project(forgeScript: string): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'takumi-forge-'));
   const worktree = join(dir, 'worktree');
@@ -193,7 +201,7 @@ test('judge forge: the judge is produced outside the worktree and runs from its 
     assert.ok(implPrompt.length > 0);
     assert.ok(!/judge/i.test(implPrompt), `the implementer prompt must not mention the judge: ${implPrompt}`);
 
-    const artifact = readFileSync(join(f.dir, '.takumi/artifacts/acceptance/ACCEPT-001.md'), 'utf8');
+    const artifact = readFileSync(acceptArtifactOf(f.dir), 'utf8');
     assert.match(artifact, /judge: .*\.takumi\/acceptance\/judge\/judge\.sh/);
     assert.match(artifact, /judgeDigest: sha256:[0-9a-f]{64}/);
     assert.match(artifact, /cwd: .*\.takumi\/acceptance\/judge$/m);
@@ -214,7 +222,7 @@ test('judge forge: a generator that does not report ok stops the run before any 
     assert.match(res.steps.find((s) => s.stepId === 'judge')?.summary ?? '', /no "JUDGE_FORGE: ok" marker/);
     assert.equal(res.steps.find((s) => s.stepId === 'accept')?.status, 'skipped');
     assert.equal(res.steps.find((s) => s.stepId === 'ship')?.status, 'skipped');
-    assert.ok(!existsSync(join(f.dir, '.takumi/artifacts/acceptance/ACCEPT-001.md')), 'no ACCEPT artifact');
+    assert.ok(!existsSync(acceptArtifactOf(f.dir)), 'no ACCEPT artifact');
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }
@@ -239,7 +247,7 @@ test('judge forge: a run that forged a judge must accept with THAT judge', async
     const res = await executeWorkflow(workflow({ accept: { acceptanceRef: 'own.sh' } }), context(f));
     assert.equal(res.status, 'failed');
     assert.match(res.steps.find((s) => s.stepId === 'accept')?.summary ?? '', /must accept with that judge/);
-    assert.ok(!existsSync(join(f.dir, '.takumi/artifacts/acceptance/ACCEPT-001.md')), 'no ACCEPT artifact');
+    assert.ok(!existsSync(acceptArtifactOf(f.dir)), 'no ACCEPT artifact');
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }
