@@ -13,6 +13,11 @@
 # generated from THIS block, not from the implementation — and a relation the forge does not
 # implement is a refusal, never a silently skipped check.
 #
+# ADR-028: a relation may say `decides: AMB-nnn`, which means it EXERCISES that decision — its fixture
+# and its expected values come from the `chosen` option, and the judge reports a DEC-nnn line saying
+# whether the implementation honours it. A BLOCKING decision that no relation exercises is refused at
+# forge time: a decision nothing checks does not bind the implementation, it only decorates it.
+#
 # Format is deliberately boring YAML: it has to be writable by a human and hashable by a machine.
 
 requirement:
@@ -134,16 +139,21 @@ deliverable:
       description: The sum of the per-department totals must equal the printed overall total.
     - id: REL-003
       relation: duplicate-resolution
-      description: Adding a duplicate id with a LATER start_date must not increase the headcount (AMB-002).
+      # ADR-028: this relation is the one that SETTLES AMB-002, so its fixtures and its expectations
+      # come from that decision's `chosen` option, and a run reports DEC-002 for it.
+      decides: AMB-002
+      description: Whether a repeated id adds an employee, and which row wins, is decided by AMB-002 — the fixture is built from that option and the counts must match it.
     - id: REL-004
       relation: malformed-row-accounting
-      description: Three injected malformed rows must reduce the valid headcount by exactly three and be counted (AMB-001).
+      decides: AMB-001
+      description: What happens to a malformed row is decided by AMB-001 — three injected malformed rows must behave the way that option says.
   differential:
     - id: DIFF-001
       anchor: independent-aggregation
-      description: An independent recomputation of the department totals and the overall total must equal the tool's output.
+      decides: AMB-004
+      description: An independent recomputation of the department totals and the overall total must equal the tool's output, rounded the way AMB-004 decided.
 
 confirmation:
   by: "SS"
-  at: "2026-10-01T02:00:02.958Z"
+  at: "2026-10-01T04:54:38.269Z"
   method: bounded-choice
