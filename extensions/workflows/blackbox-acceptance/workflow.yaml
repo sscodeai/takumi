@@ -72,10 +72,14 @@ steps:
     dependsOn: [implementation]
   - id: quality_gate
     type: quality_gate
-    # The project's test command. The gate fails closed on a non-zero exit, an
-    # unrecognised output shape, a hard-fail marker, failing tests, zero tests,
-    # or an all-skipped run.
-    prompt: pnpm test
+    # The project's own test command, run in the WORKTREE (the implementation). It is a SMOKE gate,
+    # not the evidence: a green suite only says the implementer's own tests pass, and the
+    # implementer's tests share the implementer's blind spot — which is what the forged judge
+    # (ADR-026) exists for. It fails closed when the project has no test command at all.
+    prompt: |
+      if [ -f package.json ]; then pnpm test 2>&1 | tail -60;
+      elif ls *.test.mjs >/dev/null 2>&1; then node --test *.test.mjs 2>&1 | tail -60;
+      else echo "no test command found in this project" >&2; exit 1; fi
     dependsOn: [unit_and_integration_tests]
     timeoutMs: 600000
   - id: rule_review
@@ -88,16 +92,26 @@ steps:
       block finding, on a human decision, or on a change set that cannot be
       reviewed.
     dependsOn: [quality_gate]
+  - id: judge_forge
+    # ADR-026: the judge is produced HERE — outside the implementation worktree, from the CONFIRMED
+    # requirement's deliverable contract, and without reading the implementation. It runs after the
+    # implementation so the implementer cannot read it (the manifest refuses any other step whose
+    # prompt references {judge…}). What is frozen before the implementation is the confirmed
+    # document — its digest is the human's token — and the judge is a deterministic function of it.
+    type: judge_forge
+    requirementRef: docs/requirements/poc-blackbox-acceptance.yaml
+    forgeRef: extensions/judges/metamorphic-forge.sh
+    dependsOn: [rule_review]
+    timeoutMs: 120000
   - id: artifact_acceptance
-    # ADR-025: a first-class acceptance step. It is bound to the CONFIRMED requirement document (the
-    # human's digest token travels in --confirmed-requirement) and to a harness that is not the
-    # implementation's own test. The step fails closed on an edited requirement, on a missing
-    # confirmation, and on a missing/failing ACCEPT_VERDICT marker; only a passing verdict writes the
-    # ACCEPT artifact.
+    # ADR-025 + ADR-026: the acceptance runs the FORGED judge ({judgePath}), from the judge's own
+    # directory, and refuses any other harness. It fails closed on an edited requirement, on a
+    # missing confirmation, on a judge that could not be forged, and on a missing or failing
+    # ACCEPT_VERDICT marker; only a passing verdict writes the ACCEPT artifact.
     type: acceptance
     requirementRef: docs/requirements/poc-blackbox-acceptance.yaml
-    acceptanceRef: extensions/workflows/blackbox-acceptance/checks/acceptance-tap.sh
-    dependsOn: [rule_review]
+    acceptanceRef: "{judgePath}"
+    dependsOn: [judge_forge]
     timeoutMs: 120000
   - id: delivery
     type: delivery
