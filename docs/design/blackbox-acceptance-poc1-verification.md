@@ -23,7 +23,7 @@ found defects that were NOT predicted by the design.
 | `extensions/skills/req-intake/SKILL.md` | The document schema and the hard rule that every open decision point becomes an `AMB-nnn` entry with 2-4 bounded options and a default. |
 | `extensions/skills/req-intake/prompts/intake.md` | Request text → one YAML document with `requirements[]` (`REQ-nnn`) and `ambiguities[]` (`AMB-nnn`). |
 | `extensions/skills/req-intake/prompts/confirm.md` | Renders the document plus the sha256 of its canonical text so a human confirms content, not a step name. |
-| `extensions/workflows/blackbox-acceptance/workflow.yaml` | The eight steps, using only the seven existing step types. |
+| `extensions/workflows/blackbox-acceptance/workflow.yaml` | The eight steps, using only the seven step types that existed at PoC-1 (PoC-2 replaced the `quality_gate` stand-in with the real `acceptance` step — see section 8). |
 | `extensions/workflows/blackbox-acceptance/checks/acceptance-tap.sh` | The PoC-1 acceptance stand-in: a real fail-closed TAP harness. |
 | `takumi.yaml` | The repository root becomes a takumi project, so takumi can run on itself. |
 | `docs/requirements/poc-blackbox-acceptance.md` | The PoC input fixture (an employee-CSV summary request with four genuinely open decisions). |
@@ -246,3 +246,80 @@ EXIT=1
 
 So a failed gate now stops the steps behind it and the process says so — the two
 properties PoC-2's acceptance step depends on.
+
+## 8. PoC-2: the acceptance step, bound to a confirmed requirement
+
+PoC-2 added the core machinery (ADR-025): `requirementDigest`/`NO_REQUIREMENT` and the requirement
+inside the ADR-018 review digest; the `acceptance` step type with `requirementRef`/`acceptanceRef`
+required at load; `parseAcceptVerdict`; the ACCEPT artifact; `takumi requirement digest` and
+`run --requirement/--confirmed-requirement`; and the workflow now runs the real acceptance step
+against `docs/requirements/poc-blackbox-acceptance.yaml`.
+
+The confirmation token:
+
+```
+$ node apps/cli/dist/index.js requirement digest docs/requirements/poc-blackbox-acceptance.yaml
+docs/requirements/poc-blackbox-acceptance.yaml
+sha256:53804e5bba4370d7f9f053ee03baf9f96a02a398b9e6fa7245222c8fad3bc1b4
+```
+
+The run, with that token:
+
+```
+  workflow[artifact_acceptance]: acceptance PASSED (8 check(s) ok) — ACCEPT-001 written
+  step quality_gate: completed — quality_gate PASSED: 0 failing over 631 tests, exit 0
+  step rule_review: completed — rule_review PASSED: no findings in d9acfe935e3b..ef789667298f
+  step artifact_acceptance: completed — acceptance PASSED: the confirmed requirement is satisfied
+  step delivery: completed — delivery bundle ready (5 artifacts)
+✓ workflow "blackbox-acceptance" completed
+EXIT=0
+```
+
+The ACCEPT artifact it wrote (`.takumi/artifacts/acceptance/ACCEPT-001.md`):
+
+```yaml
+id: ACCEPT-001
+kind: acceptance
+requirement:
+  ref: docs/requirements/poc-blackbox-acceptance.yaml
+  digest: sha256:53804e5bba4370d7f9f053ee03baf9f96a02a398b9e6fa7245222c8fad3bc1b4
+  requirements: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005]
+artifact:
+  head: ef789667298f136be54a7a6d8bc73314e9e1007b
+acceptance:
+  harness: extensions/workflows/blackbox-acceptance/checks/acceptance-tap.sh
+  verdict: pass
+  verdictMarker: "ACCEPT_VERDICT: pass"
+  checks:
+    - "pass: every open decision has a chosen option (4/4)"
+    …
+confirmed:
+  ref: docs/requirements/poc-blackbox-acceptance.yaml
+  digest: sha256:53804e5bba4370d7f9f053ee03baf9f96a02a398b9e6fa7245222c8fad3bc1b4
+```
+
+Then the requirement was edited (one `chosen` option flipped, four lines of a five-requirement
+document) and the run repeated with the OLD token:
+
+```
+  workflow[artifact_acceptance]: acceptance FAILED: the requirement document
+    "docs/requirements/poc-blackbox-acceptance.yaml" is not the one that was confirmed
+    (confirmed 53804e5bba43 at "docs/requirements/poc-blackbox-acceptance.yaml",
+    the document now hashes to 8f751e736c84): re-confirm the edited document before it
+    can be accepted
+  step artifact_acceptance: failed — (the same message)
+  step delivery: skipped — skipped (dependency failed: artifact_acceptance)
+✓ workflow "blackbox-acceptance" failed
+EXIT=1
+```
+
+That is the design's rule 7 — "an acceptance before delivery protects nothing by ordering alone" —
+now enforced by mechanism: the failed acceptance stops the delivery, and the process says so.
+
+What PoC-2 does NOT prove: nothing about sandbox isolation (`cwd` is not a permission boundary);
+nothing about the harness being produced outside the implementer's context (the judge-forge is
+PoC-3, and today the harness is a file in the same repository); nothing about intake quality under a
+real runtime (with `fake` the agent artifacts are the prompt echoed back, which is why the harness's
+checks 1-3 are about the confirmed document and 4-6 are labelled as wiring checks); and nothing about
+the bounded-choice confirmation UI, which does not exist yet — the human reads the document and
+approves its token.
