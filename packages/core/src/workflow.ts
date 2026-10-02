@@ -21,6 +21,7 @@ export const WORKFLOW_STEP_TYPES = [
   'quality_gate',
   'independent_review',
   'rule_review',
+  'judge_forge',
   'acceptance',
   'delivery',
 ] as const;
@@ -73,11 +74,23 @@ export interface WorkflowStep {
    */
   requirementRef?: string;
   /**
+   * `judge_forge`: the generator that writes the acceptance judge, as a path executed by `bash`
+   * (ADR-026). Required for a `judge_forge` step.
+   *
+   * It runs in the run's judge directory — `<project>/.takumi/acceptance/<stepId>/`, which is
+   * outside the implementation worktree — and it is given the requirement document and its digest,
+   * NOT the implementation. It must print `JUDGE_FORGE: ok` and `JUDGE_PATH: <file>`.
+   */
+  forgeRef?: string;
+  /**
    * `acceptance`: the harness command the step runs, relative to the project. Required: with
    * nothing to run there is no verdict to report.
    *
    * Executed with the file name resolved by `bash` (the PoC-2 harness is a shell script), so a path
    * with a space is not a shell-injection question — no shell parses it.
+   *
+   * A `{judgePath}` placeholder resolves to the judge a `judge_forge` step produced; when the run
+   * forged a judge, the acceptance MUST use that judge, and the engine refuses any other harness.
    */
   acceptanceRef?: string;
 }
@@ -124,6 +137,28 @@ export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManif
     }
     if (step?.type === 'rule_review' && (typeof step.baseRef !== 'string' || step.baseRef.trim().length === 0)) {
       issues.push({ stepId, message: `step ${stepId} is a rule_review and requires a non-empty baseRef` });
+    }
+    if (step?.type === 'judge_forge') {
+      // A forge with nothing to read from and nothing to run cannot produce a judge.
+      if (typeof step.requirementRef !== 'string' || step.requirementRef.trim().length === 0) {
+        issues.push({
+          stepId,
+          message: `step ${stepId} is a judge_forge and requires a non-empty requirementRef (the confirmed requirement the judge is derived from)`,
+        });
+      }
+      if (typeof step.forgeRef !== 'string' || step.forgeRef.trim().length === 0) {
+        issues.push({ stepId, message: `step ${stepId} is a judge_forge and requires a non-empty forgeRef (the generator to run)` });
+      }
+    }
+    // The judge path must never reach the steps that produce or gate the implementation: an agent
+    // that can read the judge can fit it. This is a LOAD-time refusal rather than a hope, because
+    // the judge is written after those steps have run and nothing else would notice the reference.
+    const stepPrompt = typeof step?.prompt === 'string' ? step.prompt : '';
+    if (step?.type !== 'judge_forge' && step?.type !== 'acceptance' && /\{judge/i.test(stepPrompt)) {
+      issues.push({
+        stepId,
+        message: `step ${stepId} is a ${String(step?.type)} step whose prompt references {judge…}: the judge is for the acceptance step only, and a step that can see it can fit it`,
+      });
     }
     if (step?.type === 'acceptance') {
       // An acceptance is a verdict about ONE requirement document, judged by a harness that lives

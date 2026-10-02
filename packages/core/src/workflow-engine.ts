@@ -60,6 +60,14 @@ export interface WorkflowExecutionContext {
    * which fails the step — an acceptance nobody confirmed is a machine grading its own work.
    */
   confirmedRequirement?: { ref: string; digest: string };
+  /**
+   * Where the IMPLEMENTATION is produced, when that is not the run's own directory (ADR-026).
+   *
+   * Defaults to `cwd`. The point of naming it is that the judge must live OUTSIDE it: a judge the
+   * implementer can read is a judge the implementer can fit, and with a separate worktree that
+   * separation is a path property a test can assert rather than a promise in a comment.
+   */
+  worktree?: string;
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
   /**
@@ -378,7 +386,7 @@ export async function executeWorkflow(
           const task: AgentTask = {
             id: `${runId}:${stepId}:1`,
             prompt: await resolveStepPrompt(step, ctx.skillsRoot, vars),
-            cwd: ctx.cwd,
+            cwd: ctx.worktree ?? ctx.cwd,
             trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
             context: { workflowStep: stepId, workflow: workflow.name, ...vars },
           };
@@ -489,7 +497,7 @@ export async function executeWorkflow(
         const cmd = renderPrompt(step.prompt ?? '', vars);
         try {
           ctx.onEvent?.(stepId, `tool run: ${cmd}`);
-          const { stdout, stderr } = await execAsync(cmd, { cwd: ctx.cwd, timeout: step.timeoutMs ?? 120000 });
+          const { stdout, stderr } = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 120000 });
           const out = (stdout?.trim() || stderr?.trim() || '(no output)').slice(0, 4000);
           const kind = step.id.split('_')[0] ?? 'tool';
           const artifact = await ctx.artifacts.write({
@@ -526,7 +534,7 @@ export async function executeWorkflow(
         let out = '';
         let exitOk = true;
         try {
-          const r = await execAsync(cmd, { cwd: ctx.cwd, timeout: step.timeoutMs ?? 300000 });
+          const r = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 300000 });
           out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
         } catch (e) {
           exitOk = false;
@@ -653,7 +661,7 @@ export async function executeWorkflow(
         let findings: ReviewFinding[] = [];
         try {
           const input = await collectReviewInput(git, {
-            worktree: ctx.cwd,
+            worktree: ctx.worktree ?? ctx.cwd,
             baseSha,
             headSha,
             // Only test files need their CONTENT read; the rules that judge
@@ -774,6 +782,123 @@ export async function executeWorkflow(
         continue;
       }
 
+      // Judge forge (ADR-026): produce the judge for this run OUTSIDE the implementation worktree and
+      // OUT OF the implementer's context, from the requirement document rather than from the
+      // implementation. The generator gets the requirement's ref and digest and the worktree path —
+      // it must not need the implementation to describe how the requirement could be checked.
+      //
+      // Fail-closed like every other evidence step: no generator, no readable requirement, no
+      // `JUDGE_FORGE: ok` marker, no `JUDGE_PATH`, a path outside the judge directory, a stale judge
+      // from a previous run, or no judge file at all all fail the step — and the acceptance behind it
+      // is then skipped, so an unverifiable delivery produces no ACCEPT artifact.
+      if (step.type === 'judge_forge') {
+        run.stepStatus[stepId] = 'running';
+        const requirementRef = step.requirementRef?.trim() ?? '';
+        const forgeRef = step.forgeRef?.trim() ?? '';
+        const reject = (message: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary: message, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `judge forge FAILED: ${message.split('\n')[0] ?? message}`);
+        };
+        if (requirementRef.length === 0 || forgeRef.length === 0) {
+          reject(`a judge_forge requires a requirementRef and a forgeRef (got "${requirementRef}" / "${forgeRef}")`);
+          done.add(stepId);
+          continue;
+        }
+        const path = await import('node:path');
+        const fsPromises = await import('node:fs/promises');
+        const fsMod = await import('node:fs');
+        const worktreePath = path.resolve(ctx.worktree ?? ctx.cwd);
+        let requirementText: string;
+        try {
+          requirementText = fsMod.readFileSync(path.join(ctx.cwd, requirementRef), 'utf8');
+        } catch (e) {
+          reject(`the requirement document "${requirementRef}" could not be read (${e instanceof Error ? e.message : String(e)})`);
+          done.add(stepId);
+          continue;
+        }
+        const reqDigest = requirementDigest(requirementText);
+        // The judge directory is run-scoped and recreated, so a judge from an earlier run can never be
+        // reused as this run's evidence.
+        const judgeDir = path.join(ctx.cwd, '.takumi', 'acceptance', stepId);
+        try {
+          await fsPromises.rm(judgeDir, { recursive: true, force: true });
+          await fsPromises.mkdir(judgeDir, { recursive: true });
+        } catch (e) {
+          reject(`the judge directory ${judgeDir} could not be prepared (${e instanceof Error ? e.message : String(e)})`);
+          done.add(stepId);
+          continue;
+        }
+        let out = '';
+        let exitOk = true;
+        try {
+          const r = await execFileAsync('bash', [path.resolve(ctx.cwd, forgeRef)], {
+            cwd: judgeDir,
+            timeout: step.timeoutMs ?? 300000,
+            env: {
+              ...process.env,
+              TAKUMI_REQUIREMENT: requirementRef,
+              TAKUMI_REQUIREMENT_DIGEST: `sha256:${reqDigest}`,
+              TAKUMI_WORKTREE: worktreePath,
+              TAKUMI_PROJECT: ctx.cwd,
+              TAKUMI_JUDGE_DIR: judgeDir,
+            },
+          });
+          out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+        } catch (e) {
+          exitOk = false;
+          const shell = e as { stdout?: string; stderr?: string };
+          out = `${shell.stdout ?? ''}${shell.stderr ?? ''}` || (e instanceof Error ? e.message : String(e));
+        }
+        const forged = /^\s*JUDGE_FORGE\s*[:=]\s*ok\s*$/im.test(out);
+        const declared = /^\s*JUDGE_PATH\s*[:=]\s*(.+?)\s*$/im.exec(out)?.[1]?.replace(/^[*`"']|[*`"']$/g, '');
+        const summaryLines = [`judge forge for ${requirementRef} sha256:${shortDigest(reqDigest)}`, `generator: ${forgeRef}`, `exit: ${exitOk ? 0 : '!0'}`, `judge dir: ${judgeDir}`, out.slice(0, 1200)].join('\n');
+        if (!exitOk || !forged) {
+          reject(`the judge forge did not report success (${forged ? 'non-zero exit' : 'no "JUDGE_FORGE: ok" marker'})\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        if (declared === undefined || declared.length === 0) {
+          reject(`the judge forge reported ok but declared no JUDGE_PATH\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        // The judge must be a file the generator wrote INSIDE its own directory: a generator that
+        // points somewhere else (the worktree, a source file) is pointing at the implementation.
+        const judgePath = path.resolve(judgeDir, declared);
+        const inDir = judgePath === judgeDir || judgePath.startsWith(`${judgeDir}${path.sep}`);
+        if (!inDir) {
+          reject(`the forged judge "${declared}" resolves to ${judgePath}, which is outside the judge directory ${judgeDir}: the judge is produced here and nowhere else\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        if (judgePath.startsWith(`${worktreePath}${path.sep}`) && worktreePath !== path.resolve(ctx.cwd)) {
+          reject(`the forged judge ${judgePath} is inside the implementation worktree ${worktreePath}: the implementer could read it, and a judge the implementer can read is a judge the implementer can fit\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        let judgeText = '';
+        try {
+          judgeText = fsMod.readFileSync(judgePath, 'utf8');
+        } catch (e) {
+          reject(`the judge forge declared "${declared}" but that file could not be read (${e instanceof Error ? e.message : String(e)})\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        const judgeDigest = requirementDigest(judgeText);
+        vars['judgePath'] = judgePath;
+        vars['judgeDigest'] = judgeDigest;
+        vars['judgeDir'] = judgeDir;
+        const forgeSummary = `judge forged: ${judgePath} sha256:${shortDigest(judgeDigest)} (outside ${worktreePath})\n${summaryLines}`;
+        run.stepStatus[stepId] = 'completed';
+        stepResults.push({ stepId, status: 'completed', summary: forgeSummary, artifacts: [], tests: [] });
+        done.add(stepId);
+        ctx.onEvent?.(stepId, `judge forged: ${judgePath} sha256:${shortDigest(judgeDigest)}`);
+        continue;
+      }
+
       // Acceptance step (ADR-025): a verdict about ONE confirmed requirement document, produced by a
       // harness that is NOT the implementation's own test.
       //
@@ -786,7 +911,11 @@ export async function executeWorkflow(
       if (step.type === 'acceptance') {
         run.stepStatus[stepId] = 'running';
         const requirementRef = step.requirementRef?.trim() ?? '';
-        const acceptanceRef = step.acceptanceRef?.trim() ?? '';
+        // A forged judge arrives as {judgePath}; a literal path is still allowed (a workflow without a
+        // forge), but when this run forged a judge the acceptance MUST use it — checked below.
+        const acceptanceRef = renderPrompt(step.acceptanceRef ?? '', vars).trim();
+        const forgedJudgePath = vars['judgePath'];
+        const forgedJudgeDigest = vars['judgeDigest'] ?? '';
         const reject = (message: string): void => {
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
@@ -798,6 +927,20 @@ export async function executeWorkflow(
         // Defence in depth: the manifest validator already refuses both absences at load time.
         if (requirementRef.length === 0 || acceptanceRef.length === 0) {
           reject(`an acceptance requires a requirementRef and an acceptanceRef (got "${requirementRef}" / "${acceptanceRef}")`);
+          done.add(stepId);
+          continue;
+        }
+        if (acceptanceRef.includes('{')) {
+          reject(
+            `the acceptance harness reference "${step.acceptanceRef ?? ''}" did not resolve to a path: {judgePath} needs a judge_forge step that ran before this one`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        if (forgedJudgePath !== undefined && acceptanceRef !== forgedJudgePath) {
+          reject(
+            `this run forged its judge at "${forgedJudgePath}" and this acceptance would run "${acceptanceRef}": a workflow that forges a judge must accept with that judge, not with a harness of its own choosing`,
+          );
           done.add(stepId);
           continue;
         }
@@ -830,10 +973,24 @@ export async function executeWorkflow(
           continue;
         }
 
+        // The judge runs from its OWN directory (its forged home), never from the implementation
+        // worktree: the cwd it gets is a fact of the run, and the ACCEPT artifact records it. A real
+        // judge reaches the artefact through TAKUMI_WORKTREE rather than by living inside it.
+        const worktreePath = ctx.worktree ?? ctx.cwd;
+        const harnessCwd = forgedJudgePath === undefined ? ctx.cwd : (await import('node:path')).dirname(forgedJudgePath);
         let out = '';
         let exitOk = true;
         try {
-          const r = await execFileAsync('bash', [acceptanceRef], { cwd: ctx.cwd, timeout: step.timeoutMs ?? 300000 });
+          const r = await execFileAsync('bash', [acceptanceRef], {
+            cwd: harnessCwd,
+            timeout: step.timeoutMs ?? 300000,
+            env: {
+              ...process.env,
+              TAKUMI_WORKTREE: worktreePath,
+              TAKUMI_PROJECT: ctx.cwd,
+              ...(forgedJudgePath === undefined ? {} : { TAKUMI_JUDGE_DIR: harnessCwd }),
+            },
+          });
           out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
         } catch (e) {
           exitOk = false;
@@ -860,6 +1017,9 @@ export async function executeWorkflow(
         const summary = [
           `acceptance ${accepted ? 'PASSED' : 'FAILED'}: ${accepted ? 'the confirmed requirement is satisfied' : (verdict.error ?? 'the harness reported a failing verdict')}`,
           `harness: ${acceptanceRef}`,
+          `judge: ${forgedJudgePath === undefined ? '(none forged; a literal harness)' : `${forgedJudgePath} sha256:${shortDigest(forgedJudgeDigest)}`}`,
+          `harness cwd: ${harnessCwd}`,
+          `worktree: ${worktreePath}`,
           `requirement: ${requirementRef} sha256:${shortDigest(digest)}`,
           `confirmed: ${ctx.confirmedRequirement.ref} sha256:${shortDigest(ctx.confirmedRequirement.digest)}`,
           `verdict: ${verdict.verdict ?? '(none)'}`,
@@ -881,8 +1041,13 @@ export async function executeWorkflow(
             `  requirements: [${requirements.join(', ')}]`,
             'artifact:',
             `  head: ${head ?? 'unknown'}`,
+            `  worktree: ${worktreePath}`,
             'acceptance:',
             `  harness: ${acceptanceRef}`,
+            `  cwd: ${harnessCwd}`,
+            ...(forgedJudgePath === undefined
+              ? ['  judge: none']
+              : [`  judge: ${forgedJudgePath}`, `  judgeDigest: sha256:${forgedJudgeDigest}`]),
             '  verdict: pass',
             `  verdictMarker: "ACCEPT_VERDICT: ${verdict.verdict}"`,
             ...(checks.length === 0 ? ['  checks: []'] : ['  checks:', ...checks.map((c) => `    - "${c.result}: ${c.check.replace(/"/g, "'")}"`)]),
@@ -971,7 +1136,7 @@ export async function executeWorkflow(
           // Resolve the prompt from the step's skill template when configured,
           // else the in-workflow prompt (acceptance Gate 8: skills drive behavior).
           prompt: await resolveStepPrompt(step, ctx.skillsRoot, vars),
-          cwd: ctx.cwd,
+          cwd: ctx.worktree ?? ctx.cwd,
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
           context: { workflowStep: stepId, workflow: workflow.name, ...vars },
         };

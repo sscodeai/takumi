@@ -93,6 +93,7 @@ async function main(argv: string[]): Promise<number> {
       let resume = false;
       let requirement: string | undefined;
       let confirmedRequirement: string | undefined;
+      let worktree: string | undefined;
 
       for (let i = 0; i < rest.length; i++) {
         const arg = rest[i] ?? '';
@@ -110,6 +111,8 @@ async function main(argv: string[]): Promise<number> {
           requirement = rest[++i];
         } else if (arg === '--confirmed-requirement') {
           confirmedRequirement = rest[++i];
+        } else if (arg === '--worktree') {
+          worktree = rest[++i];
         } else if (arg.startsWith('--runtime=')) {
           runtimeId = arg.slice('--runtime='.length);
         } else if (arg.startsWith('--workflow=')) {
@@ -120,6 +123,8 @@ async function main(argv: string[]): Promise<number> {
           requirement = arg.slice('--requirement='.length);
         } else if (arg.startsWith('--confirmed-requirement=')) {
           confirmedRequirement = arg.slice('--confirmed-requirement='.length);
+        } else if (arg.startsWith('--worktree=')) {
+          worktree = arg.slice('--worktree='.length);
         } else {
           positional.push(arg);
         }
@@ -159,7 +164,7 @@ async function main(argv: string[]): Promise<number> {
       console.log(`  prompt: ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`);
       console.log('');
 
-      const { events, summary, traceabilityMatrix, artifacts, status } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox, resume, confirmedRequirement: confirmation });
+      const { events, summary, traceabilityMatrix, artifacts, status } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox, resume, confirmedRequirement: confirmation, worktree });
 
       for (const ev of events) console.log(`  ${ev}`);
       console.log('');

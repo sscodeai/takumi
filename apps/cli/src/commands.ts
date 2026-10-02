@@ -265,6 +265,11 @@ export interface RunOptions {
    * that runs an `acceptance` step — the step refuses to accept a document that does not hash to it.
    */
   confirmedRequirement?: { ref: string; digest: string };
+  /**
+   * ADR-026: where the implementation is produced, when that is not the run's own directory. The
+   * judge must live outside it, and naming it is what makes that separation assertable.
+   */
+  worktree?: string;
 }
 
 export async function runTask(opts: RunOptions): Promise<{
@@ -334,6 +339,7 @@ export async function runTask(opts: RunOptions): Promise<{
         skillsRoot: join(opts.cwd, opts.config.registry.skills),
         resume: resumeCtx,
         ...(opts.confirmedRequirement === undefined ? {} : { confirmedRequirement: opts.confirmedRequirement }),
+        ...(opts.worktree === undefined ? {} : { worktree: opts.worktree }),
         onApproval: async (req) => {
           const line = `approval required [${req.stepId}]: ${req.prompt}`;
           events.push(line);
