@@ -92,10 +92,15 @@ export interface WorkflowManifestIssue {
  * Validate a workflow manifest before anything runs.
  *
  * This exists so a manifest that names a step type the engine does not execute
- * (or a `rule_review` with no base to judge) fails at load time with an
- * actionable message, instead of silently behaving like an agent step. The
- * engine's dispatch is exhaustive over `WORKFLOW_STEP_TYPES`; this is the reader
- * that keeps a YAML file honest about that contract.
+ * (or a `rule_review` with no base to judge, or an `acceptance` with no requirement
+ * to be about) fails at load time with an actionable message, instead of silently
+ * behaving like an agent step. NOTE, measured rather than assumed: the engine's
+ * dispatch is a CHAIN of `if (step.type === …)` blocks whose last branch is the
+ * agent fallthrough, so it is NOT exhaustive — a type that is added to
+ * `WORKFLOW_STEP_TYPES` and to this validator but not to the engine runs silently as
+ * an agent step (scout finding; see docs/design/blackbox-acceptance-scout.md §1.2).
+ * This is the reader that keeps a YAML file honest about that contract, and the
+ * reason a new type must land with its engine branch in the same commit.
  */
 export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManifestIssue[] {
   const issues: WorkflowManifestIssue[] = [];
