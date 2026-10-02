@@ -976,7 +976,9 @@ export async function executeWorkflow(
         // The judge runs from its OWN directory (its forged home), never from the implementation
         // worktree: the cwd it gets is a fact of the run, and the ACCEPT artifact records it. A real
         // judge reaches the artefact through TAKUMI_WORKTREE rather than by living inside it.
-        const worktreePath = ctx.worktree ?? ctx.cwd;
+        // Resolved, not passed through: the judge runs from ITS OWN directory, so a relative
+        // --worktree would have it `cd` to a path that does not exist there.
+        const worktreePath = (await import('node:path')).resolve(ctx.worktree ?? ctx.cwd);
         const harnessCwd = forgedJudgePath === undefined ? ctx.cwd : (await import('node:path')).dirname(forgedJudgePath);
         let out = '';
         let exitOk = true;
