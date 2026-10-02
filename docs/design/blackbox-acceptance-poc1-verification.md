@@ -403,3 +403,87 @@ proven is the judge's behaviour, not an agent's. The four relations and one anch
 measure of what this acceptance covers; the prose criteria the judge reports as not mechanised are
 what it does not.
 
+## 10. The human's side: a bounded-choice confirmation (ADR-027)
+
+The last piece of the request's own shape — "the human only confirms: by CHECKING boxes and TYPING
+NUMBERS" — was still a document plus a copied token. `takumi requirement confirm <ref>` now puts each
+open decision in the document to the human as a numbered, bounded choice, one at a time:
+
+```
+$ takumi requirement confirm docs/requirements/poc-blackbox-acceptance.yaml     # real terminal
+Confirming docs/requirements/poc-blackbox-acceptance.yaml — 4 open decision(s). Nothing is written
+until the last one is answered.
+Each answer is written into the document itself, and the document's digest is the token the
+acceptance binds to.
+
+  What happens to a malformed row?
+    [1] Stop with an error
+    [2] Skip the row, count it, and report the count   (current)
+    [3] Skip the row and write it to a rejected-rows file
+    [enter] keep the current/default choice      [q] abort
+    >
+  Which row wins when employee_id repeats?
+    [1] First row wins   [2] Last row wins   [3] The row with the latest start_date wins (current)   [4] Treat it as an error
+    >                    ← [enter]: keep
+  Where does the summary go?
+    [1] stdout only      [2] stdout, plus an optional file path   (current)
+    > 1                  ← a real CHANGE, written into the document
+  How is the average rounded, and in what currency?
+    [1] Half-up, no currency printed   (current)   [2] Truncate…   [3] Half-up, currency printed…
+    >                    ← [enter]: keep
+
+Confirmed decisions (each written into the document):
+  x AMB-001: Skip the row, count it, and report the count
+  x AMB-002: The row with the latest start_date wins
+  x AMB-003: stdout only
+  x AMB-004: Half-up, no currency printed
+
+The confirmation token for this document — pass it to a run:
+docs/requirements/poc-blackbox-acceptance.yaml
+sha256:aa26fa885a40b759386d5ee65d37393312f98e588df4cf2122683e4456995e98
+```
+
+What it wrote (the diff is the whole record of the human's decision):
+
+```diff
+-    chosen: "stdout, plus an optional file path"
++    chosen: "stdout only"
++confirmation:
++  by: "SS"                      # a NAME, not an identity (ADR-018): the token is what binds
++  at: "2026-10-01T02:00:02.958Z"
++  method: bounded-choice
+```
+
+And the two runs either side of that edit, with the acceptance binding to the token:
+
+```
+$ … run … --confirmed-requirement sha256:867d9fa97c4d…      # the token from BEFORE the confirmation
+  step artifact_acceptance: failed — the requirement document … is not the one that was confirmed
+    (confirmed 867d9fa97c4d …, the document now hashes to aa26fa885a40): re-confirm the edited
+    document before it can be accepted
+  step delivery: skipped — skipped (dependency failed: artifact_acceptance)
+✓ workflow "blackbox-acceptance" failed              EXIT=1
+
+$ … run … --confirmed-requirement sha256:aa26fa885a40…      # the token the confirmation printed
+  step judge_forge: completed — judge forged: … judge.sh sha256:6bf3582e4530 (outside …/worktree)
+  step artifact_acceptance: completed — acceptance PASSED: the confirmed requirement is satisfied
+  step delivery: completed — delivery bundle ready (5 artifacts)
+✓ workflow "blackbox-acceptance" completed           EXIT=0
+```
+
+The ACCEPT artifact it wrote carries that token as the requirement digest, so the chain is closed:
+the number the human typed → the document → the token → the acceptance the machine ran.
+
+Refusals, each demonstrated by a real invocation: a pipeline (`echo "" | … confirm`) is refused with
+`stdin is not a TTY` and prints no token; `--dry-run` lists the decisions read-only and exits 1 while a
+blocking decision has neither default nor choice; `[q]` exits 2 and writes nothing; a blocking decision
+answered `[s]` refuses, writes nothing, and prints no token.
+
+What this does NOT do, stated plainly: the judge checks that every decision is RECORDED (DOC-001) and
+that the declared relations hold — nothing yet derives a check from a `chosen` value, so an
+implementation that does the opposite of a decision the document records is caught only if a relation
+or an anchor happens to disagree. That gap is recorded in ADR-027 and is the next thing worth closing
+in the judge's vocabulary. Nothing in the command is language-specific, and nothing verifies the
+language either: a Chinese or Japanese document renders as written and is judged the same way.
+
+
