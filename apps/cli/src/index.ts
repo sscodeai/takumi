@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { listExtensions, loadConfig, requirementConfirmation, runTask, workflowExitCode } from './commands.js';
+import { listExtensions, loadConfig, runTask, workflowExitCode } from './commands.js';
+import { runRequirementCommand } from './requirement-command.js';
 import { initProject } from './init.js';
 import { createBoardProvider, runBoardCommand } from './board-command.js';
 import { eventLogFor, runOnce, type PilotConfig } from './run-command.js';
@@ -56,24 +57,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'requirement': {
-      const sub = rest[0];
-      if (sub === 'digest') {
-        const ref = rest[1];
-        if (ref === undefined || ref.length === 0) {
-          console.error('usage: takumi requirement digest <ref>');
-          return 1;
-        }
-        try {
-          const token = requirementConfirmation(cwd, ref);
-          console.log(`${token.ref}\nsha256:${token.digest}`);
-          return 0;
-        } catch (e) {
-          console.error(e instanceof Error ? e.message : String(e));
-          return 1;
-        }
-      }
-      console.log('usage: takumi requirement digest <ref>');
-      return 1;
+      return await runRequirementCommand(cwd, rest);
     }
 
     case 'board': {
@@ -225,10 +209,15 @@ Usage:
   takumi pilot --once                  One tick of the unattended runner (ADR-009)
   takumi extension list                List discovered extensions
   takumi requirement digest <ref>      Print the confirmation token for a requirement document
+  takumi requirement confirm <ref>     Decide its open questions as bounded choices, and print the token
+  takumi requirement confirm <ref> --dry-run
+                                       Show what is still undecided (read-only; exits 1 while a
+                                       blocking decision has no default and no choice)
 
 Examples:
   takumi run "Implement user authentication API"
   takumi run requirements.md --runtime fake --workflow jp-si-standard
+  takumi requirement confirm docs/requirements/feature.yaml
   takumi requirement digest docs/requirements/feature.yaml
   takumi run docs/requirements/feature.yaml --workflow blackbox-acceptance \
     --requirement docs/requirements/feature.yaml --confirmed-requirement sha256:<digest>
