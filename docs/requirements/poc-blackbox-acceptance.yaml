@@ -8,6 +8,11 @@
 # `chosen` values below are the options the human decided at confirmation time; the `default`
 # values were the intake's proposal and are kept so a reader can see what was changed.
 #
+# The `deliverable` block is the contract a JUDGE is forged against (ADR-026): how to run the thing,
+# the output shape a judge may parse, and the relations a judge must be able to check. A judge is
+# generated from THIS block, not from the implementation — and a relation the forge does not
+# implement is a refusal, never a silently skipped check.
+#
 # Format is deliberately boring YAML: it has to be writable by a human and hashable by a machine.
 
 requirement:
@@ -111,3 +116,31 @@ ambiguities:
     default: "Half-up, no currency printed"
     chosen: "Half-up, no currency printed"
     blocking: true
+
+# The judge contract (ADR-026). `run` is how the deliverable is invoked (one {csv} placeholder);
+# `output_format` is what a judge may parse; `relations` are the invariants a judge must be able to
+# check — a relation id the forge does not implement makes the forge FAIL rather than skip it; and
+# `differential` is an independently computed anchor to compare against.
+deliverable:
+  run: "node csv-summary.mjs {csv}"
+  output_format:
+    department_line: "<department> <count> <total> <average>"
+    skipped_line: "SKIPPED <count>"
+    overall_line: "TOTAL <count> <total>"
+  relations:
+    - id: REL-001
+      relation: row-order-invariance
+      description: Shuffling the input rows must not change any department total or the overall total.
+    - id: REL-002
+      relation: additivity
+      description: The sum of the per-department totals must equal the printed overall total.
+    - id: REL-003
+      relation: duplicate-resolution
+      description: Adding a duplicate id with a LATER start_date must not increase the headcount (AMB-002).
+    - id: REL-004
+      relation: malformed-row-accounting
+      description: Three injected malformed rows must reduce the valid headcount by exactly three and be counted (AMB-001).
+  differential:
+    - id: DIFF-001
+      anchor: independent-aggregation
+      description: An independent recomputation of the department totals and the overall total must equal the tool's output.
