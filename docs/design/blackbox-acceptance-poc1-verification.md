@@ -668,6 +668,109 @@ same document can interleave writes (no lock — last writer wins); and only a r
 produced is written back, so a run that could not be accepted (a stale confirmation, a judge that never
 ran) leaves the document alone and says so in its summary.
 
+## 13. Answering a failure becomes a choice, and the intake finally sees it (ADR-030)
+
+Section 12 ended with the human's number closing a failure — but "the failure is addressed" was all the
+record said, and nothing told the human which decision the failing check was even about. A failure has
+two different repairs and they are not interchangeable: the implementation ignored the answer that was
+recorded, or the answer itself was wrong.
+
+The machine can only do part of that, and it does exactly that part: trace a failing check to the
+decision it EXERCISES, name the answer recorded for it, and offer that decision's own alternatives.
+`takumi requirement brief <ref>` prints it — read-only, nothing generated:
+
+```
+$ takumi requirement brief docs/requirements/poc-blackbox-acceptance.yaml
+## Acceptance feedback (written back by the machine)
+…
+### FB-002 — OPEN (run wf-82150fff)
+- **REL-002** — REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214
+  - REL-002 is a declared check, and it exercises no decision: the failure is about the implementation
+    (or about a piece of the requirement no decision covers), not about an answer the human gave
+- **REL-003** — REL-003 duplicate-resolution: the chosen option "latest-start-date" does not hold …
+  - decision: AMB-002 (blocking) — Which row wins when employee_id repeats?
+  - recorded answer: The row with the latest start_date wins
+  - the implementation did not honour it. Either the implementation changes, or the answer does:
+    - First row wins
+    - Last row wins
+    - Treat it as an error
+- **DEC-002** — DEC-002 AMB-002 NOT honoured: "The row with the latest start_date wins" …
+  - decision: AMB-002 (blocking) … (traced by its numbering, not by a binding the document wrote twice)
+```
+
+That trace is what the confirmation now asks about — and the safe answer is still the refusal:
+
+```
+  The last acceptance of this document FAILED and wrote FB-002 back into it (2026-10-01T05:38:10.666Z):
+    REL-002 additivity: … REL-003 duplicate-resolution: … DEC-002 AMB-002 NOT honoured: …
+    This failure is about AMB-002, currently answered "The row with the latest start_date wins".
+    Either the implementation ignored that answer, or the answer itself was wrong.
+    FB-002: what settles this failure?
+      [1] the recorded answer stands and the IMPLEMENTATION changes — mark it resolved
+      [2] the answer was wrong — decide that decision again below
+      [3] leave it open   (current)
+      > 2
+      … then, at AMB-002, [enter] (keep the recorded answer):
+  refused: you answered that the answer was wrong, but AMB-002 still reads "The row with the latest
+    start_date wins" — nothing changed.
+    Pick a different option for AMB-002, or say that the implementation changes instead.
+```
+
+The claim has to have content, and the document is right there to check it against. Answering `[2]` and
+actually changing the decision closes the failure with the decision that answered it recorded:
+
+```yaml
+    status: resolved
+    resolvedNote: "the answer was wrong: AMB-002 was re-decided at this confirmation (2026-10-01T05:40:23.583Z)"
+    resolvedByDecision: "AMB-002"
+```
+
+And the narrative loop then closes for real, with the implementation changed to match the new answer
+(a hand-written last-row-wins deliverable, since the `fake` runtime's agent cannot write code):
+
+```
+$ … run … --confirmed-requirement sha256:11ae8bda80ff…
+  step quality_gate: completed — quality_gate PASSED: 0 failing over 2 tests, exit 0
+  step judge_forge: completed — judge forged: …/judge.sh sha256:15b5e1e9a38a (outside …/worktree)
+  ok 3 - REL-003 duplicate-resolution: "last-row" holds on both duplicate fixtures (headcount 4, totals 537 / 537)
+  ok 8 - DEC-002 AMB-002 honoured: "Last row wins" (checked by REL-003)
+  step artifact_acceptance: completed — acceptance PASSED: the confirmed requirement is satisfied
+  step delivery: completed — delivery bundle ready (7 artifacts)
+✓ workflow "blackbox-acceptance" completed                        EXIT=0
+```
+
+Note what did NOT change: the deliverable's own test. It asserts the summary's shape and never the
+duplicate rule — the implementer's blind spot — so it stayed green while the rule underneath it changed,
+and the forged judge is what actually checked the new answer.
+
+Finally, a decision may cite the failure it came from (`fromFeedback: FB-nnn`), and a citation that
+names nothing is refused twice — before a human is asked, and again at acceptance time:
+
+```
+$ takumi requirement confirm docs/requirements/poc-blackbox-acceptance.yaml --dry-run
+docs/requirements/poc-blackbox-acceptance.yaml: the document does not hold together — 1 issue(s):
+  AMB-003 cites FB-099, which this document does not record as an acceptance failure: a decision that
+  came from nothing is a decision nobody asked for
+Nothing was written. Fix the document first (a decision that came from a failure must name one).   EXIT=1
+
+$ … metamorphic-forge.sh …
+a decision cites "FB-099", which this document does not record as a failure (recorded: FB-001 FB-002 ):
+a citation that names nothing is a claim nobody can check                              EXIT=1
+```
+
+Both were produced by adding that one line to the real document and removing it again — which is why the
+token above is still `sha256:11ae8bda80ff…` afterwards: the digest is a function of the text, and the
+text is back.
+
+Honest limits, stated rather than worked around: the trace is only as good as the document's own
+`decides:` binding (a "decoration binding" would trace a failure to the wrong answer — ADR-028's limit,
+unchanged); the alternatives are the decision's OWN options, so an answer that is not among them cannot
+be offered (the intake has to widen them, and the forge has to be able to test them); nothing verifies
+that the human's choice was right (the next acceptance does); the intake's compliance with its re-pass
+contract is a prompt and a shape, not a proof — its output is checked as a document, and its JUDGEMENT is
+the human's confirmation; and the brief contains no generated content, deliberately, because deciding
+what an undecided point should offer needs the semantics of the request.
+
 
 
 
