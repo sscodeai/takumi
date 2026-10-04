@@ -250,6 +250,40 @@ test('decisions: the judge refuses to guess a rounding rule the document never d
 
 // --- a decision the human recorded is a decision the implementation must honour ------------------
 
+test('decisions: a decision citing a failure the document does not record is refused', () => {
+  const doc = requirement().replace('    blocking: true', '    blocking: true\n    fromFeedback: FB-009');
+  const f = forge(doc);
+  try {
+    assert.notEqual(f.forge.status, 0, 'the forge must refuse');
+    assert.match(f.forge.out, /a decision cites "FB-009", which this document does not record as a failure/);
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('decisions: a decision citing a failure the document DOES record is accepted', () => {
+  const doc = [
+    requirement().replace(/\s*$/, ''),
+    '',
+    'feedback:',
+    '  - id: FB-001',
+    '    at: "2026-10-01T05:00:00.000Z"',
+    '    run: "wf-1"',
+    '    requirementDigest: "aaaa"',
+    '    judgeDigest: "bbbb"',
+    '    status: open',
+    '    checks:',
+    '      - "REL-003 duplicate-resolution: the chosen option does not hold"',
+    '',
+  ].join('\n').replace('    blocking: true', '    blocking: true\n    fromFeedback: FB-001');
+  const f = forge(doc);
+  try {
+    assert.equal(f.forge.status, 0, `the forge builds (${f.forge.out})`);
+  } finally {
+    cleanup(f);
+  }
+});
+
 test('decisions: every blocking decision is reported as its own check, and a correct implementation passes', () => {
   const f = forge(requirement());
   try {
