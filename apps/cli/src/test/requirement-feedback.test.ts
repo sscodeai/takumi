@@ -193,6 +193,135 @@ test('requirement confirm: answering the failure resolves it in the same act as 
   }
 });
 
+// --- ADR-030: the failure becomes a choice about WHICH SIDE is wrong ---------------------------
+
+/** A document that binds a check to a decision, so a failure can be traced to an answer. */
+const BOUND = [
+  '# A hand-written requirement document, comments and all.',
+  'requirement:',
+  '  id: REQ-DOC-001',
+  'ambiguities:',
+  '  - id: AMB-001',
+  '    question: Which row wins when employee_id repeats?',
+  '    options: ["First row wins", "Last row wins", "The row with the latest start_date wins"]',
+  '    default: "First row wins"',
+  '    chosen: "The row with the latest start_date wins"',
+  '    blocking: true',
+  'deliverable:',
+  '  run: "node csv-summary.mjs {csv}"',
+  '  relations:',
+  '    - id: REL-003',
+  '      relation: duplicate-resolution',
+  '      decides: AMB-001',
+  '      description: A repeated id resolves the way AMB-001 decided.',
+  '',
+  'confirmation:',
+  '  by: "SS"',
+  '  at: "2026-10-01T00:00:00.000Z"',
+  '  method: bounded-choice',
+  '',
+  'feedback:',
+  '  - id: FB-001',
+  '    at: "2026-10-01T03:00:00.000Z"',
+  '    run: "wf-2"',
+  '    requirementDigest: "sha256:aaa"',
+  '    judgeDigest: "sha256:bbb"',
+  '    status: open',
+  '    checks:',
+  '      - "REL-003 duplicate-resolution: the chosen option does not hold"',
+  '',
+].join('\n');
+
+function bound(text = BOUND): { dir: string; ref: string; path: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-twoside-'));
+  const ref = 'feature.yaml';
+  writeFileSync(join(dir, ref), text);
+  return { dir, ref, path: join(dir, ref) };
+}
+
+test('requirement brief: the failing check is traced to its decision, its answer and the alternatives', async () => {
+  const f = bound();
+  try {
+    const lines: string[] = [];
+    const code = await runRequirementCommand(f.dir, ['brief', f.ref], { out: (l) => lines.push(l) });
+    assert.equal(code, 0, 'the brief is a read-only account, so it succeeds');
+    const text = lines.join('\n');
+    assert.match(text, /^## Acceptance feedback \(written back by the machine\)$/m);
+    assert.match(text, /decision: AMB-001 \(blocking\)/);
+    assert.match(text, /recorded answer: The row with the latest start_date wins/);
+    assert.match(text, /- First row wins/);
+    assert.match(text, /- Last row wins/);
+    assert.equal(readFileSync(f.path, 'utf8'), BOUND, 'the brief writes nothing');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement confirm: the failure is put as a choice between the implementation and the answer', async () => {
+  const f = bound();
+  try {
+    // [2] = the answer was wrong; then pick option 1 ("First row wins") for AMB-001.
+    const { code, lines } = await walk(f.dir, f.ref, ['2', '1']);
+    assert.equal(code, 0, lines.join('\n'));
+    const text = lines.join('\n');
+    assert.match(text, /the recorded answer stands and the IMPLEMENTATION changes/);
+    assert.match(text, /the answer was wrong — decide that decision again below/);
+    assert.match(text, /either the implementation ignored that answer, or the answer itself was wrong/i);
+
+    const written = readFileSync(f.path, 'utf8');
+    assert.match(written, /- id: AMB-001[\s\S]*?chosen: "First row wins"/, 'the new answer is written');
+    assert.match(written, /^    status: resolved$/m);
+    assert.match(written, /^    resolvedByDecision: "AMB-001"$/m, 'the resolution records which decision answered it');
+    assert.equal(openFeedback(written).length, 0);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement confirm: claiming the answer was wrong while leaving it unchanged is refused', async () => {
+  const f = bound();
+  try {
+    // [2] = the answer was wrong, then [enter] keeps the current answer — nothing changed, so the claim
+    // is empty and the confirmation must not be produced.
+    const { code, lines } = await walk(f.dir, f.ref, ['2', '']);
+    assert.equal(code, 1, lines.join('\n'));
+    assert.match(lines.join('\n'), /you answered that the answer was wrong, but AMB-001 still reads "The row with the latest start_date wins"/);
+    assert.ok(!lines.join('\n').includes('sha256:'), 'no token');
+    assert.equal(readFileSync(f.path, 'utf8'), BOUND, 'nothing is written');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement confirm: saying the implementation changes needs no change to the document answers', async () => {
+  const f = bound();
+  try {
+    const { code, lines } = await walk(f.dir, f.ref, ['1', '']);
+    assert.equal(code, 0, lines.join('\n'));
+    const written = readFileSync(f.path, 'utf8');
+    assert.match(written, /^    resolvedNote: "the recorded answer stands; the implementation changes/m);
+    assert.match(written, /- id: AMB-001[\s\S]*?chosen: "The row with the latest start_date wins"/, 'the answer is unchanged');
+    assert.equal(openFeedback(written).length, 0);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement confirm: a decision citing a failure the document does not record stops the confirmation', async () => {
+  const dangling = BOUND.replace('    blocking: true', '    blocking: true\n    fromFeedback: FB-009');
+  const f = bound(dangling);
+  try {
+    const lines: string[] = [];
+    const code = await runRequirementCommand(f.dir, ['confirm', f.ref, '--dry-run'], { out: (l) => lines.push(l) });
+    assert.equal(code, 1);
+    assert.match(lines.join('\n'), /AMB-001 cites FB-009, which this document does not record/);
+    assert.match(lines.join('\n'), /Nothing was written/);
+    assert.equal(readFileSync(f.path, 'utf8'), dangling);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test('requirement confirm --dry-run: an open failure is reported and refuses', async () => {
   const f = project(WITH_FAILURE);
   try {
