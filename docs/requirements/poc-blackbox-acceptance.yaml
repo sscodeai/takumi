@@ -155,5 +155,19 @@ deliverable:
 
 confirmation:
   by: "SS"
-  at: "2026-10-01T04:54:38.269Z"
+  at: "2026-10-01T05:06:46.202Z"
   method: bounded-choice
+feedback:
+  - id: FB-001
+    at: "2026-10-01T05:05:57.188Z"
+    run: "wf-7767a958"
+    requirementDigest: "8644a79ff49b72efd234de70e5cbdb1ab450abc481664d3d5c52102b3c95580c"
+    judgeDigest: "sha256:c6194d0e7cd8047aaa849aad50e7075cb7e95c7e65cfaeb7abad3310fa49c347"
+    status: resolved
+    resolvedAt: "2026-10-01T05:06:46.191Z"
+    resolvedBy: "SS"
+    resolvedNote: "the human answered this at re-confirmation (bounded choice, 2026-10-01T05:06:46.191Z)"
+    checks:
+      - "REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214"
+      - "REL-003 duplicate-resolution: the chosen option \"latest-start-date\" does not hold (headcount 4 want 4, late-date total 269 want 537, early-date total 214 want 428) — headcount=4/4 totals=269/537,214/428"
+      - "DEC-002 AMB-002 NOT honoured: \"The row with the latest start_date wins\" (checked by REL-003, which failed)"
