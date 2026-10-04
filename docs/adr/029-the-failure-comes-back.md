@@ -82,13 +82,26 @@ The flip run of ADR-028 (the same implementation, the document's answer changed 
 now ends like this instead of printing a red line and stopping:
 
 ```
+$ … run … --confirmed-requirement sha256:8644a79ff4…      # the broken reference deliverable
+  step judge_forge: completed — judge forged: …/judge.sh sha256:c6194d0e7cd8 (outside …/worktree)
   step artifact_acceptance: failed — acceptance FAILED: the harness reported a failing verdict
-    not ok 3 - REL-003 duplicate-resolution: the chosen option "first-row" does not hold …
-    not ok 8 - DEC-002 AMB-002 NOT honoured: "First row wins" (checked by REL-003, which failed)
-  rejection: REJECT-001 written (…/artifacts/acceptance/REJECT-001.md)
+    not ok 2 - REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214
+    not ok 3 - REL-003 duplicate-resolution: the chosen option "latest-start-date" does not hold
+      (headcount 4 want 4, late-date total 269 want 537, early-date total 214 want 428)
+    not ok 8 - DEC-002 AMB-002 NOT honoured: "The row with the latest start_date wins"
+      (checked by REL-003, which failed)
+  rejection: REJECT-001 written (acceptance/REJECT-001.md)
   feedback: FB-001 written into docs/requirements/poc-blackbox-acceptance.yaml (open) — the document now
-    hashes to 3f1c9a…, so its confirmation no longer matches it and the next run needs a re-confirmation
+    hashes to cc157afd540c, so its confirmation no longer matches it and the next run needs a re-confirmation
+  failing checks: REL-002, REL-003, DEC-002
   step delivery: skipped — skipped (dependency failed: artifact_acceptance)
+✓ workflow "blackbox-acceptance" failed                         EXIT=1
+
+$ … run … --confirmed-requirement sha256:8644a79ff4…      # the SAME token, one entry later
+  step artifact_acceptance: failed — the requirement document "…/poc-blackbox-acceptance.yaml" is not the
+    one that was confirmed (confirmed 8644a79ff49b at "…/poc-blackbox-acceptance.yaml", the document now
+    hashes to cc157afd540c): re-confirm the edited document before it can be accepted
+  step delivery: skipped — skipped (dependency failed: artifact_acceptance)     EXIT=1
 ```
 
 The document gained:
@@ -96,16 +109,32 @@ The document gained:
 ```yaml
 feedback:
   - id: FB-001
-    at: "…"
-    run: "…"
-    requirementDigest: "sha256:…"        # the digest the failing run was given
-    judgeDigest: "sha256:…"
+    at: "2026-10-01T05:05:57.188Z"
+    run: "wf-7767a958"
+    requirementDigest: "8644a79ff49b72efd234de70e5cbdb1ab450abc481664d3d5c52102b3c95580c"
+    judgeDigest: "sha256:c6194d0e7cd8047aaa849aad50e7075cb7e95c7e65cfaeb7abad3310fa49c347"
     status: open
     checks:
-      - "REL-003 duplicate-resolution: the chosen option \"first-row\" does not hold …"
+      - "REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214"
+      - "REL-003 duplicate-resolution: the chosen option \"latest-start-date\" does not hold (…)"
+      - "DEC-002 AMB-002 NOT honoured: \"The row with the latest start_date wins\" (checked by REL-003, which failed)"
 ```
 
-and the run after that is refused with `the requirement document … is not the one that was confirmed`.
+`takumi requirement confirm` then opens with that failure and refuses while it is left open (`[enter]`
+keeps the current state, which is the safe answer):
+
+```
+  The last acceptance of this document FAILED and wrote FB-001 back into it (2026-10-01T05:05:57.188Z):
+    FB-001: what addresses this failure?
+      [1] the failure is addressed — mark it resolved
+      [2] leave it open   (current)
+      >                                       ← [enter]
+  refused: FB-001 is still open. A document with a known failure in it is not confirmable
+```
+
+and answering `[1]` resolves the entry in the same act as the decisions, producing the token
+`sha256:966dae0656c65597bfa2e22dd440ab57477b89ffcffa0b474f8b0b5194100971`, with which the corrected
+deliverable is accepted: `acceptance PASSED`, nine checks, `delivery bundle ready (7 artifacts)`, `EXIT=0`.
 
 ## Rejected, and honest limits
 
