@@ -71,6 +71,16 @@ export {
   resolveFeedback,
 } from './requirement-feedback.js';
 export type { FeedbackAppendInput, FeedbackAppendResult, FeedbackEntry, FeedbackResolveResult } from './requirement-feedback.js';
+export {
+  checkIdOf,
+  decisionCheckIds,
+  parseDecisionBindings,
+  parseRequirements,
+  validateRequirementDocument,
+} from './requirement-decisions.js';
+export type { Decision, DecisionBinding } from './requirement-decisions.js';
+export { FEEDBACK_BRIEF_MARKER, analyseFeedback, failuresWithoutDecision, renderFeedbackBrief } from './feedback-brief.js';
+export type { AnalysedFailure, AnalysedFeedback, FailureKind } from './feedback-brief.js';
 export { carryStateRecordForward } from './board-state-record.js';
 export {
   NO_REQUIREMENT,
