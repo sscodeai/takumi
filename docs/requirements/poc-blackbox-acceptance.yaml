@@ -100,7 +100,7 @@ ambiguities:
       - "The row with the latest start_date wins"
       - "Treat it as an error"
     default: "First row wins"
-    chosen: "The row with the latest start_date wins"
+    chosen: "Last row wins"
     blocking: true
   - id: AMB-003
     question: Where does the summary go?
@@ -155,7 +155,7 @@ deliverable:
 
 confirmation:
   by: "SS"
-  at: "2026-10-01T05:06:46.202Z"
+  at: "2026-10-01T05:40:23.597Z"
   method: bounded-choice
 feedback:
   - id: FB-001
@@ -167,6 +167,21 @@ feedback:
     resolvedAt: "2026-10-01T05:06:46.191Z"
     resolvedBy: "SS"
     resolvedNote: "the human answered this at re-confirmation (bounded choice, 2026-10-01T05:06:46.191Z)"
+    checks:
+      - "REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214"
+      - "REL-003 duplicate-resolution: the chosen option \"latest-start-date\" does not hold (headcount 4 want 4, late-date total 269 want 537, early-date total 214 want 428) — headcount=4/4 totals=269/537,214/428"
+      - "DEC-002 AMB-002 NOT honoured: \"The row with the latest start_date wins\" (checked by REL-003, which failed)"
+
+  - id: FB-002
+    at: "2026-10-01T05:38:10.666Z"
+    run: "wf-82150fff"
+    requirementDigest: "966dae0656c65597bfa2e22dd440ab57477b89ffcffa0b474f8b0b5194100971"
+    judgeDigest: "sha256:c6194d0e7cd8047aaa849aad50e7075cb7e95c7e65cfaeb7abad3310fa49c347"
+    status: resolved
+    resolvedAt: "2026-10-01T05:40:23.583Z"
+    resolvedBy: "SS"
+    resolvedNote: "the answer was wrong: AMB-002 was re-decided at this confirmation (2026-10-01T05:40:23.583Z)"
+    resolvedByDecision: "AMB-002"
     checks:
       - "REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214"
       - "REL-003 duplicate-resolution: the chosen option \"latest-start-date\" does not hold (headcount 4 want 4, late-date total 269 want 537, early-date total 214 want 428) — headcount=4/4 totals=269/537,214/428"
