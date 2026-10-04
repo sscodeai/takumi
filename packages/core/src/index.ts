@@ -63,6 +63,14 @@ export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
+export {
+  appendFeedback,
+  openFeedback,
+  parseFeedback,
+  renderFeedbackEntry,
+  resolveFeedback,
+} from './requirement-feedback.js';
+export type { FeedbackAppendInput, FeedbackAppendResult, FeedbackEntry, FeedbackResolveResult } from './requirement-feedback.js';
 export { carryStateRecordForward } from './board-state-record.js';
 export {
   NO_REQUIREMENT,

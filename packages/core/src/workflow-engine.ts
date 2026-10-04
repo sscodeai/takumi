@@ -27,6 +27,8 @@ import { randomUUID } from 'node:crypto';
 import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { requirementDigest, shortDigest } from './review-digest.js';
+import { appendFeedback, parseFeedback } from './requirement-feedback.js';
+import { parse as parseYamlText } from 'yaml';
 const execAsync = promisify(exec);
 /** Runs a harness FILE without a shell, so a path in a manifest is never a shell string. */
 const execFileAsync = promisify(execFile);
@@ -369,6 +371,8 @@ export async function executeWorkflow(
   for (const s of workflow.steps) {
     if (s.type === 'acceptance') acceptanceIds.set(s.id, `ACCEPT-${String(acceptanceIds.size + 1).padStart(3, '0')}`);
   }
+  // Rejections are numbered in the order they happen: a run may hold several acceptances.
+  let rejectSeq = 0;
 
   try {
     // P2 parallel: pre-execute all no-dependency AGENT steps concurrently.
@@ -1086,7 +1090,119 @@ export async function executeWorkflow(
           });
           ctx.onEvent?.(stepId, `acceptance PASSED (${checks.length} check(s) ok) — ${id} written`);
         } else {
-          reject(summary);
+          // A FAILED acceptance is written back (ADR-029). Two things have to leave the run:
+          //
+          //   1. A REJECT artifact, because a failure that exists only in a terminal is a failure
+          //      nobody can cite. It records what was judged, by which judge, and which checks failed.
+          //   2. A `feedback:` entry in the requirement document itself, which changes the document's
+          //      digest — so the confirmation this run was made with no longer matches the document,
+          //      and the next run needs a re-confirmation in which the human answers the failure.
+          //
+          // Only a rejection the JUDGE PRODUCED is recorded: a refusal (a stale confirmation, a judge
+          // that could not be forged, an unreadable document) means the acceptance could not be made,
+          // and writing feedback for it would edit the human's document because of a run-configuration
+          // mistake.
+          const failing = checks.filter((c) => c.result === 'fail');
+          const notes: string[] = [];
+          if (checks.length === 0 || failing.length === 0) {
+            notes.push('reject: not recorded — no failing check came out of a judge that ran');
+          } else {
+            const rejectId = `REJECT-${String((rejectSeq += 1)).padStart(3, '0')}`;
+            let feedbackLine = 'feedback: not recorded';
+            let digestAfter = digest;
+            const feedbackInput = {
+              at: new Date().toISOString(),
+              run: runId,
+              requirementDigest: digest,
+              judgeDigest: `sha256:${forgedJudgeDigest}`,
+              checks: failing.map((c) => c.check),
+            };
+            let appended: { id: string; duplicate: boolean } | undefined;
+            let appendError: string | undefined;
+            try {
+              const res = appendFeedback(requirementText, feedbackInput);
+              if (res.duplicate) {
+                appended = { id: res.id, duplicate: true };
+              } else {
+                parseYamlText(res.text);
+                fsMod.writeFileSync(path.join(ctx.cwd, requirementRef), res.text, 'utf8');
+                digestAfter = requirementDigest(res.text);
+                appended = { id: res.id, duplicate: false };
+              }
+            } catch (e) {
+              appendError = e instanceof Error ? e.message : String(e);
+            }
+            if (appended === undefined) {
+              feedbackLine = `feedback: COULD NOT be recorded in ${requirementRef} (${appendError ?? 'unknown error'}) — the rejection is recorded but the loop is not closed`;
+            } else if (appended.duplicate) {
+              feedbackLine = `feedback: ${appended.id} already records this run at ${shortDigest(digest)}`;
+            } else {
+              feedbackLine = `feedback: ${appended.id} written into ${requirementRef} (open) — the document now hashes to ${shortDigest(digestAfter)}, so its confirmation no longer matches it and the next run needs a re-confirmation`;
+            }
+            const open = parseFeedback(
+              (() => {
+                try {
+                  return fsMod.readFileSync(path.join(ctx.cwd, requirementRef), 'utf8');
+                } catch {
+                  return requirementText;
+                }
+              })(),
+            ).filter((e) => e.status === 'open');
+
+            const artifact = [
+              `# ${rejectId}`,
+              '',
+              '```yaml',
+              `id: ${rejectId}`,
+              'kind: acceptance-reject',
+              'requirement:',
+              `  ref: ${requirementRef}`,
+              `  digest: sha256:${digest}`,
+              `  digestAfterFeedback: sha256:${digestAfter}`,
+              `  requirements: [${requirements.join(', ')}]`,
+              'artifact:',
+              `  head: ${head ?? 'unknown'}`,
+              `  worktree: ${worktreePath}`,
+              'acceptance:',
+              `  harness: ${acceptanceRef}`,
+              `  cwd: ${harnessCwd}`,
+              ...(forgedJudgePath === undefined
+                ? ['  judge: none']
+                : [`  judge: ${forgedJudgePath}`, `  judgeDigest: sha256:${forgedJudgeDigest}`]),
+              `  verdict: ${verdict.verdict ?? 'none'}`,
+              `  verdictMarker: ${verdict.verdict === undefined ? 'none' : `"ACCEPT_VERDICT: ${verdict.verdict}"`}`,
+              ...(checks.length === 0 ? ['  checks: []'] : ['  checks:', ...checks.map((c) => `    - "${c.result}: ${c.check.replace(/"/g, "'")}"`)]),
+              'rejected:',
+              `  failing: [${failing.map((c) => `"${c.check.replace(/"/g, "'")}"`).join(', ')}]`,
+              `  feedback: ${appended === undefined ? 'none' : appended.id}`,
+              `  feedbackOpen: [${open.map((e) => e.id).join(', ')}]`,
+              `  documentChanged: ${digestAfter === digest ? 'false' : 'true'}`,
+              'confirmed:',
+              `  ref: ${ctx.confirmedRequirement.ref}`,
+              `  digest: sha256:${ctx.confirmedRequirement.digest}`,
+              // The judge's own words, so the rejection can be argued with rather than taken on trust.
+              'output: |',
+              ...out.slice(0, 1200).split('\n').map((line) => `  ${line}`),
+              '```',
+              '',
+            ].join('\n');
+            try {
+              const art = await ctx.artifacts.write({
+                taskId: `${runId}:${stepId}`,
+                kind: 'acceptance',
+                fileName: `${rejectId}.md`,
+                content: artifact,
+                contentType: 'text/markdown',
+                trace: requirements,
+              });
+              notes.push(`rejection: ${rejectId} written (${art.path})`);
+            } catch (e) {
+              notes.push(`rejection: ${rejectId} could not be persisted (${e instanceof Error ? e.message : String(e)})`);
+            }
+            notes.push(feedbackLine);
+            notes.push(`failing checks: ${failing.map((c) => c.check.split(' ')[0]).join(', ')}`);
+          }
+          reject([summary, ...notes].join('\n'));
         }
         done.add(stepId);
         continue;
