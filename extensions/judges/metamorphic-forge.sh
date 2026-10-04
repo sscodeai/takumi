@@ -141,6 +141,25 @@ done <<EOF
 $DECIDES
 EOF
 
+# A decision may say which failure it came from (ADR-030). A citation that names nothing is a claim
+# nobody can check, so it is refused the same way a `decides:` naming nothing is.
+# The list is surrounded by spaces on purpose: the match below is `*" $id "*`, and a list without a
+# leading separator silently matches nothing (which is how a refusal becomes a no-op).
+FEEDBACK_IDS=" $(grep -E '^[[:space:]]*-[[:space:]]*id:[[:space:]]*FB-[0-9]+' "$DOC" | sed 's/^[[:space:]]*-[[:space:]]*id:[[:space:]]*//' | tr '\n' ' ')"
+CITATIONS=$(awk '/^[[:space:]]*fromFeedback:[[:space:]]*/ { t = $0; sub(/^[[:space:]]*fromFeedback:[[:space:]]*/, "", t); gsub(/^"|"$/, "", t); print t }' "$DOC")
+while read -r cited; do
+  [ -z "${cited:-}" ] && continue
+  case "$FEEDBACK_IDS" in
+    *" $cited "*) ;;
+    *)
+      echo "a decision cites \"$cited\", which this document does not record as a failure (recorded:$FEEDBACK_IDS): a citation that names nothing is a claim nobody can check" >&2
+      exit 1
+      ;;
+  esac
+done <<EOF
+$CITATIONS
+EOF
+
 # A blocking decision nothing exercises is a decision that does not bind the implementation.
 UNCOVERED=""
 while IFS='|' read -r id blocking _chosen _options; do
