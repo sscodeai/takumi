@@ -29,6 +29,8 @@ export interface FeedbackEntry {
   resolvedAt?: string;
   resolvedBy?: string;
   resolvedNote?: string;
+  /** The decision that answered this failure, when the resolution was "the answer was wrong" (ADR-030). */
+  resolvedByDecision?: string;
 }
 
 export interface FeedbackAppendInput {
@@ -80,6 +82,7 @@ export function parseFeedback(text: string): FeedbackEntry[] {
       ...(stringOf(entry['resolvedAt']) === undefined ? {} : { resolvedAt: stringOf(entry['resolvedAt']) }),
       ...(stringOf(entry['resolvedBy']) === undefined ? {} : { resolvedBy: stringOf(entry['resolvedBy']) }),
       ...(stringOf(entry['resolvedNote']) === undefined ? {} : { resolvedNote: stringOf(entry['resolvedNote']) }),
+      ...(stringOf(entry['resolvedByDecision']) === undefined ? {} : { resolvedByDecision: stringOf(entry['resolvedByDecision']) }),
     });
   }
   return entries;
@@ -108,6 +111,7 @@ export function renderFeedbackEntry(entry: FeedbackEntry): string {
           `    resolvedAt: ${quoted(entry.resolvedAt ?? '')}`,
           `    resolvedBy: ${quoted(entry.resolvedBy ?? '')}`,
           `    resolvedNote: ${quoted(entry.resolvedNote ?? '')}`,
+          ...(entry.resolvedByDecision === undefined ? [] : [`    resolvedByDecision: ${quoted(entry.resolvedByDecision)}`]),
         ]
       : []),
     '    checks:',
@@ -165,7 +169,14 @@ export interface FeedbackResolveResult {
  * Mark an entry resolved. The note is required: a resolution without a sentence about what addresses
  * the failure is an unrecorded resolution, which is the thing this loop exists to prevent.
  */
-export function resolveFeedback(text: string, id: string, by: string, note: string, at: string): FeedbackResolveResult {
+export function resolveFeedback(
+  text: string,
+  id: string,
+  by: string,
+  note: string,
+  at: string,
+  byDecision?: string,
+): FeedbackResolveResult {
   const entries = parseFeedback(text);
   const entry = entries.find((e) => e.id === id);
   if (entry === undefined) return { text, error: `this document records no feedback entry ${id}` };
@@ -199,8 +210,19 @@ export function resolveFeedback(text: string, id: string, by: string, note: stri
         `${indent}resolvedAt: ${quoted(at)}`,
         `${indent}resolvedBy: ${quoted(by)}`,
         `${indent}resolvedNote: ${quoted(note)}`,
+        ...(byDecision === undefined ? [] : [`${indent}resolvedByDecision: ${quoted(byDecision)}`]),
       );
-      return { text: lines.join('\n'), entry: { ...entry, status: 'resolved', resolvedAt: at, resolvedBy: by, resolvedNote: note } };
+      return {
+        text: lines.join('\n'),
+        entry: {
+          ...entry,
+          status: 'resolved',
+          resolvedAt: at,
+          resolvedBy: by,
+          resolvedNote: note,
+          ...(byDecision === undefined ? {} : { resolvedByDecision: byDecision }),
+        },
+      };
     }
   }
   return { text, error: `${id} has no status line to resolve` };
