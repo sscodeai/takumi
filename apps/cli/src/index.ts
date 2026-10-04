@@ -212,6 +212,7 @@ Usage:
   takumi requirement confirm <ref>     Decide its open questions as bounded choices, and print the token
   takumi requirement confirm <ref> --dry-run
   takumi requirement feedback <ref>    List the acceptance failures written back into the document
+  takumi requirement brief <ref>       What each failure is about, and the answers it could take instead
   takumi requirement resolve <ref> --id FB-001 --note "…"
                                        Record what addresses an open failure (exits 1 while one is open)
                                        Show what is still undecided (read-only; exits 1 while a
