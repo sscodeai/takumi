@@ -577,5 +577,97 @@ refuses rather than mis-checks; AMB-003 (where the summary goes) is not mechanis
 the document chose stdout-only is still accepted; and the fixture rows themselves are still fixed in the
 forge, with only the algebra around them driven by the answer.
 
+## 12. The failure comes back (ADR-029), and the loop closes by itself
+
+Section 11 ended with a rejection: an acceptance that failed, a red line in a terminal, and a document
+that had learned nothing. The human had to notice, edit the requirement by hand, re-run
+`takumi requirement digest`, and carry a new token to the next run — the clerical work the mode exists
+to remove, with the easiest step to skip being the one that matters.
+
+Now the run writes the failure back itself. The whole loop, verbatim from real invocations:
+
+```
+$ … run … --confirmed-requirement sha256:8644a79ff4…        # the broken reference deliverable
+  step judge_forge: completed — judge forged: …/judge.sh sha256:c6194d0e7cd8 (outside …/worktree)
+  step artifact_acceptance: failed — acceptance FAILED: the harness reported a failing verdict
+    not ok 2 - REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214
+    not ok 3 - REL-003 duplicate-resolution: the chosen option "latest-start-date" does not hold
+      (headcount 4 want 4, late-date total 269 want 537, early-date total 214 want 428)
+    not ok 8 - DEC-002 AMB-002 NOT honoured: "The row with the latest start_date wins"
+      (checked by REL-003, which failed)
+  rejection: REJECT-001 written (acceptance/REJECT-001.md)
+  feedback: FB-001 written into docs/requirements/poc-blackbox-acceptance.yaml (open) — the document now
+    hashes to cc157afd540c, so its confirmation no longer matches it and the next run needs a re-confirmation
+  failing checks: REL-002, REL-003, DEC-002
+  step delivery: skipped — skipped (dependency failed: artifact_acceptance)
+✓ workflow "blackbox-acceptance" failed                         EXIT=1
+```
+
+The document gained the entry, with the failing checks verbatim and the digest it was judged at:
+
+```yaml
+feedback:
+  - id: FB-001
+    at: "2026-10-01T05:05:57.188Z"
+    run: "wf-7767a958"
+    requirementDigest: "8644a79ff49b72efd234de70e5cbdb1ab450abc481664d3d5c52102b3c95580c"
+    judgeDigest: "sha256:c6194d0e7cd8047aaa849aad50e7075cb7e95c7e65cfaeb7abad3310fa49c347"
+    status: open
+    checks:
+      - "REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214"
+      - "REL-003 duplicate-resolution: the chosen option \"latest-start-date\" does not hold (…)"
+      - "DEC-002 AMB-002 NOT honoured: \"The row with the latest start_date wins\" (checked by REL-003, which failed)"
+```
+
+Four things follow, each demonstrated on the real repository rather than argued for:
+
+1. **The failure is citable.** `REJECT-001.md` sits beside `ACCEPT-001.md` (`kind:
+   acceptance-reject`) with the requirement digest, the digest after the write-back, the head, the
+   worktree, the forged judge and its digest, every check, the failing checks on their own, and the
+   judge's own output. The delivery bundle grew by one artifact: the rejection travels with the run.
+2. **The failure is visible from the human's side.** `takumi requirement feedback …` prints the entry
+   with its run, both digests and the failing checks, and exits 1 while it is open — a pipeline can
+   gate on it without approving anything.
+3. **The old confirmation is dead by construction.** A second run with the same token is refused by
+   name: `is not the one that was confirmed (confirmed 8644a79ff49b …, the document now hashes to
+   cc157afd540c)`. Nobody has to remember to invalidate anything, and a refusal is not itself written
+   back — the run's own failure record is untouched, and no second `feedback:` entry appears.
+4. **The human's number closes it.** `takumi requirement confirm` opens with the failure and one bounded
+   choice — and `[enter]`, the safe answer, is `leave it open`:
+
+   ```
+   The last acceptance of this document FAILED and wrote FB-001 back into it (2026-10-01T05:05:57.188Z):
+     REL-002 additivity: …   REL-003 duplicate-resolution: …   DEC-002 AMB-002 NOT honoured: …
+     FB-001: what addresses this failure?
+       [1] the failure is addressed — mark it resolved
+       [2] leave it open   (current)
+       [enter] keep the current/default choice      [q] abort
+       >
+   refused: FB-001 is still open. A document with a known failure in it is not confirmable:
+     fix what failed and re-confirm, or record a resolution and say what addresses it:
+     takumi requirement resolve docs/requirements/poc-blackbox-acceptance.yaml --id FB-001 --note "what addresses it"
+   ```
+
+   and answering `[1]` resolves the entry in the same act as the confirmation, with the new token
+   covering both writes:
+
+   ```
+   sha256:966dae0656c65597bfa2e22dd440ab57477b89ffcffa0b474f8b0b5194100971
+   ```
+
+   With the correct deliverable back in the worktree, that token is accepted:
+   `step artifact_acceptance: completed — acceptance PASSED`, nine checks (`DEC-001 … DEC-003` among
+   them), `delivery bundle ready (7 artifacts)`, `EXIT=0`. The entry stays on the record as resolved,
+   with who said so, when, and that it was answered at re-confirmation by bounded choice.
+
+Honest limits, stated rather than worked around: nothing verifies that the implementation actually
+changed between a resolution and the next acceptance — the human's assertion is the closure, and the
+judge fails again if it was wrong; the `feedback:` block lives in the same document as the decisions and
+grows without archiving; an entry is one per failed run, not one per failing check; two runs against the
+same document can interleave writes (no lock — last writer wins); and only a rejection the JUDGE
+produced is written back, so a run that could not be accepted (a stale confirmation, a judge that never
+ran) leaves the document alone and says so in its summary.
+
+
 
 
