@@ -122,6 +122,62 @@ export function validateRequirementDocument(text: string): string[] {
   const bindings = parseDecisionBindings(text);
   const feedback = parseFeedback(text);
   const issues: string[] = [];
+
+  // The intake's contract, machine-checked. It is enforced here (before a human is asked to confirm, and
+  // in --dry-run) because a document that breaks it is one the loop cannot use: an unbounded "open
+  // question" cannot be answered by typing a number, a value outside its own options cannot be written
+  // back, and an id that does not line up cannot be traced.
+  const sequence = (ids: string[], prefix: string): void => {
+    ids.forEach((id, index) => {
+      const expected = `${prefix}-${String(index + 1).padStart(3, '0')}`;
+      if (id !== expected) {
+        issues.push(`the ${prefix} ids are not sequential: entry ${index + 1} is ${id} where ${expected} was expected, and the loop traces decisions and requirements by that numbering`);
+      }
+    });
+  };
+  sequence(decisions.map((d) => d.id), 'AMB');
+  for (const decision of decisions) {
+    if (decision.options.length < 2 || decision.options.length > 4) {
+      issues.push(`${decision.id} has ${decision.options.length} option(s): a decision a human answers by number needs 2 to 4 bounded options`);
+    }
+    for (const key of ['default', 'chosen'] as const) {
+      const value = decision[key];
+      if (value !== undefined && !decision.options.includes(value)) {
+        issues.push(`${decision.id} has ${key} = "${value}", which is not one of its own options: a value the document does not offer is a value nobody chose`);
+      }
+    }
+    if (decision.fromFeedback !== undefined && !/^FB-[0-9]+$/.test(decision.fromFeedback)) {
+      issues.push(`${decision.id} cites "${decision.fromFeedback}" as the failure it came from, which is not an FB-nnn id`);
+    }
+  }
+  // Read the requirements out of the parsed document rather than by counting indentation: the intake's
+  // contract is about what the file SAYS, not about how it happens to be laid out.
+  let requirements: { id: string; criteria: number }[] = [];
+  try {
+    const parsed = parseYaml(text) as { requirements?: unknown } | null;
+    const list = parsed !== null && typeof parsed === 'object' ? (parsed as { requirements?: unknown }).requirements : undefined;
+    if (Array.isArray(list)) {
+      requirements = list
+        .filter((r): r is Record<string, unknown> => r !== null && typeof r === 'object')
+        .map((r) => ({
+          id: stringOf(r['id']) ?? '',
+          criteria: Array.isArray(r['acceptance_criteria'])
+            ? r['acceptance_criteria'].filter((c) => typeof c === 'string' && c.trim().length > 0).length
+            : 0,
+        }));
+    }
+  } catch {
+    // A document that does not parse is already an issue elsewhere; nothing to add here.
+  }
+  sequence(
+    requirements.map((r) => r.id).filter((id) => id.length > 0),
+    'REQ',
+  );
+  for (const requirement of requirements) {
+    if (requirement.criteria === 0) {
+      issues.push(`${requirement.id} has no acceptance criterion: a requirement nobody can check is a wish`);
+    }
+  }
   const decisionIds = new Set(decisions.map((d) => d.id));
   const feedbackIds = new Set(feedback.map((e) => e.id));
   for (const decision of decisions) {

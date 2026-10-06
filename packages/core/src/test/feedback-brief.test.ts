@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   FEEDBACK_BRIEF_MARKER,
   analyseFeedback,
@@ -191,6 +192,37 @@ test('validate: a decision that cites a failure the document does not record is 
   // With the failure present, the same citation is fine: the decision answers something real.
   const ok = `${cited.replace(/\s*$/, '')}\n\n${feedback(['REL-002 additivity: x'])}`;
   assert.deepEqual(validateRequirementDocument(ok), []);
+});
+
+test('validate: the intake contract is machine-checked, not hoped for', () => {
+  // Ids that do not line up: the loop traces decisions and requirements by that numbering.
+  const gaps = DOC.replace('  - id: AMB-003', '  - id: AMB-007');
+  assert.match(validateRequirementDocument(gaps)[0] ?? '', /the AMB ids are not sequential: entry 3 is AMB-007 where AMB-003 was expected/);
+
+  // An unbounded "open question" cannot be answered by typing a number.
+  const single = DOC.replace('      - "Stop with an error"\n', '');
+  assert.match(
+    validateRequirementDocument(single).find((i) => i.includes('AMB-001')) ?? '',
+    /AMB-001 has 1 option\(s\): a decision a human answers by number needs 2 to 4 bounded options/,
+  );
+
+  // A value the document does not offer is a value nobody chose.
+  const stray = DOC.replace('    chosen: "The row with the latest start_date wins"', '    chosen: "Whatever the implementer felt like"');
+  assert.match(
+    validateRequirementDocument(stray).find((i) => i.includes('AMB-002')) ?? '',
+    /AMB-002 has chosen = "Whatever the implementer felt like", which is not one of its own options/,
+  );
+
+  // A requirement nobody can check is a wish.
+  const noCriteria = DOC.replace('    acceptance_criteria:\n      - One line per department.\n', '');
+  assert.match(validateRequirementDocument(noCriteria).find((i) => i.includes('REQ-001')) ?? '', /REQ-001 has no acceptance criterion/);
+});
+
+test('validate: the confirmed PoC document itself passes the contract', () => {
+  // A guard against the validator drifting away from the document the flow was built on: the rules are
+  // enforced by `takumi requirement confirm --dry-run`, so tightening them must not break the real file.
+  const real = readFileSync(new URL('../../../../docs/requirements/poc-blackbox-acceptance.yaml', import.meta.url), 'utf8');
+  assert.deepEqual(validateRequirementDocument(real), []);
 });
 
 test('validate: a check claiming to settle a decision that is not there is refused', () => {
