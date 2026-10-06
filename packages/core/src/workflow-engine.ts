@@ -674,13 +674,39 @@ export async function executeWorkflow(
           ctx.onEvent?.(stepId, `rule review FAILED: ${summary.split('\n')[0]}`);
         };
 
+        /**
+         * The repository the change set lives in. With a delivery worktree that is the WORKTREE, not
+         * the project: the two are separate repositories with no shared objects, so resolving `HEAD`
+         * in the project repo and diffing it in the worktree exits 128 ("bad object") — a review that
+         * could not run, for a change set that was right there (docs/bugs-fixed.md, 35).
+         */
+        const reviewCwd = ctx.worktree ?? ctx.cwd;
+
         /** Resolve a ref to a commit sha through the git seam; undefined = could not. */
         const resolveSha = async (ref: string): Promise<string | undefined> => {
           try {
-            const resolved = await git.run(['rev-parse', '--verify', `${ref}^{commit}`], { cwd: ctx.cwd });
+            const resolved = await git.run(['rev-parse', '--verify', `${ref}^{commit}`], { cwd: reviewCwd });
             if (resolved.exitCode !== 0) return undefined;
             const sha = resolved.stdout.trim().split('\n')[0]?.trim() ?? '';
             return /^[0-9a-f]{40}$/i.test(sha) ? sha : undefined;
+          } catch {
+            return undefined;
+          }
+        };
+
+        /**
+         * `baseRef: root` is the root commit of the repository under review — the point the delivery
+         * started from. `HEAD~1` is the wrong question for a delivery worktree: it names the parent of
+         * whatever happens to be on top, so a delivery with two commits (implementation, then tests)
+         * silently reviews only the last one. Reviewing everything the delivery added is what the
+         * step claims to do, so it is said as `root` rather than inferred from a distance.
+         */
+        const rootOf = async (sha: string): Promise<string | undefined> => {
+          try {
+            const listed = await git.run(['rev-list', '--max-parents=0', sha], { cwd: reviewCwd });
+            if (listed.exitCode !== 0) return undefined;
+            const sha0 = listed.stdout.trim().split('\n').pop()?.trim() ?? '';
+            return /^[0-9a-f]{40}$/i.test(sha0) ? sha0 : undefined;
           } catch {
             return undefined;
           }
@@ -693,18 +719,29 @@ export async function executeWorkflow(
           done.add(stepId);
           continue;
         }
-        const baseSha = await resolveSha(baseRef);
-        if (baseSha === undefined) {
+        const headSha = await resolveSha(headRef);
+        if (headSha === undefined) {
           await failRuleReview(
-            `rule_review precondition failed: baseRef "${baseRef}" could not be resolved to a commit in ${ctx.cwd}`,
+            `rule_review precondition failed: headRef "${headRef}" could not be resolved to a commit in ${reviewCwd}`,
           );
           done.add(stepId);
           continue;
         }
-        const headSha = await resolveSha(headRef);
-        if (headSha === undefined) {
+        const baseSha = baseRef === 'root' ? await rootOf(headSha) : await resolveSha(baseRef);
+        if (baseSha === undefined) {
           await failRuleReview(
-            `rule_review precondition failed: headRef "${headRef}" could not be resolved to a commit in ${ctx.cwd}`,
+            `rule_review precondition failed: baseRef "${baseRef}" could not be resolved to a commit in ${reviewCwd}`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        // Fail closed on a range that is not a change set of this repository. Resolving the two refs
+        // in one repository and diffing them in another used to be possible; so was a base that is
+        // not an ancestor of the head, which `git diff` happily renders as a change set.
+        const ancestry = await git.run(['merge-base', '--is-ancestor', baseSha, headSha], { cwd: reviewCwd });
+        if (ancestry.exitCode !== 0) {
+          await failRuleReview(
+            `rule_review precondition failed: base ${baseSha.slice(0, 12)} is not an ancestor of head ${headSha.slice(0, 12)} in ${reviewCwd}, so ${baseSha.slice(0, 12)}..${headSha.slice(0, 12)} is not a change set of the repository under review`,
           );
           done.add(stepId);
           continue;
