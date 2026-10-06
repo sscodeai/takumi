@@ -359,6 +359,24 @@ export async function executeWorkflow(
   const stepResults: WorkflowStepResult[] = [];
   const vars: Record<string, string> = { ...inputVars };
 
+  /**
+   * A step may say `requirementRef: "{requirement}"`: the document THIS RUN was confirmed against
+   * (ADR-031). It is the difference between a workflow that can only ever run on one file and one that
+   * runs on whatever a human confirmed — and it fails closed when there is no confirmation to point at,
+   * rather than resolving to a path nobody confirmed.
+   */
+  const requirementRefOf = (raw: string | undefined): { ref: string; error?: string } => {
+    const ref = renderPrompt(raw ?? '', { ...vars, requirement: ctx.confirmedRequirement?.ref ?? '' }).trim();
+    if (raw !== undefined && raw.includes('{requirement}') && (ctx.confirmedRequirement?.ref ?? '').length === 0) {
+      return {
+        ref,
+        error:
+          'this workflow points at {requirement} — the document the run was confirmed against — but this run has no confirmed requirement on record (pass --requirement and --confirmed-requirement)',
+      };
+    }
+    return { ref };
+  };
+
   const byId = new Map(workflow.steps.map((s) => [s.id, s]));
   const done = new Set<string>();
   const failedIds = new Set<string>();
@@ -797,8 +815,18 @@ export async function executeWorkflow(
       // is then skipped, so an unverifiable delivery produces no ACCEPT artifact.
       if (step.type === 'judge_forge') {
         run.stepStatus[stepId] = 'running';
-        const requirementRef = step.requirementRef?.trim() ?? '';
+        const resolved = requirementRefOf(step.requirementRef);
+        const requirementRef = resolved.ref;
         const forgeRef = step.forgeRef?.trim() ?? '';
+        if (resolved.error !== undefined) {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary: resolved.error, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `judge forge FAILED: ${resolved.error}`);
+          done.add(stepId);
+          continue;
+        }
         const reject = (message: string): void => {
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
@@ -914,7 +942,8 @@ export async function executeWorkflow(
       // ACCEPT cannot exist for a run that was not accepted.
       if (step.type === 'acceptance') {
         run.stepStatus[stepId] = 'running';
-        const requirementRef = step.requirementRef?.trim() ?? '';
+        const resolvedRef = requirementRefOf(step.requirementRef);
+        const requirementRef = resolvedRef.ref;
         // A forged judge arrives as {judgePath}; a literal path is still allowed (a workflow without a
         // forge), but when this run forged a judge the acceptance MUST use it — checked below.
         const acceptanceRef = renderPrompt(step.acceptanceRef ?? '', vars).trim();
@@ -928,6 +957,11 @@ export async function executeWorkflow(
           ctx.onEvent?.(stepId, `acceptance FAILED: ${message.split('\n')[0] ?? message}`);
         };
 
+        if (resolvedRef.error !== undefined) {
+          reject(resolvedRef.error);
+          done.add(stepId);
+          continue;
+        }
         // Defence in depth: the manifest validator already refuses both absences at load time.
         if (requirementRef.length === 0 || acceptanceRef.length === 0) {
           reject(`an acceptance requires a requirementRef and an acceptanceRef (got "${requirementRef}" / "${acceptanceRef}")`);
