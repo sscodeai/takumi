@@ -89,17 +89,19 @@ if [ -z "$RELATIONS" ]; then
 fi
 
 # The ambiguities: id|blocking|chosen|options (options joined by ';').
+# id|blocking|chosen|checkedAs|options — `checkedAs` is what the answer MEANS to a judge (ADR-031).
 AMBIGUITIES=$(awk '
   /^[[:space:]]*ambiguities:[[:space:]]*$/ { ina = 1; next }
   /^[a-z_]+:[[:space:]]*$/ { ina = 0 }
   ina && /^[[:space:]]*-[[:space:]]*id:[[:space:]]*AMB-/ {
-    if (id != "") print id "|" blocking "|" chosen "|" options
-    id = $3; blocking = "false"; chosen = ""; options = ""; next
+    if (id != "") print id "|" blocking "|" chosen "|" checkedAs "|" options
+    id = $3; blocking = "false"; chosen = ""; checkedAs = ""; options = ""; next
   }
   ina && /^[[:space:]]*chosen:[[:space:]]*/ { t = $0; sub(/^[[:space:]]*chosen:[[:space:]]*/, "", t); gsub(/^"|"$/, "", t); chosen = t; next }
+  ina && /^[[:space:]]*checkedAs:[[:space:]]*/ { t = $0; sub(/^[[:space:]]*checkedAs:[[:space:]]*/, "", t); gsub(/^"|"$/, "", t); checkedAs = t; next }
   ina && /^[[:space:]]*blocking:[[:space:]]*/ { blocking = $2; next }
   ina && /^[[:space:]]*-[[:space:]]*"/ { t = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", t); gsub(/^"|"$/, "", t); options = (options == "" ? t : options ";" t); next }
-  END { if (id != "") print id "|" blocking "|" chosen "|" options }
+  END { if (id != "") print id "|" blocking "|" chosen "|" checkedAs "|" options }
 ' "$DOC")
 
 # The ambiguity records are `id|blocking|chosen|options`, so the accessors are named rather than
@@ -107,6 +109,7 @@ AMBIGUITIES=$(awk '
 amb_exists() { printf '%s\n' "$AMBIGUITIES" | awk -F'|' -v id="$1" '$1 == id { f = 1 } END { print f ? "yes" : "no" }'; }
 amb_blocking() { printf '%s\n' "$AMBIGUITIES" | awk -F'|' -v id="$1" '$1 == id { print $2; exit }'; }
 amb_chosen() { printf '%s\n' "$AMBIGUITIES" | awk -F'|' -v id="$1" '$1 == id { print $3; exit }'; }
+amb_mode() { printf '%s\n' "$AMBIGUITIES" | awk -F'|' -v id="$1" '$1 == id { print $4; exit }'; }
 decides_of() { # $1 relation/anchor id -> the decision it exercises, or empty
   printf '%s\n' "$DECIDES" | awk -v id="$1" '$1 == id { print $2; exit }'
 }
@@ -179,33 +182,19 @@ fi
 
 # The mechanisable answers, per relation. A chosen option outside its table is a refusal, never a
 # silently skipped check: the vocabulary below IS the honest scale of what this judge can decide.
-DUPLICATE_VALUES="\"The row with the latest start_date wins\" \"First row wins\" \"Last row wins\" \"Treat it as an error\""
-MALFORMED_VALUES="\"Skip the row, count it, and report the count\" \"Stop with an error\""
-ROUNDING_VALUES="\"Half-up, no currency printed\" \"Truncate, no currency printed\""
+# The modes a judge can act on, per relation — the SAME vocabulary the validator refuses against
+# (`JUDGE_DECISION_MODES` in packages/core/src/requirement-decisions.ts, kept in step by a test). A
+# decision's prose stays for humans; its `checkedAs` is what the judge tests.
+DUPLICATE_MODES="first-row last-row latest-start-date merge error"
+MALFORMED_MODES="skip-count skip-silent stop-error"
+ROUNDING_MODES="half-up truncate"
 
-duplicate_mode() { # $1 chosen option text -> mode, or empty
-  case "$(norm "$1")" in
-    "the row with the latest start_date wins") echo latest-start-date ;;
-    "first row wins") echo first-row ;;
-    "last row wins") echo last-row ;;
-    "treat it as an error") echo error ;;
-  esac
-}
-malformed_mode() { # $1 chosen option text -> mode, or empty
-  case "$(norm "$1")" in
-    "skip the row, count it, and report the count") echo skip-count ;;
-    "stop with an error") echo stop-error ;;
-  esac
-}
-rounding_mode() { # $1 chosen option text -> mode, or empty
-  case "$(norm "$1")" in
-    "half-up, no currency printed") echo half-up ;;
-    "truncate, no currency printed") echo truncate ;;
-  esac
-}
-
-refuse_chosen() { # $1 relation id, $2 decision id, $3 chosen, $4 the values that are mechanisable
-  echo "the decision $2 chose \"$3\", which the relation $1 cannot mechanise — this forge can decide $4: either change the option in the document or implement it in the forge, but a decision nobody can check is not a decision (refusing rather than accepting on an unchecked answer)" >&2
+refuse_mode() { # $1 relation id, $2 decision id, $3 what the document said (or nothing), $4 the modes
+  if [ -z "${3:-}" ]; then
+    echo "the decision $2 is settled by $1, and the relation needs to know what its answer MEANS: give it \"checkedAs: <$4>\" — prose is for humans, and a judge that has to guess is a judge you cannot trust" >&2
+  else
+    echo "the decision $2 says checkedAs: \"$3\", which $1 cannot act on (implemented: $4): either change it in the document or implement it in the forge, but a decision nobody can check is not a decision" >&2
+  fi
   exit 1
 }
 
@@ -221,23 +210,28 @@ while read -r id relation; do
     echo "the relation $id exercises $amb, but $amb has no chosen option: the judge would be built from a decision nobody made" >&2
     exit 1
   fi
+  mode=$(amb_mode "$amb")
+  # Only the relations that have a meaning to check need one: `row-order-invariance` and `additivity` are
+  # properties of the output, not answers to a question.
+  wants=""
+  case "$relation" in
+    duplicate-resolution) wants="$DUPLICATE_MODES" ;;
+    malformed-row-accounting) wants="$MALFORMED_MODES" ;;
+    independent-aggregation) wants="$ROUNDING_MODES" ;;
+  esac
+  if [ -n "$wants" ]; then
+    case " $wants " in
+      *" $mode "*) ;;
+      *) refuse_mode "$id" "$amb" "$mode" "$wants" ;;
+    esac
+  fi
   case "$relation" in
     duplicate-resolution)
-      mode=$(duplicate_mode "$chosen")
-      [ -z "$mode" ] && refuse_chosen "$id" "$amb" "$chosen" "$DUPLICATE_VALUES"
       [ -n "$DUPLICATE_MODE" ] && [ "$DUPLICATE_MODE" != "$mode" ] && { echo "two relations disagree about $amb: $DUPLICATE_MODE vs $mode" >&2; exit 1; }
       DUPLICATE_MODE="$mode"
       ;;
-    malformed-row-accounting)
-      mode=$(malformed_mode "$chosen")
-      [ -z "$mode" ] && refuse_chosen "$id" "$amb" "$chosen" "$MALFORMED_VALUES"
-      MALFORMED_MODE="$mode"
-      ;;
-    independent-aggregation)
-      mode=$(rounding_mode "$chosen")
-      [ -z "$mode" ] && refuse_chosen "$id" "$amb" "$chosen" "$ROUNDING_VALUES"
-      ROUNDING_MODE="$mode"
-      ;;
+    malformed-row-accounting) MALFORMED_MODE="$mode" ;;
+    independent-aggregation) ROUNDING_MODE="$mode" ;;
   esac
 done <<EOF
 $RELATIONS
@@ -351,8 +345,13 @@ aggregate() { # $1 fixture, $2 first|last|latest|error, $3 half-up|truncate
         if (rule == "last") { chosen[id] = i; continue }
         if (rule == "latest" && rstart[i] >= rstart[chosen[id]]) chosen[id] = i
       }
-      for (id in chosen) {
-        i = chosen[id]; d = rdept[i]; s = rnd(rsal[i])
+      # Which rows count: every row when the decision is "merge" (merging is not de-duplicating),
+      # otherwise the winning row per id.
+      if (rule == "merge") { for (i = 1; i <= n; i++) counts[i] = 1 }
+      else { for (id in chosen) counts[chosen[id]] = 1 }
+      for (i = 1; i <= n; i++) {
+        if (!counts[i]) continue
+        d = rdept[i]; s = rnd(rsal[i])
         cnt[d]++; tot[d] += s; total += s; hc++
       }
       for (d in cnt) printf "DEPT %s %d %d\n", d, cnt[d], tot[d]
@@ -374,6 +373,7 @@ case "$DUPLICATE_MODE" in
   latest-start-date) DUP_RULE=latest ;;
   first-row) DUP_RULE=first ;;
   last-row) DUP_RULE=last ;;
+  merge) DUP_RULE=merge ;;
   error) DUP_RULE=error ;;
   *) printf '# the forged judge got an unknown duplicate mode "%s"\n' "$DUPLICATE_MODE"; DUP_RULE=none ;;
 esac
@@ -483,13 +483,20 @@ fi
 run_tool "$FIX/malformed.csv"
 malformed_output="$RUN_OUT"; malformed_status="$RUN_STATUS"
 valid=$(valid_rows "$FIX/malformed.csv")
-if [ "$MALFORMED_MODE" = skip-count ]; then
+if [ "$MALFORMED_MODE" = skip-count ] || [ "$MALFORMED_MODE" = skip-silent ]; then
   malformed_head=$(overall_fields "$malformed_output" | awk '{print $1}')
   malformed_skipped=$(skipped_count "$malformed_output")
-  if [ "$malformed_status" = 0 ] && [ "$malformed_head" = "$valid" ] && [ "$malformed_skipped" = "3" ]; then
-    relation ok REL-004 "malformed-row-accounting: 3 malformed rows skipped and counted, $valid valid rows still reports a summary"
+  # skip-silent says nothing about a count line, so the check is that the bad rows are out of the
+  # aggregates and the tool still succeeds — the count is only required when the decision promised one.
+  if [ "$MALFORMED_MODE" = skip-count ]; then
+    wants_count=1; count_ok=$([ "$malformed_skipped" = "3" ] && echo yes || echo no)
   else
-    relation not_ok REL-004 "malformed-row-accounting: exit $malformed_status, headcount ${malformed_head:-<none>} (expected $valid), skipped ${malformed_skipped:-<none>} (expected 3)" "exit=$malformed_status headcount=${malformed_head:-none} skipped=${malformed_skipped:-none}"
+    wants_count=0; count_ok=yes
+  fi
+  if [ "$malformed_status" = 0 ] && [ "$malformed_head" = "$valid" ] && [ "$count_ok" = yes ]; then
+    relation ok REL-004 "malformed-row-accounting: 3 malformed rows are out of the aggregates, $valid valid rows still report a summary ($MALFORMED_MODE${wants_count:+, skipped line required})"
+  else
+    relation not_ok REL-004 "malformed-row-accounting: exit $malformed_status, headcount ${malformed_head:-<none>} (expected $valid), skipped ${malformed_skipped:-<none>} ($MALFORMED_MODE wants $([ "$wants_count" = 1 ] && echo 'the count 3' || echo 'no count line'))" "exit=$malformed_status headcount=${malformed_head:-none} skipped=${malformed_skipped:-none}"
   fi
 elif [ "$MALFORMED_MODE" = stop-error ]; then
   if [ "$malformed_status" != 0 ]; then

@@ -44,6 +44,15 @@ else
   not_ok "the document passes every rule the human's confirmation enforces (exit $STATUS)"
 fi
 
+# ADR-031: the document must carry the contract a judge is forged from, or the acceptance after the
+# implementation cannot be built at all. Presence is checked here; the content (invocation, vocabulary,
+# coverage of every blocking decision) is checked by the validator above, which refuses in --dry-run.
+if grep -qE '^deliverable:' "$REF" && grep -qE '^[[:space:]]+run:' "$REF" && grep -qE '^[[:space:]]*-[[:space:]]*id:[[:space:]]*REL-' "$REF"; then
+  ok "the document declares a judge contract (run + relations)"
+else
+  not_ok "the document declares a judge contract (deliverable.run and at least one REL-nnn relation)"
+fi
+
 REQS=$(grep -cE '^[[:space:]]*-[[:space:]]*id:[[:space:]]*REQ-[0-9]+' "$REF" || true)
 AMBS=$(grep -cE '^[[:space:]]*-[[:space:]]*id:[[:space:]]*AMB-[0-9]+' "$REF" || true)
 if [ "$REQS" -ge 1 ]; then
