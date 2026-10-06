@@ -1,154 +1,159 @@
 requirements:
   - id: REQ-001
-    title: "Read the temperature CSV export"
-    description: "The tool accepts a CSV export of daily temperature readings whose header row declares the columns date, station and temperature_c, and it identifies those three fields by their header names."
+    title: "Provide the summary.sh entry point"
+    description: "The deliverable must be a script named summary.sh at the repository root, run as `bash summary.sh <csv>`, where the CSV path is the first positional argument ($1). It reads that local file, writes the summary to stdout, and exits 0 when the file was processed successfully."
     acceptance_criteria:
-      - "Given a file whose header is 'date,station,temperature_c' followed by data rows, the tool reads the file without error."
-      - "The fields date, station and temperature_c are located by header name, so the same columns supplied in a different order are read correctly."
+      - "A file named summary.sh exists at the repository root and is invoked as `bash summary.sh {csv}`."
+      - "The input path is taken from $1; no other arguments are required."
+      - "On a readable input file the process exits with status 0."
+    priority: High
+    source: "Request: 'a small command-line tool that reads a CSV export'"
+  - id: REQ-002
+    title: "Parse the daily temperature CSV"
+    description: "The input is a CSV whose header line names the columns `date`, `station`, `temperature_c`; every following line is one daily reading. A row is well-formed when it has three fields, a non-empty station id, a parseable date and a numeric temperature in degrees Celsius."
+    acceptance_criteria:
+      - "The header line `date,station,temperature_c` is consumed and is not treated as a reading."
+      - "Each following row with a parseable date, a non-empty station and a numeric temperature_c counts as exactly one reading for that station."
     priority: High
     source: "Request: 'reads a CSV export of daily temperature readings (date,station,temperature_c)'"
-
-  - id: REQ-002
-    title: "Report per-station temperature statistics"
-    description: "For every distinct station the tool prints the number of readings, the lowest temperature, the highest temperature and the mean temperature in degrees Celsius, with all reported temperatures shown to exactly one decimal place."
+  - id: REQ-003
+    title: "Print one aggregate line per station"
+    description: "For every station with at least one valid reading, print exactly one line `<station> <count> <min> <max> <mean>`. count is the number of the station's valid readings, min and max the smallest and largest temperature_c, mean the arithmetic mean of those values; min, max and mean are each rendered with exactly one decimal place."
     acceptance_criteria:
-      - "For a fixture containing stations A and B, the output contains exactly one summary entry per station."
-      - "The reported reading count for a station equals the number of valid readings for that station."
-      - "The reported lowest and highest equal the minimum and maximum temperature_c over that station's valid readings."
-      - "The reported mean equals the arithmetic mean of that station's valid readings."
-      - "Every temperature value printed for a station is formatted with exactly one digit after the decimal point."
+      - "The line matches `<station> <count> <min> <max> <mean>` with single spaces."
+      - "count equals the number of valid readings for that station."
+      - "min and max are the smallest and largest temperature_c values of that station."
+      - "mean equals the arithmetic mean of that station's values."
+      - "min, max and mean each carry exactly one digit after the decimal point."
     priority: High
     source: "Request: 'prints, per station, how many readings there were, the lowest, the highest and the mean temperature in degrees Celsius with one decimal place'"
-
-  - id: REQ-003
-    title: "Report the total row count across all stations"
-    description: "In addition to the per-station summaries, the tool prints one overall total covering all stations."
-    acceptance_criteria:
-      - "For a fixture whose rows are known, the printed total matches the counting rule agreed for 'rows across all stations'."
-      - "The overall total is printed once per run, not once per station."
-    priority: High
-    source: "Request: 'It should also print the number of rows across all stations.'"
-
   - id: REQ-004
-    title: "Handle unparseable rows without crashing"
-    description: "A row that cannot be parsed, such as one with a missing field or a non-numeric temperature, does not terminate the run; the tool still completes and reports the readings it could parse."
+    title: "Print the overall total"
+    description: "After the station lines, print exactly one line `TOTAL <count>` where count is the number of valid readings across all stations."
     acceptance_criteria:
-      - "A file mixing malformed rows with valid rows runs to completion and still prints summaries covering the valid rows."
-      - "A malformed row produces no unhandled exception and no truncated output."
-      - "Malformed rows are surfaced to the user according to the agreed reporting rule rather than being silently dropped."
+      - "Exactly one `TOTAL <count>` line is printed."
+      - "The printed total equals the sum of the per-station counts."
     priority: High
-    source: "Request: 'Rows that cannot be parsed should be handled sensibly rather than crashing the tool.'"
-
+    source: "Request: 'print the number of rows across all stations'"
   - id: REQ-005
-    title: "Run fully offline"
-    description: "The tool performs no network access and depends on no remote service at runtime, so it works on a developer laptop without network connectivity."
+    title: "Account for malformed rows without crashing"
+    description: "Rows that cannot be parsed (wrong field count, empty station, unparseable date, non-numeric temperature) must never abort the tool. Their handling is settled by AMB-001: with the default they are skipped, excluded from every aggregate, and counted on a `SKIPPED <count>` line."
     acceptance_criteria:
-      - "The tool completes a run on a machine with no network connectivity."
-      - "No outbound network request is issued during a run."
+      - "A fixture containing malformed rows is processed to completion and the process exits 0."
+      - "Malformed rows never produce a station line and never change a count, min, max or mean."
+      - "Under the default decision the number of skipped rows is printed as `SKIPPED <count>`."
     priority: High
-    source: "Request: 'The tool has to run on a developer laptop with no network access'"
-
+    source: "Request: 'Rows that cannot be parsed should be handled sensibly rather than crashing the tool'"
   - id: REQ-006
-    title: "Meet the year-of-readings performance budget"
-    description: "Processing about 200000 rows completes in roughly two seconds on a developer laptop."
+    title: "Row-order-independent output"
+    description: "The summary depends only on the multiset of data rows, not on their order; permuting the data rows must not change any station line, the skipped count or the total."
     acceptance_criteria:
-      - "A 200000-row input file is processed end-to-end in at most 2 seconds on the reference developer laptop."
-      - "Processing does not require holding every input row in memory at once."
+      - "Permuting the data rows of a fixture yields byte-identical output."
     priority: High
+    source: "Derived: a stable total requires order-independent aggregation"
+  - id: REQ-007
+    title: "Station line ordering"
+    description: "Station lines are emitted in ascending station id order (byte-wise lexicographic). This decision (AMB-004) is recorded but not blocking, and no judge currently checks the ordering."
+    acceptance_criteria:
+      - "Station lines appear in ascending byte-wise station id order."
+    priority: Low
+    source: "Derived: output has to be deterministic; ordering is a presentation choice"
+  - id: REQ-008
+    title: "Offline operation"
+    description: "The tool runs on a developer laptop with no network access and makes no network calls."
+    acceptance_criteria:
+      - "With the network disabled the tool produces the same output as with it enabled."
+    priority: Medium
+    source: "Request: 'run on a developer laptop with no network access'"
+  - id: REQ-009
+    title: "Performance on a year of readings"
+    description: "A fixture of about 200,000 rows completes in a couple of seconds on a developer laptop."
+    acceptance_criteria:
+      - "Processing a 200,000-row fixture finishes within a few seconds."
+    priority: Medium
     source: "Request: 'a year of readings (about 200,000 rows) should finish in a couple of seconds'"
 
 ambiguities:
   - id: AMB-001
-    question: "What should the tool do with each row that cannot be parsed?"
+    question: "How are unparseable rows handled?"
     options:
-      - "Skip the row, count it, report the skipped count on stderr, and exit with success"
-      - "Skip the row silently and exit with success"
-      - "Stop on the first malformed row and exit with a non-zero status"
-    default: "Skip the row, count it, report the skipped count on stderr, and exit with success"
-    blocking: false
-
+      - "skip-count: skipped, counted on a `SKIPPED <count>` line, excluded from station stats and TOTAL"
+      - "skip-silent: skipped silently with no count printed, excluded from station stats and TOTAL"
+      - "stop-error: the first unparseable row aborts the run with a non-zero exit"
+    default: "skip-count: skipped, counted on a `SKIPPED <count>` line, excluded from station stats and TOTAL"
+    checkedAs: skip-count
+    blocking: true
+    chosen: "skip-count: skipped, counted on a `SKIPPED <count>` line, excluded from station stats and TOTAL"
   - id: AMB-002
-    question: "What does the reported total row count across all stations include?"
+    question: "When the same (date, station) key appears more than once, what wins?"
     options:
-      - "Only valid, parsed readings"
-      - "All data rows in the file, both valid and malformed"
-      - "Both figures, reported separately as valid readings and skipped rows"
-    default: "Both figures, reported separately as valid readings and skipped rows"
-    blocking: false
-
+      - "merge: each occurrence remains a separate valid reading and all contribute to the aggregate"
+      - "first-row: only the first occurrence of a (date, station) key is kept"
+      - "last-row: only the last occurrence of a (date, station) key is kept"
+      - "error: a repeated (date, station) key is treated as malformed"
+    default: "merge: each occurrence remains a separate valid reading and all contribute to the aggregate"
+    checkedAs: merge
+    blocking: true
+    chosen: "merge: each occurrence remains a separate valid reading and all contribute to the aggregate"
   - id: AMB-003
-    question: "How is the input CSV supplied to the tool?"
+    question: "How are values that are not exactly representable at one decimal place rounded?"
     options:
-      - "As a file path passed as a positional command-line argument"
-      - "As a path given to a named option such as --input"
-      - "On standard input"
-    default: "As a file path passed as a positional command-line argument"
+      - "half-up: round half away from zero"
+      - "truncate: round toward zero, dropping extra digits"
+    default: "half-up: round half away from zero"
+    checkedAs: half-up
     blocking: true
-
+    chosen: "half-up: round half away from zero"
   - id: AMB-004
-    question: "In what format is the summary printed?"
+    question: "In what order are the station lines printed?"
     options:
-      - "Human-readable aligned plain text"
-      - "CSV"
-      - "JSON"
-    default: "Human-readable aligned plain text"
+      - "ascending station id, byte-wise lexicographic"
+      - "order of first appearance in the input file"
+      - "unspecified"
+    default: "ascending station id, byte-wise lexicographic"
+    blocking: false
+    chosen: "ascending station id, byte-wise lexicographic"
+  - id: AMB-005
+    question: "What does the printed TOTAL count?"
+    options:
+      - "valid readings only: the sum of the per-station counts"
+      - "all data lines including malformed ones"
+    default: "valid readings only: the sum of the per-station counts"
     blocking: true
 
-  - id: AMB-005
-    question: "How are station names grouped into a single summary?"
-    options:
-      - "Case-sensitive exact string match"
-      - "Case-insensitive match after trimming surrounding whitespace"
-    default: "Case-sensitive exact string match"
-    blocking: false
+    chosen: "valid readings only: the sum of the per-station counts"
+deliverable:
+  run: "bash summary.sh {csv}"
+  output_format:
+    station_line: "<station> <count> <min> <max> <mean>"
+    skipped_line: "SKIPPED <count>"
+    total_line: "TOTAL <count>"
+  relations:
+    - id: REL-001
+      relation: row-order-invariance
+      description: "Shuffling the data rows of a fixture yields byte-identical output: identical station lines, SKIPPED line and TOTAL line."
+    - id: REL-002
+      relation: additivity
+      description: "The per-station counts printed sum to the TOTAL count printed."
+      decides: AMB-005
+    - id: REL-003
+      relation: duplicate-resolution
+      description: "A fixture with repeated (date, station) rows is aggregated such that every occurrence counts as its own reading."
+      decides: AMB-002
+      checkedAs: merge
+    - id: REL-004
+      relation: malformed-row-accounting
+      description: "A fixture with unparseable rows completes with exit 0; the bad rows are excluded from all aggregates and reported on the SKIPPED line."
+      decides: AMB-001
+      checkedAs: skip-count
+  differential:
+    - id: DIFF-001
+      anchor: independent-aggregation
+      description: "An independent re-computation of each station's count, min, max and mean from the same readings, rounding half away from zero, must equal the tool's printed values."
+      decides: AMB-003
+      checkedAs: half-up
 
-  - id: AMB-006
-    question: "How must the date field be treated when deciding whether a row is valid?"
-    options:
-      - "Require a non-empty value but otherwise ignore it"
-      - "Require a parseable ISO-8601 date (YYYY-MM-DD) and treat anything else as malformed"
-      - "Ignore the date column entirely for validity and summarisation"
-    default: "Require a non-empty value but otherwise ignore it"
-    blocking: false
-
-  - id: AMB-007
-    question: "Are numeric but physically implausible temperatures treated as malformed?"
-    options:
-      - "No range check: accept any numeric temperature_c value"
-      - "Treat values outside a plausible Celsius range (for example below -90 or above 60) as malformed"
-    default: "No range check: accept any numeric temperature_c value"
-    blocking: false
-
-  - id: AMB-008
-    question: "Which CSV dialect must be supported?"
-    options:
-      - "RFC 4180: comma delimiter, optional double-quoted fields that may contain commas and escaped quotes"
-      - "Minimal: split each line on commas with no quoting or escaping support"
-    default: "RFC 4180: comma delimiter, optional double-quoted fields that may contain commas and escaped quotes"
-    blocking: false
-
-  - id: AMB-009
-    question: "How are blank and whitespace-only lines treated?"
-    options:
-      - "Ignored entirely and excluded from the total"
-      - "Counted as malformed rows under the malformed-row rule"
-      - "Treated as a fatal format error"
-    default: "Ignored entirely and excluded from the total"
-    blocking: false
-
-  - id: AMB-010
-    question: "Which rounding rule applies when formatting the mean to one decimal place?"
-    options:
-      - "Round half away from zero"
-      - "Round half to even (banker's rounding)"
-    default: "Round half away from zero"
-    blocking: false
-
-  - id: AMB-011
-    question: "In what order are the per-station summaries printed?"
-    options:
-      - "Order of first appearance in the input file"
-      - "Station name in ascending lexicographic order"
-      - "Descending reading count"
-    default: "Order of first appearance in the input file"
-    blocking: false
+confirmation:
+  by: "SS"
+  at: "2026-10-01T14:09:07.944Z"
+  method: bounded-choice

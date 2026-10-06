@@ -91,6 +91,7 @@ ambiguities:
       - "Skip the row and write it to a rejected-rows file"
     default: "Skip the row, count it, and report the count"
     chosen: "Skip the row, count it, and report the count"
+    checkedAs: skip-count
     blocking: true
   - id: AMB-002
     question: Which row wins when employee_id repeats?
@@ -101,6 +102,7 @@ ambiguities:
       - "Treat it as an error"
     default: "First row wins"
     chosen: "Last row wins"
+    checkedAs: last-row
     blocking: true
   - id: AMB-003
     question: Where does the summary go?
@@ -118,6 +120,7 @@ ambiguities:
       - "Half-up, currency printed with a per-run argument"
     default: "Half-up, no currency printed"
     chosen: "Half-up, no currency printed"
+    checkedAs: half-up
     blocking: true
 
 # The judge contract (ADR-026). `run` is how the deliverable is invoked (one {csv} placeholder);
