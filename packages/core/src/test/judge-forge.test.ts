@@ -228,19 +228,21 @@ test('requirementRef: a step may point at the document the run was confirmed aga
   }
 });
 
-test('requirementRef: {requirement} with nothing confirmed fails closed, and says why', async () => {
+test('requirementRef: {requirement} with nothing confirmed is refused before any step runs', async () => {
   const f = project(forge(judge('pass')));
   try {
     const ctx = context(f);
     delete (ctx as { confirmedRequirement?: unknown }).confirmedRequirement;
-    const res = await executeWorkflow(
-      workflow({ forge: { requirementRef: '{requirement}' }, accept: { requirementRef: '{requirement}' } }),
-      ctx,
-    );
-    assert.equal(res.status, 'failed');
-    assert.match(
-      res.steps.find((s) => s.stepId === 'judge')?.summary ?? '',
-      /points at \{requirement\}.*no confirmed requirement on record/,
+    // A step that points at the confirmed document in a run with NO confirmation is refused up front,
+    // naming the steps — not step by step, after an agent may already have run. The run never reaches
+    // the judge, so nothing is forged and nothing is accepted.
+    await assert.rejects(
+      () =>
+        executeWorkflow(
+          workflow({ forge: { requirementRef: '{requirement}' }, accept: { requirementRef: '{requirement}' } }),
+          ctx,
+        ),
+      /names \{requirement\} in step\(s\) \[.*\].*no confirmed requirement on record/,
     );
     assert.ok(!existsSync(acceptArtifactOf(f.dir)), 'nothing is accepted without a confirmation to point at');
   } finally {
