@@ -77,6 +77,23 @@ const requirement = (opts: { duplicate?: string; malformed?: string; rounding?: 
     '    blocking: true',
     'deliverable:',
     '  run: "node csv-summary.mjs {csv}"',
+    '  input_format:',
+    '    columns: "employee_id:id,name:other,department:other,start_date:date,annual_salary:measure"',
+    '    sample: |',
+    '      1001,Ada,Engineering,2021-04-01,100.5',
+    '      1002,Grace,Sales,2019-11-15,135.4',
+    '      1003,Carol,Engineering,2020-01-10,90.5',
+    '      1004,Alan,Sales,2022-02-02,100.6',
+    '  output_format:',
+    '    department_line:',
+    '      shape: "<department> <count> <total> <average>"',
+    '      fields: [id, count, sum, mean]',
+    '    skipped_line:',
+    '      shape: "SKIPPED <count>"',
+    '      fields: [skipped-count]',
+    '    overall_line:',
+    '      shape: "TOTAL <count> <total>"',
+    '      fields: [count, sum]',
     '  relations:',
     '    - id: REL-001',
     '      relation: row-order-invariance',
@@ -133,9 +150,11 @@ const deliverable = (): string =>
     '  if (DUP === "latest" && r.start >= prev.start) byId.set(r.id, r);',
     '}',
     'const agg = new Map();',
+    '// The document calls the ROW IDENTITY the `id` column, and the judge groups by it, so the fixture' + 
+    '// groups by the same column: a world whose report groups by something else is not describable yet.',
     'let hc = 0;',
     'let total = 0;',
-    'for (const r of byId.values()) { const a = agg.get(r.dept) ?? { c: 0, t: 0 }; const s = rnd(r.salary); a.c++; a.t += s; agg.set(r.dept, a); hc++; total += s; }',
+    'for (const r of byId.values()) { const a = agg.get(r.id) ?? { c: 0, t: 0 }; const s = rnd(r.salary); a.c++; a.t += s; agg.set(r.id, a); hc++; total += s; }',
     'for (const [d, a] of [...agg].sort()) console.log(`${d} ${a.c} ${a.t} ${Math.round(a.t / a.c)}`);',
     'if (skipped > 0) console.log(`SKIPPED ${skipped}`);',
     'console.log(`TOTAL ${hc} ${total}`);',
@@ -324,7 +343,9 @@ test('decisions: CHANGING THE ANSWER fails the UNCHANGED implementation — the 
     assert.equal(before.status, 0, `the latest-start_date answer accepts this implementation (${before.out})`);
     assert.notEqual(after.status, 0, 'the first-row answer must reject the SAME implementation');
     assert.match(after.out, /^not ok \d+ - DEC-002 AMB-002 NOT honoured: "First row wins" \(checked by REL-003, which failed\)$/m);
-    assert.match(after.out, /late-date total 537 want 428/);
+    // The judge must name WHICH fixture it disagreed about, and quote the value it expected (the numbers
+    // moved from per-total to per-group when the judge started deriving its world from the document).
+    assert.match(after.out, /late-date: .*want \d+/);
     assert.match(after.out, /ACCEPT_VERDICT: fail/);
   } finally {
     cleanup(accepted);
@@ -368,7 +389,7 @@ test('decisions: a defect the implementer tests would share anyway still fails a
     const r = judge(f);
     assert.notEqual(r.status, 0, 'the judge must fail');
     assert.match(r.out, /^not ok \d+ - DEC-002 AMB-002 NOT honoured/m);
-    assert.match(r.out, /early-date total /);
+    assert.match(r.out, /early-date: .*want \d+/);
   } finally {
     cleanup(f);
   }

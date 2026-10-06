@@ -133,12 +133,15 @@ deliverable:
   # the judge reshuffles, duplicates and mangles. Before this the fixture rows lived inside the forge,
   # where no document could reach them.
   input_format:
-    columns: "employee_id:id,start_date:date,annual_salary:measure"
+    # The id role is the column the tool GROUPS BY (the report has one line per department), and every
+    # column is declared because row validity in this world is "five fields, a numeric salary, an ISO
+    # date" — exactly the shapes the deliverable itself refuses.
+    columns: "employee_id:other,name:other,department:id,start_date:date,annual_salary:measure"
     sample: |
-      1001,2021-04-01,100.5
-      1002,2020-02-02,80.0
-      1003,2020-01-10,90.5
-      1001,2019-01-02,70.0
+      1001,Ada,Engineering,2021-04-01,100.5
+      1002,Grace,Sales,2019-11-15,135.4
+      1003,Carol,Engineering,2020-01-10,90.5
+      1004,Alan,Sales,2022-02-02,100.6
   output_format:
     department_line:
       shape: "<department> <count> <total> <average>"

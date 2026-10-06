@@ -45,9 +45,19 @@ ambiguities:
     blocking: true
 deliverable:
   run: "bash summary.sh {csv}"          # how a judge invokes the thing; {csv} is the input file
+  input_format:                         # the WORLD a judge builds its fixtures in: it has no other source
+    columns: "date:date,station:id,temperature_c:measure"   # name:role, in file order
+    sample: |                           # >= 3 real rows, >= 2 distinct ids, numeric measures
+      2024-01-01,ALPHA,10.4
+      2024-01-01,BRAVO,-2.5
+      2024-01-02,ALPHA,11.6
   output_format:
-    station_line: "<station> <count> <min> <max> <mean>"
-    total_line: "TOTAL <count>"
+    station_line:
+      shape: "<station> <count> <min> <max> <mean>"
+      fields: [id, count, min, max, mean]       # one role per <placeholder>, in order
+    total_line:
+      shape: "TOTAL <count>"
+      fields: [count]
   relations:                            # what a judge must be able to CHECK, from output alone
     - id: REL-001
       relation: additivity
@@ -92,8 +102,27 @@ from your text alone.
    file as `$1`), so an implementer who only reads this document knows what to build. `{csv}` is
    replaced with a fixture path when the judge runs it.
 9. `output_format` declares the EXACT line shapes a judge may parse. A judge that has to guess a format
-   is a judge that checks something you did not write.
-10. `relations` are the invariants a judge must be able to check from the output alone, each `REL-nnn`
+   is a judge that checks something you did not write. Each machine-readable shape also declares the
+   MEANING of its placeholders, positionally, as `fields:` from this list — and only this list:
+     - `id`:            the group key the line is about (station, department, employee …)
+     - `count`:         how many rows the group counted
+     - `sum`:           the group's total of the measure column
+     - `min` / `max`:   the smallest / largest measure in the group
+     - `mean`:          the group's average of the measure
+     - `skipped-count`: how many rows were skipped (the line a `skip-count` decision promises)
+   The number of `fields` must equal the number of `<placeholders>` in the shape, and at least one shape
+   must declare its fields: a judge can compare two runs without them, but it cannot say which number is
+   the count, so the whole document is refused.
+10. `input_format` declares the data the whole thing is ABOUT, and it is what the judge generates its
+   fixtures from — reshuffled, duplicated and mangled versions of YOUR sample. `columns` is a flat list of
+   `name:role` pairs in file order, where a role is `id` | `measure` | `date` | `other`: exactly one
+   column must be `id` (the group key the report prints), exactly one must be `measure` (every aggregate
+   is computed from it), at most one may be `date` (needed when a decision orders rows by date). `sample`
+   holds at least three real data rows (no header line), each with one field per declared column, at least
+   two distinct ids and numeric values in the measure column. A missing or unreadable world, an unknown
+   role, two measures, a one-id sample or a non-numeric measure is REFUSED before the human confirms:
+   without it a judge would invent a world and judge a scenario nobody asked for.
+11. `relations` are the invariants a judge must be able to check from the output alone, each `REL-nnn`
     with a `relation:` from this list — and only this list, because these are the ones the forge can
     implement:
       - `row-order-invariance`   the result does not depend on the order of the input rows
@@ -106,7 +135,7 @@ from your text alone.
     `decides: <AMB-nnn>` — a blocking decision that no relation exercises is refused as well. A decision
     that genuinely needs an answer outside this vocabulary must be marked blocking: false, and the
     requirement text must say plainly that no judge checks it yet.
-11. **Say what each answer MEANS to a judge.** Prose is for humans; a judge needs to know which
+12. **Say what each answer MEANS to a judge.** Prose is for humans; a judge needs to know which
     behaviour to test, and it will not guess from a sentence. Every decision that a `duplicate-resolution`,
     `malformed-row-accounting` or `independent-aggregation` relation settles must carry
     `checkedAs: <mode>` from that relation's list:
@@ -123,9 +152,9 @@ from your text alone.
  instead of the decision is REFUSED — before the human confirms it, and again when the judge is
  forged — so put it in the right place (the first real run of this prompt put all three on the
  relations and the gate refused the document, which is the gate working).
-12. `differential` declares at least one anchor (`DIFF-nnn`) that recomputes part of the answer
+13. `differential` declares at least one anchor (`DIFF-nnn`) that recomputes part of the answer
     independently of the tool's own arithmetic. Equality with the tool's own output is not a check.
-12. Prose criteria that no fixture can decide (performance, file-size limits, human readability) stay as
+14. Prose criteria that no fixture can decide (performance, file-size limits, human readability) stay as
     acceptance criteria on their requirements and are NEVER claimed by a relation: the judge reports them
     as not mechanised, and a criterion reported as checked when it is not is the worst thing you can
     emit here.
