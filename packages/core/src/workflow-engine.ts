@@ -358,16 +358,46 @@ export async function executeWorkflow(
   };
   const stepResults: WorkflowStepResult[] = [];
   const vars: Record<string, string> = { ...inputVars };
+  /**
+   * The document THIS RUN was confirmed against (ADR-025). Every step that names `{requirement}` —
+   * in a `requirementRef` or in a prompt — means THAT document, so the name is filled once, here,
+   * for the whole run.
+   *
+   * This used to be filled only for steps that carry a `requirementRef`, and NOT for the ones that
+   * carry a prompt. The implementer's prompt therefore kept the literal text `{requirement}`: the
+   * agent was told to read a document whose path had never been substituted, went looking for a
+   * requirement on its own, found a different document in the repository and implemented THAT — with
+   * its own tests passing, because a green suite only says the implementer agrees with the
+   * implementer. A run confirmed against one document delivered another (docs/bugs-fixed.md, 34).
+   * A placeholder the run cannot fill is a prompt that lies, so the workflow is refused before any
+   * step runs rather than after an agent has been paid to guess.
+   */
+  const confirmedRef = ctx.confirmedRequirement?.ref ?? '';
+  vars['requirement'] = confirmedRef;
+  if (confirmedRef.length === 0) {
+    const namesRequirement = workflow.steps.filter((s) =>
+      [s.prompt ?? '', s.requirementRef ?? '', s.acceptanceRef ?? '', s.forgeRef ?? ''].some((t) =>
+        t.includes('{requirement}'),
+      ),
+    );
+    if (namesRequirement.length > 0) {
+      throw new Error(
+        `workflow "${workflow.name}" names {requirement} in step(s) [${namesRequirement
+          .map((s) => s.id)
+          .join(', ')}] — the document the run was confirmed against — but this run has no confirmed requirement on record (pass --requirement and --confirmed-requirement)`,
+      );
+    }
+  }
 
   /**
    * A step may say `requirementRef: "{requirement}"`: the document THIS RUN was confirmed against
-   * (ADR-031). It is the difference between a workflow that can only ever run on one file and one that
+   * (ADR-025). It is the difference between a workflow that can only ever run on one file and one that
    * runs on whatever a human confirmed — and it fails closed when there is no confirmation to point at,
    * rather than resolving to a path nobody confirmed.
    */
   const requirementRefOf = (raw: string | undefined): { ref: string; error?: string } => {
-    const ref = renderPrompt(raw ?? '', { ...vars, requirement: ctx.confirmedRequirement?.ref ?? '' }).trim();
-    if (raw !== undefined && raw.includes('{requirement}') && (ctx.confirmedRequirement?.ref ?? '').length === 0) {
+    const ref = renderPrompt(raw ?? '', vars).trim();
+    if (raw !== undefined && raw.includes('{requirement}') && confirmedRef.length === 0) {
       return {
         ref,
         error:
