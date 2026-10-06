@@ -212,6 +212,42 @@ test('judge forge: the judge is produced outside the worktree and runs from its 
   }
 });
 
+test('requirementRef: a step may point at the document the run was confirmed against', async () => {
+  // `{requirement}` is the difference between a workflow that can only run on one file and one that runs
+  // on whatever a human confirmed (ADR-031). Here the workflow names no path at all.
+  const f = project(forge(judge('pass')));
+  try {
+    const res = await executeWorkflow(
+      workflow({ forge: { requirementRef: '{requirement}' }, accept: { requirementRef: '{requirement}' } }),
+      context(f),
+    );
+    assert.equal(res.status, 'completed', JSON.stringify(res.steps.map((s) => [s.stepId, s.status])));
+    assert.equal(readFileSync(acceptArtifactOf(f.dir), 'utf8').includes('docs/requirements/feature.yaml'), true);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirementRef: {requirement} with nothing confirmed fails closed, and says why', async () => {
+  const f = project(forge(judge('pass')));
+  try {
+    const ctx = context(f);
+    delete (ctx as { confirmedRequirement?: unknown }).confirmedRequirement;
+    const res = await executeWorkflow(
+      workflow({ forge: { requirementRef: '{requirement}' }, accept: { requirementRef: '{requirement}' } }),
+      ctx,
+    );
+    assert.equal(res.status, 'failed');
+    assert.match(
+      res.steps.find((s) => s.stepId === 'judge')?.summary ?? '',
+      /points at \{requirement\}.*no confirmed requirement on record/,
+    );
+    assert.ok(!existsSync(acceptArtifactOf(f.dir)), 'nothing is accepted without a confirmation to point at');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 // --- the fail-closed paths ---------------------------------------------------------------------
 
 test('judge forge: a generator that does not report ok stops the run before any acceptance', async () => {

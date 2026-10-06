@@ -17,6 +17,18 @@ import { fileURLToPath } from 'node:url';
 
 const FORGE = join(dirname(fileURLToPath(import.meta.url)), '../../../../extensions/judges/metamorphic-forge.sh');
 
+/** The human wording of each mode, so a document reads like a document and a judge still knows the meaning. */
+const PROSE: Record<string, string> = {
+  'skip-count': 'Skip the row, count it, and report the count',
+  'stop-error': 'Stop with an error',
+  'latest-start-date': 'The row with the latest start_date wins',
+  'first-row': 'First row wins',
+  'last-row': 'Last row wins',
+  error: 'Treat it as an error',
+  'half-up': 'Half-up, no currency printed',
+  truncate: 'Truncate, no currency printed',
+};
+
 const requirement = (opts: { duplicate?: string; malformed?: string; rounding?: string; dropDecides?: string; unknownDecision?: boolean } = {}): string =>
   [
     'requirement:',
@@ -34,7 +46,8 @@ const requirement = (opts: { duplicate?: string; malformed?: string; rounding?: 
     '      - "Skip the row, count it, and report the count"',
     '      - "Stop with an error"',
     '    default: "Skip the row, count it, and report the count"',
-    `    chosen: "${opts.malformed ?? 'Skip the row, count it, and report the count'}"`,
+    `    chosen: "${PROSE[opts.malformed ?? 'skip-count'] ?? opts.malformed}"`,
+    `    checkedAs: ${opts.malformed ?? 'skip-count'}`,
     '    blocking: true',
     '  - id: AMB-002',
     '    question: Which row wins when employee_id repeats?',
@@ -42,7 +55,8 @@ const requirement = (opts: { duplicate?: string; malformed?: string; rounding?: 
     '      - "First row wins"',
     '      - "The row with the latest start_date wins"',
     '    default: "First row wins"',
-    `    chosen: "${opts.duplicate ?? 'The row with the latest start_date wins'}"`,
+    `    chosen: "${PROSE[opts.duplicate ?? 'latest-start-date'] ?? opts.duplicate}"`,
+    `    checkedAs: ${opts.duplicate ?? 'latest-start-date'}`,
     '    blocking: true',
     '  - id: AMB-003',
     '    question: Where does the summary go?',
@@ -58,7 +72,8 @@ const requirement = (opts: { duplicate?: string; malformed?: string; rounding?: 
     '      - "Half-up, no currency printed"',
     '      - "Truncate, no currency printed"',
     '    default: "Half-up, no currency printed"',
-    `    chosen: "${opts.rounding ?? 'Half-up, no currency printed'}"`,
+    `    chosen: "${PROSE[opts.rounding ?? 'half-up'] ?? opts.rounding}"`,
+    `    checkedAs: ${opts.rounding ?? 'half-up'}`,
     '    blocking: true',
     'deliverable:',
     '  run: "node csv-summary.mjs {csv}"',
@@ -220,13 +235,12 @@ test('decisions: a relation bound to a decision the document does not contain is
   }
 });
 
-test('decisions: a chosen option the forge cannot mechanise is refused, with the mechanisable ones named', () => {
-  const f = forge(requirement({ duplicate: 'Ask the user at runtime' }));
+test('decisions: a checkedAs the forge cannot act on is refused, with the modes named', () => {
+  const f = forge(requirement({ duplicate: 'ask-at-runtime' }));
   try {
     assert.notEqual(f.forge.status, 0, 'the forge must refuse');
-    assert.match(f.forge.out, /cannot mechanise/);
-    assert.match(f.forge.out, /"First row wins"/);
-    assert.match(f.forge.out, /"The row with the latest start_date wins"/);
+    assert.match(f.forge.out, /says checkedAs: "ask-at-runtime", which REL-003 cannot act on/);
+    assert.match(f.forge.out, /implemented: first-row last-row latest-start-date merge error/);
   } finally {
     cleanup(f);
   }
@@ -236,8 +250,8 @@ test('decisions: the judge refuses to guess a rounding rule the document never d
   // AMB-004 stays non-blocking and nothing exercises it, so no relation can say how salaries round.
   // The forge must refuse rather than invent one: an invented rounding rule is an invented requirement.
   const doc = requirement({ dropDecides: 'AMB-004' }).replace(
-    ['    chosen: "Half-up, no currency printed"', '    blocking: true'].join('\n'),
-    ['    chosen: "Half-up, no currency printed"', '    blocking: false'].join('\n'),
+    ['    checkedAs: half-up', '    blocking: true'].join('\n'),
+    ['    checkedAs: half-up', '    blocking: false'].join('\n'),
   );
   const f = forge(doc);
   try {
@@ -303,7 +317,7 @@ test('decisions: CHANGING THE ANSWER fails the UNCHANGED implementation — the 
   // The implementation is the same in both runs; only the human's `chosen` option differs. If the
   // verdict did not move, the decision would be decoration rather than a requirement.
   const accepted = forge(requirement());
-  const flipped = forge(requirement({ duplicate: 'First row wins' }));
+  const flipped = forge(requirement({ duplicate: 'first-row' }));
   try {
     const before = judge(accepted);
     const after = judge(flipped);
@@ -319,7 +333,7 @@ test('decisions: CHANGING THE ANSWER fails the UNCHANGED implementation — the 
 });
 
 test('decisions: an implementation that does the opposite of the malformed-row decision fails DEC-001', () => {
-  const f = forge(requirement({ malformed: 'Stop with an error' }));
+  const f = forge(requirement({ malformed: 'stop-error' }));
   try {
     assert.equal(f.forge.status, 0, `the forge builds (${f.forge.out})`);
     const r = judge(f);
@@ -334,7 +348,7 @@ test('decisions: an implementation that does the opposite of the malformed-row d
 });
 
 test('decisions: the rounding decision drives the differential anchor', () => {
-  const f = forge(requirement({ rounding: 'Truncate, no currency printed' }));
+  const f = forge(requirement({ rounding: 'truncate' }));
   try {
     assert.equal(f.forge.status, 0, `the forge builds (${f.forge.out})`);
     const r = judge(f);

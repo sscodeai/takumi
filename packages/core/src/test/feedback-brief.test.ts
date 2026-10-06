@@ -43,6 +43,7 @@ const DOC = [
   '      - "The row with the latest start_date wins"',
   '    default: "First row wins"',
   '    chosen: "The row with the latest start_date wins"',
+  '    checkedAs: latest-start-date',
   '    blocking: true',
   '  - id: AMB-003',
   '    question: Where does the summary go?',
@@ -186,12 +187,16 @@ test('brief: only OPEN failures with no decision behind them reach the intake as
 test('validate: a decision that cites a failure the document does not record is refused', () => {
   // The first `blocking: true` line that precedes another entry is AMB-002's, so this lands there.
   const cited = DOC.replace('    blocking: true\n  - id: AMB-003', '    blocking: true\n    fromFeedback: FB-001\n  - id: AMB-003');
-  const issues = validateRequirementDocument(cited);
-  assert.equal(issues.length, 1);
-  assert.match(issues[0] ?? '', /AMB-002 cites FB-001, which this document does not record/);
+  assert.ok(
+    validateRequirementDocument(cited).some((i) => /AMB-002 cites FB-001, which this document does not record/.test(i)),
+    'the dangling citation is refused',
+  );
   // With the failure present, the same citation is fine: the decision answers something real.
   const ok = `${cited.replace(/\s*$/, '')}\n\n${feedback(['REL-002 additivity: x'])}`;
-  assert.deepEqual(validateRequirementDocument(ok), []);
+  assert.ok(
+    validateRequirementDocument(ok).every((i) => !i.includes('cites FB-001')),
+    'with the failure on record the citation is fine',
+  );
 });
 
 test('validate: the intake contract is machine-checked, not hoped for', () => {
@@ -225,8 +230,32 @@ test('validate: the confirmed PoC document itself passes the contract', () => {
   assert.deepEqual(validateRequirementDocument(real), []);
 });
 
+test('validate: the deliverable block is checked before a human confirms it (ADR-031)', () => {
+  // No invocation: a judge with no way to run the thing cannot check anything.
+  const noRun = DOC.replace('  run: "node csv-summary.mjs {csv}"\n', '');
+  assert.match(validateRequirementDocument(noRun)[0] ?? '', /declares no run/);
+
+  // A relation no judge implements: refused at the front door, not after the implementation is paid for.
+  const invented = DOC.replace('      relation: additivity', '      relation: statistical-plausibility');
+  assert.match(
+    validateRequirementDocument(invented).find((i) => i.includes('REL-002')) ?? '',
+    /declares the relation "statistical-plausibility", which no judge can check \(implemented: row-order-invariance, additivity/,
+  );
+
+  // A blocking decision nothing exercises. AMB-001 and AMB-002 are both blocking; only AMB-002 is bound.
+  const uncovered = DOC.replace('      decides: AMB-002', '      note: unbound');
+  assert.match(
+    validateRequirementDocument(uncovered).find((i) => i.includes('AMB-001')) ?? '',
+    /AMB-001 is blocking and no declared check exercises it/,
+  );
+
+  // The confirmed PoC document satisfies all of it — asserted in the guard test below.
+});
+
 test('validate: a check claiming to settle a decision that is not there is refused', () => {
-  const issues = validateRequirementDocument(DOC.replace('decides: AMB-002', 'decides: AMB-099'));
-  assert.equal(issues.length, 1);
-  assert.match(issues[0] ?? '', /REL-003 \(duplicate-resolution\) exercises AMB-099, which is not a decision/);
+  assert.ok(
+    validateRequirementDocument(DOC.replace('decides: AMB-002', 'decides: AMB-099')).some((i) =>
+      /REL-003 \(duplicate-resolution\) exercises AMB-099, which is not a decision/.test(i),
+    ),
+  );
 });

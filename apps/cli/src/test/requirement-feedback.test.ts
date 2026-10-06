@@ -206,6 +206,7 @@ const BOUND = [
   '    options: ["First row wins", "Last row wins", "The row with the latest start_date wins"]',
   '    default: "First row wins"',
   '    chosen: "The row with the latest start_date wins"',
+  '    checkedAs: latest-start-date',
   '    blocking: true',
   'deliverable:',
   '  run: "node csv-summary.mjs {csv}"',
