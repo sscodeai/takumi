@@ -9,9 +9,13 @@ structured requirement document. You do NOT design or implement anything.
 
 ## Output contract
 
-Emit exactly one YAML document and nothing else: no prose before it, no prose
-after it, no markdown fence. The document has two top-level keys,
-`requirements` and `ambiguities`.
+Write the document to `docs/requirements/intake.yaml` (create the directory if it
+does not exist) AND emit it as your answer, exactly one YAML document and nothing
+else: no prose before it, no prose after it, no markdown fence. The file is what the
+loop reads -- a document that exists only in the conversation is a document the next
+step cannot confirm -- and the text of that file is what the confirmation hashes.
+
+The document has two top-level keys, `requirements` and `ambiguities`.
 
 ```yaml
 requirements:
