@@ -1,0 +1,154 @@
+requirements:
+  - id: REQ-001
+    title: "Read the temperature CSV export"
+    description: "The tool accepts a CSV export of daily temperature readings whose header row declares the columns date, station and temperature_c, and it identifies those three fields by their header names."
+    acceptance_criteria:
+      - "Given a file whose header is 'date,station,temperature_c' followed by data rows, the tool reads the file without error."
+      - "The fields date, station and temperature_c are located by header name, so the same columns supplied in a different order are read correctly."
+    priority: High
+    source: "Request: 'reads a CSV export of daily temperature readings (date,station,temperature_c)'"
+
+  - id: REQ-002
+    title: "Report per-station temperature statistics"
+    description: "For every distinct station the tool prints the number of readings, the lowest temperature, the highest temperature and the mean temperature in degrees Celsius, with all reported temperatures shown to exactly one decimal place."
+    acceptance_criteria:
+      - "For a fixture containing stations A and B, the output contains exactly one summary entry per station."
+      - "The reported reading count for a station equals the number of valid readings for that station."
+      - "The reported lowest and highest equal the minimum and maximum temperature_c over that station's valid readings."
+      - "The reported mean equals the arithmetic mean of that station's valid readings."
+      - "Every temperature value printed for a station is formatted with exactly one digit after the decimal point."
+    priority: High
+    source: "Request: 'prints, per station, how many readings there were, the lowest, the highest and the mean temperature in degrees Celsius with one decimal place'"
+
+  - id: REQ-003
+    title: "Report the total row count across all stations"
+    description: "In addition to the per-station summaries, the tool prints one overall total covering all stations."
+    acceptance_criteria:
+      - "For a fixture whose rows are known, the printed total matches the counting rule agreed for 'rows across all stations'."
+      - "The overall total is printed once per run, not once per station."
+    priority: High
+    source: "Request: 'It should also print the number of rows across all stations.'"
+
+  - id: REQ-004
+    title: "Handle unparseable rows without crashing"
+    description: "A row that cannot be parsed, such as one with a missing field or a non-numeric temperature, does not terminate the run; the tool still completes and reports the readings it could parse."
+    acceptance_criteria:
+      - "A file mixing malformed rows with valid rows runs to completion and still prints summaries covering the valid rows."
+      - "A malformed row produces no unhandled exception and no truncated output."
+      - "Malformed rows are surfaced to the user according to the agreed reporting rule rather than being silently dropped."
+    priority: High
+    source: "Request: 'Rows that cannot be parsed should be handled sensibly rather than crashing the tool.'"
+
+  - id: REQ-005
+    title: "Run fully offline"
+    description: "The tool performs no network access and depends on no remote service at runtime, so it works on a developer laptop without network connectivity."
+    acceptance_criteria:
+      - "The tool completes a run on a machine with no network connectivity."
+      - "No outbound network request is issued during a run."
+    priority: High
+    source: "Request: 'The tool has to run on a developer laptop with no network access'"
+
+  - id: REQ-006
+    title: "Meet the year-of-readings performance budget"
+    description: "Processing about 200000 rows completes in roughly two seconds on a developer laptop."
+    acceptance_criteria:
+      - "A 200000-row input file is processed end-to-end in at most 2 seconds on the reference developer laptop."
+      - "Processing does not require holding every input row in memory at once."
+    priority: High
+    source: "Request: 'a year of readings (about 200,000 rows) should finish in a couple of seconds'"
+
+ambiguities:
+  - id: AMB-001
+    question: "What should the tool do with each row that cannot be parsed?"
+    options:
+      - "Skip the row, count it, report the skipped count on stderr, and exit with success"
+      - "Skip the row silently and exit with success"
+      - "Stop on the first malformed row and exit with a non-zero status"
+    default: "Skip the row, count it, report the skipped count on stderr, and exit with success"
+    blocking: false
+
+  - id: AMB-002
+    question: "What does the reported total row count across all stations include?"
+    options:
+      - "Only valid, parsed readings"
+      - "All data rows in the file, both valid and malformed"
+      - "Both figures, reported separately as valid readings and skipped rows"
+    default: "Both figures, reported separately as valid readings and skipped rows"
+    blocking: false
+
+  - id: AMB-003
+    question: "How is the input CSV supplied to the tool?"
+    options:
+      - "As a file path passed as a positional command-line argument"
+      - "As a path given to a named option such as --input"
+      - "On standard input"
+    default: "As a file path passed as a positional command-line argument"
+    blocking: true
+
+  - id: AMB-004
+    question: "In what format is the summary printed?"
+    options:
+      - "Human-readable aligned plain text"
+      - "CSV"
+      - "JSON"
+    default: "Human-readable aligned plain text"
+    blocking: true
+
+  - id: AMB-005
+    question: "How are station names grouped into a single summary?"
+    options:
+      - "Case-sensitive exact string match"
+      - "Case-insensitive match after trimming surrounding whitespace"
+    default: "Case-sensitive exact string match"
+    blocking: false
+
+  - id: AMB-006
+    question: "How must the date field be treated when deciding whether a row is valid?"
+    options:
+      - "Require a non-empty value but otherwise ignore it"
+      - "Require a parseable ISO-8601 date (YYYY-MM-DD) and treat anything else as malformed"
+      - "Ignore the date column entirely for validity and summarisation"
+    default: "Require a non-empty value but otherwise ignore it"
+    blocking: false
+
+  - id: AMB-007
+    question: "Are numeric but physically implausible temperatures treated as malformed?"
+    options:
+      - "No range check: accept any numeric temperature_c value"
+      - "Treat values outside a plausible Celsius range (for example below -90 or above 60) as malformed"
+    default: "No range check: accept any numeric temperature_c value"
+    blocking: false
+
+  - id: AMB-008
+    question: "Which CSV dialect must be supported?"
+    options:
+      - "RFC 4180: comma delimiter, optional double-quoted fields that may contain commas and escaped quotes"
+      - "Minimal: split each line on commas with no quoting or escaping support"
+    default: "RFC 4180: comma delimiter, optional double-quoted fields that may contain commas and escaped quotes"
+    blocking: false
+
+  - id: AMB-009
+    question: "How are blank and whitespace-only lines treated?"
+    options:
+      - "Ignored entirely and excluded from the total"
+      - "Counted as malformed rows under the malformed-row rule"
+      - "Treated as a fatal format error"
+    default: "Ignored entirely and excluded from the total"
+    blocking: false
+
+  - id: AMB-010
+    question: "Which rounding rule applies when formatting the mean to one decimal place?"
+    options:
+      - "Round half away from zero"
+      - "Round half to even (banker's rounding)"
+    default: "Round half away from zero"
+    blocking: false
+
+  - id: AMB-011
+    question: "In what order are the per-station summaries printed?"
+    options:
+      - "Order of first appearance in the input file"
+      - "Station name in ascending lexicographic order"
+      - "Descending reading count"
+    default: "Order of first appearance in the input file"
+    blocking: false

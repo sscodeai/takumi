@@ -23,12 +23,7 @@ steps:
     # an undecided blocking decision, so this step fails closed on an intake nobody could confirm.
     type: quality_gate
     prompt: |
-      set -e
-      if [ ! -f docs/requirements/intake.yaml ]; then
-        echo "the intake wrote no docs/requirements/intake.yaml" >&2
-        exit 1
-      fi
-      node apps/cli/dist/index.js requirement confirm docs/requirements/intake.yaml --dry-run
+      bash extensions/workflows/request-intake/checks/intake-shape-tap.sh
     dependsOn: [req_intake]
     timeoutMs: 120000
   - id: ambiguity_confirmation
