@@ -18,6 +18,8 @@ const DOC = [
   'requirements:',
   '  - id: REQ-001',
   '    title: Do the thing',
+  '    acceptance_criteria:',
+  '      - "A third party can check that the thing is done."',
   'ambiguities:',
   '  - id: AMB-001',
   '    question: What happens to a malformed row?',
@@ -177,7 +179,9 @@ test('requirement confirm: aborting writes nothing and produces no token', async
 });
 
 test('requirement confirm: a document with no open decisions points at the digest instead', async () => {
-  const f = project(['requirements:', '  - id: REQ-001', ''].join('\n'));
+  const f = project(
+    ['requirements:', '  - id: REQ-001', '    title: A thing', '    acceptance_criteria:', '      - "A third party can check it."', ''].join('\n'),
+  );
   try {
     const lines: string[] = [];
     const code = await runRequirementCommand(f.dir, ['confirm', f.ref], { out: (l) => lines.push(l) });
