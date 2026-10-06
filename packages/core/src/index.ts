@@ -75,14 +75,24 @@ export {
   checkIdOf,
   decisionCheckIds,
   parseDecisionBindings,
+  JUDGE_COLUMN_ROLES,
   JUDGE_DECISION_MODES,
+  JUDGE_FIELD_ROLES,
   JUDGE_RELATION_VOCABULARY,
   decisionModesFor,
   parseDeliverableBlock,
+  parseInputFormat,
+  parseOutputLines,
   parseRequirements,
   validateRequirementDocument,
 } from './requirement-decisions.js';
-export type { Decision, DecisionBinding, DeliverableBlock } from './requirement-decisions.js';
+export type {
+  Decision,
+  DecisionBinding,
+  DeliverableBlock,
+  InputFormat,
+  OutputLineFormat,
+} from './requirement-decisions.js';
 export { FEEDBACK_BRIEF_MARKER, analyseFeedback, failuresWithoutDecision, renderFeedbackBrief } from './feedback-brief.js';
 export type { AnalysedFailure, AnalysedFeedback, FailureKind } from './feedback-brief.js';
 export { carryStateRecordForward } from './board-state-record.js';

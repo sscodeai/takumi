@@ -40,10 +40,43 @@ export function decisionModesFor(relation: string): readonly string[] | undefine
   return JUDGE_DECISION_MODES[relation];
 }
 
+/**
+ * What the document calls the PARTS of its own input (ADR-033). A judge has to build fixtures in the
+ * document's world — the first real end-to-end run was judged with the judge's OWN employee/department
+ * fixtures while the requirement was about temperature stations, so every relation failed for the wrong
+ * reason and one of them passed because both sides were empty. The document is the only thing that knows
+ * what its columns mean, so it says so.
+ */
+export const JUDGE_COLUMN_ROLES = ['id', 'measure', 'date', 'other'] as const;
+
+/**
+ * What the document calls the parts of its own OUTPUT (ADR-033): the roles a judge may expect in a
+ * declared line shape, positionally. `<station> <count> <min> <max> <mean>` in the document's words is
+ * `id`, `count`, `min`, `max`, `mean` in the judge's, and the judge computes the expectation from the
+ * fixture rather than from prose.
+ */
+export const JUDGE_FIELD_ROLES = ['id', 'count', 'sum', 'min', 'max', 'mean', 'skipped-count'] as const;
+
+export interface InputFormat {
+  /** `date:date`, `station:id`, `temperature_c:measure` … the header, typed. */
+  columns: { name: string; role: string }[];
+  /** Two or more data lines, each with exactly one field per column: the world a judge starts from. */
+  sample: string[];
+}
+
+export interface OutputLineFormat {
+  shape: string;
+  /** One role per `<placeholder>` in the shape, in order. Empty when the document declares only words. */
+  fields: string[];
+}
+
 export interface DeliverableBlock {
   run?: string;
   /** The declared output shape a judge may parse, as written. */
   outputFormat?: unknown;
+  /** The typed input world, and the shapes a judge may parse, when the document declares them. */
+  input?: InputFormat;
+  outputLines: OutputLineFormat[];
   bindings: DecisionBinding[];
 }
 
@@ -153,8 +186,63 @@ export function decisionCheckIds(decisions: Decision[], bindings: DecisionBindin
   return ids;
 }
 
-/** The `deliverable` block as a whole: how the thing is run, and the checks bound to decisions. */
-export function parseDeliverableBlock(text: string): DeliverableBlock | undefined {
+/** `date:date,station:id,temperature_c:measure` → typed columns. A flat, shell-parsable list, because the
+ *  forge reads the document line-wise and a nested list it cannot parse would just move the guesswork. */
+function parseColumns(raw: unknown): { name: string; role: string }[] {
+  if (typeof raw !== 'string') return [];
+  return raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .map((part) => {
+      const at = part.lastIndexOf(':');
+      return at <= 0 ? { name: part, role: '' } : { name: part.slice(0, at).trim(), role: part.slice(at + 1).trim() };
+    });
+}
+
+/** The input world the document declares (ADR-033), or undefined when it declares none. */
+export function parseInputFormat(text: string): InputFormat | undefined {
+  const block = deliverableOf(text);
+  const raw = block?.['input_format'];
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const entry = raw as Record<string, unknown>;
+  const columns = parseColumns(entry['columns']);
+  const sampleRaw = entry['sample'];
+  const sample =
+    typeof sampleRaw === 'string'
+      ? sampleRaw
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0)
+      : [];
+  if (columns.length === 0 && sample.length === 0) return undefined;
+  return { columns, sample };
+}
+
+/** The declared output lines, with the roles of their placeholders when the document names them. */
+export function parseOutputLines(text: string): OutputLineFormat[] {
+  const raw = deliverableOf(text)?.['output_format'];
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  const lines: OutputLineFormat[] = [];
+  for (const value of Object.values(raw as Record<string, unknown>)) {
+    if (typeof value === 'string') {
+      lines.push({ shape: value, fields: [] });
+      continue;
+    }
+    if (value === null || typeof value !== 'object') continue;
+    const entry = value as { shape?: unknown; fields?: unknown };
+    const shape = stringOf(entry.shape);
+    if (shape === undefined) continue;
+    lines.push({
+      shape,
+      fields: Array.isArray(entry.fields) ? entry.fields.filter((field): field is string => typeof field === 'string') : [],
+    });
+  }
+  return lines;
+}
+
+/** The `deliverable` mapping as written, for the parsers above. */
+function deliverableOf(text: string): Record<string, unknown> | undefined {
   let parsed: unknown;
   try {
     parsed = parseYaml(text);
@@ -164,11 +252,20 @@ export function parseDeliverableBlock(text: string): DeliverableBlock | undefine
   if (parsed === null || typeof parsed !== 'object') return undefined;
   const deliverable = (parsed as { deliverable?: unknown }).deliverable;
   if (deliverable === null || typeof deliverable !== 'object') return undefined;
-  const block = deliverable as Record<string, unknown>;
+  return deliverable as Record<string, unknown>;
+}
+
+/** The `deliverable` block as a whole: how the thing is run, the world it runs on, and what is checked. */
+export function parseDeliverableBlock(text: string): DeliverableBlock | undefined {
+  const block = deliverableOf(text);
+  if (block === undefined) return undefined;
   const run = stringOf(block['run']);
+  const input = parseInputFormat(text);
   return {
     ...(run === undefined ? {} : { run }),
     ...(block['output_format'] === undefined ? {} : { outputFormat: block['output_format'] }),
+    ...(input === undefined ? {} : { input }),
+    outputLines: parseOutputLines(text),
     bindings: parseDecisionBindings(text),
   };
 }
@@ -246,6 +343,104 @@ export function validateRequirementDocument(text: string): string[] {
     for (const decision of decisions) {
       if (!decision.blocking || exercised.has(decision.id)) continue;
       issues.push(`${decision.id} is blocking and no declared check exercises it (add decides: ${decision.id} to the check that settles it): a blocking decision nothing checks does not bind the implementation`);
+    }
+
+    // ADR-033: a judge builds its fixtures AND its expectations in the document's world, so the document
+    // has to name that world. Three real failures came from not naming it — a temperature requirement
+    // judged with the judge's employee fixtures (every relation failed for the wrong reason), one relation
+    // passing because both sides were empty, and the fixture rows living inside the forge, where no
+    // document could reach them.
+    const input = block.input;
+    if (input === undefined) {
+      issues.push(
+        'the deliverable block declares no input_format: a judge with no declared world builds its own fixtures and judges a scenario nobody asked for (add `input_format` with typed `columns` and a `sample` of at least three rows)',
+      );
+    } else {
+      for (const column of input.columns) {
+        if (!(JUDGE_COLUMN_ROLES as readonly string[]).includes(column.role)) {
+          issues.push(
+            `input_format column "${column.name}" declares the role "${column.role}", which a judge cannot use (implemented: ${JUDGE_COLUMN_ROLES.join(', ')})`,
+          );
+        }
+      }
+      const ids = input.columns.filter((column) => column.role === 'id');
+      const measures = input.columns.filter((column) => column.role === 'measure');
+      if (ids.length !== 1) {
+        issues.push(`input_format declares ${ids.length} column(s) with role id where exactly one is needed: the judge groups rows by the id column`);
+      }
+      if (measures.length !== 1) {
+        issues.push(
+          `input_format declares ${measures.length} column(s) with role measure where exactly one is needed: the judge computes every expectation from it`,
+        );
+      }
+      if (input.columns.filter((column) => column.role === 'date').length > 1) {
+        issues.push('input_format declares more than one column with role date: the judge would not know which one orders the rows');
+      }
+      if (input.sample.length < 3) {
+        issues.push(
+          `input_format.sample has ${input.sample.length} row(s): a judge needs at least three to build a base, a reshuffled and a duplicated fixture`,
+        );
+      }
+      const widthsOk = input.sample.every((line) => line.split(',').length === input.columns.length);
+      if (!widthsOk) {
+        issues.push(
+          `input_format.sample does not have one field per declared column (${input.columns.length} declared): a fixture the document itself cannot read is not a fixture`,
+        );
+      }
+      if (widthsOk && ids.length === 1) {
+        const idIndex = input.columns.findIndex((column) => column.role === 'id');
+        const distinct = new Set(input.sample.map((line) => line.split(',')[idIndex] ?? ''));
+        if (input.sample.length > 0 && distinct.size < 2) {
+          issues.push(
+            `input_format.sample names ${distinct.size} distinct id(s): with one id there is nothing for additivity or an independent recomputation to separate`,
+          );
+        }
+      }
+      if (widthsOk && measures.length === 1) {
+        const measureIndex = input.columns.findIndex((column) => column.role === 'measure');
+        for (const line of input.sample) {
+          const value = line.split(',')[measureIndex] ?? '';
+          if (!Number.isFinite(Number(value))) {
+            issues.push(
+              `input_format.sample has "${value}" in the measure column: the judge computes its expectations from those values, and one it cannot add is one it cannot check`,
+            );
+            break;
+          }
+        }
+      }
+    }
+    // A mode that picks a row by its DATE needs a date column to order by. The coupling is machine
+    // checkable here, and refusing it before a human confirms beats a forge that cannot build the fixture.
+    const dateColumns = input?.columns.filter((column) => column.role === 'date').length ?? 0;
+    for (const decision of decisions) {
+      if (decision.checkedAs === 'latest-start-date' && dateColumns !== 1) {
+        issues.push(
+          `${decision.id} says checkedAs: "latest-start-date", which picks the row with the latest date, but input_format declares ${dateColumns} column(s) with role date: the judge has nothing to order by`,
+        );
+      }
+    }
+
+    const namedLines = block.outputLines.filter((line) => line.fields.length > 0);
+    if (block.outputLines.length > 0 && namedLines.length === 0) {
+      issues.push(
+        'no output_format entry names its fields: a judge can compare two runs but cannot say which number is the count (declare `fields: [id, count, …]` beside each machine-readable shape)',
+      );
+    }
+    for (const line of block.outputLines) {
+      if (line.fields.length === 0) continue;
+      const placeholders = (line.shape.match(/<[^<>]+>/g) ?? []).length;
+      if (line.fields.length !== placeholders) {
+        issues.push(
+          `an output_format entry declares ${line.fields.length} field(s) for ${placeholders} placeholder(s) in "${line.shape}": the roles are positional, so they must line up`,
+        );
+      }
+      for (const field of line.fields) {
+        if (!(JUDGE_FIELD_ROLES as readonly string[]).includes(field)) {
+          issues.push(
+            `an output_format entry declares the field role "${field}", which a judge cannot compute (implemented: ${JUDGE_FIELD_ROLES.join(', ')})`,
+          );
+        }
+      }
     }
   }
 

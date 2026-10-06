@@ -129,10 +129,26 @@ ambiguities:
 # `differential` is an independently computed anchor to compare against.
 deliverable:
   run: "node csv-summary.mjs {csv}"
+  # The world a judge builds its fixtures in (ADR-033): the columns and what they mean, plus a sample
+  # the judge reshuffles, duplicates and mangles. Before this the fixture rows lived inside the forge,
+  # where no document could reach them.
+  input_format:
+    columns: "employee_id:id,start_date:date,annual_salary:measure"
+    sample: |
+      1001,2021-04-01,100.5
+      1002,2020-02-02,80.0
+      1003,2020-01-10,90.5
+      1001,2019-01-02,70.0
   output_format:
-    department_line: "<department> <count> <total> <average>"
-    skipped_line: "SKIPPED <count>"
-    overall_line: "TOTAL <count> <total>"
+    department_line:
+      shape: "<department> <count> <total> <average>"
+      fields: [id, count, sum, mean]
+    skipped_line:
+      shape: "SKIPPED <count>"
+      fields: [skipped-count]
+    overall_line:
+      shape: "TOTAL <count> <total>"
+      fields: [count, sum]
   relations:
     - id: REL-001
       relation: row-order-invariance
