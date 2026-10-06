@@ -337,6 +337,10 @@ export async function runTask(opts: RunOptions): Promise<{
         runtime,
         artifacts: store,
         skillsRoot: join(opts.cwd, opts.config.registry.skills),
+        // A `repair` step's sub-workflow is loaded by name out of the project's workflow registry, the
+        // same way the outer workflow was (ADR-034). The loader is injected rather than imported so the
+        // engine keeps no opinion about where a project keeps its workflows.
+        loadWorkflow: (ref: string) => loadWorkflow(opts.cwd, opts.config, ref),
         resume: resumeCtx,
         ...(opts.confirmedRequirement === undefined ? {} : { confirmedRequirement: opts.confirmedRequirement }),
         ...(opts.worktree === undefined ? {} : { worktree: opts.worktree }),

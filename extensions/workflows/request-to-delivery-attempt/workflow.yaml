@@ -1,0 +1,84 @@
+name: request-to-delivery-attempt
+version: 0.1.0
+description: >
+  ONE delivery attempt: a CONFIRMED requirement document becomes a runnable, judged delivery. The
+  implementer chooses language/architecture/stack and no human reads the design or the code; the project's
+  own tests are a smoke gate, the judge is FORGED from the document's deliverable contract (ADR-026/028),
+  and only a passing acceptance produces evidence. Run by a `repair` step, once per attempt: the second
+  attempt is told exactly which checks the first one failed (ADR-034).
+runtime: pi
+steps:
+  - id: implementation
+    type: agent
+    prompt: |
+      You are the implementer. The confirmed requirement document is at {requirement} — read it, and
+      follow it exactly, including the `deliverable` block: it declares how the thing must be invoked,
+      the input world it is about, the exact output line shapes (and what each field of them means), and
+      which decisions it settles. You choose the language, architecture and stack; no human will read
+      your design or your code.
+
+      This is delivery attempt {repairRound}. If the text between the markers below is empty, this is the
+      FIRST attempt at this delivery and there is nothing to repair. If it is not empty, a previous
+      attempt was REFUSED by an independent judge, and these are the exact checks that failed:
+
+      --- what the judge refused ----------------------------------------------------------------
+      {repairFailures}
+      ------------------------------------------------------------------------------------------
+
+      Repair the implementation so those checks hold. Judge the FAILURE, not the judge's wording: make
+      the behaviour the requirement asks for hold on the whole input world, do not special-case the case
+      the message happens to mention, and NEVER weaken, skip or delete a test to make a check pass — the
+      deterministic rules review runs again in this same round and will refuse the delivery for it.
+
+      Implement the request end to end in this project directory. Write the real source files, not a
+      plan. Satisfy the entry point the requirement names, and honour the option chosen for every AMB-nnn
+      entry. When done, summarise the files you created or changed, the stack you chose and why, and how
+      each acceptance criterion is met.
+  - id: unit_and_integration_tests
+    type: agent
+    prompt: |
+      Write and run unit and integration tests for the implementation from the previous step. Cover every
+      acceptance criterion in the confirmed requirement document at {requirement}, including the
+      behaviour chosen for each AMB-nnn entry. Report the exact test command and its result.
+
+      The run's smoke gate has to be able to RUN your tests, so leave a discoverable entry point: a
+      package.json script, or `run-tests.sh` at the project root that runs the suite and exits non-zero on
+      failure. A suite nothing can invoke is a suite that does not count.
+    dependsOn: [implementation]
+  - id: quality_gate
+    type: quality_gate
+    # The project's own test command, run in the implementation. It is a SMOKE gate, not the evidence: a
+    # green suite only says the implementer's own tests pass, and the implementer's tests share the
+    # implementer's blind spot — which is what the forged judge exists for. It fails closed when the
+    # project has no test command at all.
+    prompt: |
+      if [ -f package.json ]; then pnpm test 2>&1 | tail -60;
+      elif [ -f run-tests.sh ]; then bash run-tests.sh 2>&1 | tail -60;
+      elif ls *.test.mjs >/dev/null 2>&1; then node --test *.test.mjs 2>&1 | tail -60;
+      else echo "no test command found in this project" >&2; exit 1; fi
+    dependsOn: [unit_and_integration_tests]
+    timeoutMs: 600000
+  - id: rule_review
+    type: rule_review
+    # `root` = the root commit of the repository under review, so the review covers EVERYTHING the
+    # delivery added. A distance (`HEAD~1`) would silently review only the commit on top of whatever
+    # the implementer happened to leave last.
+    baseRef: root
+    prompt: |
+      Deterministic rule review of the delivered change set. Fail closed on a block finding, on a human
+      decision, or on a change set that cannot be reviewed.
+    dependsOn: [quality_gate]
+  - id: judge_forge
+    # The document is `{requirement}`: whatever a human confirmed for this run, not a path frozen into
+    # this file. The judge is produced HERE, outside the implementation worktree and without reading it.
+    type: judge_forge
+    requirementRef: "{requirement}"
+    forgeRef: extensions/judges/metamorphic-forge.sh
+    dependsOn: [rule_review]
+    timeoutMs: 120000
+  - id: artifact_acceptance
+    type: acceptance
+    requirementRef: "{requirement}"
+    acceptanceRef: "{judgePath}"
+    dependsOn: [judge_forge]
+    timeoutMs: 120000

@@ -33,6 +33,22 @@ const execAsync = promisify(exec);
 /** Runs a harness FILE without a shell, so a path in a manifest is never a shell string. */
 const execFileAsync = promisify(execFile);
 
+/**
+ * What the next delivery attempt is told (ADR-034). The judge's own `not ok` lines, verbatim, plus the
+ * decisions they touch — and NOTHING else: the fixtures, the expectations and the judge's source stay
+ * outside the implementer's context, because an implementer that could read them could fit them (ADR-026).
+ */
+export function failureLinesOf(acceptanceSummary: string): string {
+  const failing = acceptanceSummary
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => /^not ok\b/.test(line) || /^# decisions declared here/.test(line));
+  if (failing.length === 0) {
+    return 'the acceptance failed without naming a failing check the engine could read: treat the run log as the brief, and note that a judge which reported nothing has told you nothing';
+  }
+  return failing.slice(0, 40).join('\n');
+}
+
 export interface WorkflowExecutionContext {
   /** Project working directory (steps run here). */
   cwd: string;
@@ -79,6 +95,18 @@ export interface WorkflowExecutionContext {
    * behavior, not just artifact folder naming (acceptance Gate 8).
    */
   skillsRoot?: string;
+  /**
+   * Loads a workflow by ref, for a `repair` step's sub-workflow (ADR-034). Injected rather than imported:
+   * the engine has no opinion about where a project keeps its workflows, and a test can hand it a
+   * definition. Absent means a `repair` step fails closed, saying so.
+   */
+  loadWorkflow?: (ref: string) => Promise<WorkflowDefinition>;
+  /**
+   * Set by the repair loop on every round that is NOT the last: the failure being handled is going to be
+   * retried, so the requirement document must not be edited per attempt (ADR-034). Exactly one `FB-nnn`
+   * comes out of a run, whatever it spends its rounds on.
+   */
+  withholdAcceptanceFeedback?: boolean;
   /**
    * Durable resume (P2): previously-completed steps to skip.
    * `completed` maps stepId → its recorded result; any step in `completed`
@@ -626,6 +654,121 @@ export async function executeWorkflow(
           stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `quality gate FAILED (${fails} failing) — workflow aborted`);
         }
+        done.add(stepId);
+        continue;
+      }
+
+      // Repair step (ADR-034): the delivery attempt, and the rounds that follow a refusal. The
+      // sub-workflow is the chain that produces evidence (implementation → tests → gate → review → forge
+      // → acceptance). This step runs it, and on a refusal hands the FAILING CHECKS to the next attempt
+      // as `{repairFailures}` — the implementer sees what failed, never the judge's fixtures, its
+      // expectations or its source. Every round re-runs the whole chain: a repair is a delivery like any
+      // other, so an agent that "fixes" a failing relation by weakening the test that covers it is caught
+      // by rule_review in the same round, not after the fact. Only the LAST round writes the failure back
+      // into the requirement document (ctx.withholdAcceptanceFeedback), so a run that repairs itself
+      // leaves the human's document untouched.
+      if (step.type === 'repair') {
+        run.stepStatus[stepId] = 'running';
+        const repairRef = (step.repairRef ?? '').trim();
+        const maxRounds = step.maxRounds ?? 1;
+        const failStep = (summary: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `repair FAILED: ${summary.split('\n')[0]}`);
+        };
+        if (ctx.loadWorkflow === undefined) {
+          failStep(
+            `a repair step needs a workflow loader to read "${repairRef}" and this run has none (ctx.loadWorkflow): the sub-workflow could not be read, so no delivery attempt was made`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        let sub: WorkflowDefinition;
+        try {
+          sub = await ctx.loadWorkflow(repairRef);
+        } catch (e) {
+          failStep(
+            `the repair sub-workflow "${repairRef}" could not be loaded (${e instanceof Error ? e.message : String(e)}): a repair loop with nothing to run is not a repair`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        if (!sub.steps.some((s) => s.type === 'acceptance')) {
+          failStep(
+            `the repair sub-workflow "${repairRef}" declares no acceptance step: a repair loop with nothing to judge it cannot know when to stop`,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        const roundSummaries: string[] = [];
+        const subArtifacts: string[] = [];
+        const subTests: WorkflowStepResult['tests'] = [];
+        let failures = '';
+        let accepted = false;
+        let spent = 0;
+        let abort: string | undefined;
+        for (let attempt = 1; attempt <= maxRounds; attempt += 1) {
+          spent = attempt;
+          const lastRound = attempt === maxRounds;
+          const label = attempt === 1 ? `attempt 1 of ${maxRounds}` : `repair round ${attempt} of ${maxRounds}`;
+          vars['repairRound'] = `${attempt} of ${maxRounds}`;
+          vars['repairFailures'] = failures;
+          ctx.onEvent?.(
+            stepId,
+            attempt === 1
+              ? `delivery ${label}`
+              : `${label}: the previous attempt was refused, so this one is told exactly which checks failed${lastRound ? ' — this is the last round, and its failure is the one that comes back to the document' : ''}`,
+          );
+          let res: WorkflowRunResult;
+          try {
+            res = await executeWorkflow(sub, { ...ctx, withholdAcceptanceFeedback: !lastRound }, vars);
+          } catch (e) {
+            abort = `delivery ${label} could not be run (${e instanceof Error ? e.message : String(e)})`;
+            break;
+          }
+          const acceptance = res.steps.find((s) => sub.steps.find((d) => d.id === s.stepId)?.type === 'acceptance');
+          for (const s of res.steps) {
+            subArtifacts.push(...s.artifacts);
+            subTests.push(...s.tests);
+          }
+          const passed = res.status === 'completed' && acceptance?.status === 'completed';
+          roundSummaries.push(
+            `--- ${label}: ${passed ? 'accepted' : 'refused'} ---\n${acceptance?.summary ?? '(the acceptance step did not run)'}`,
+          );
+          if (passed) {
+            accepted = true;
+            break;
+          }
+          failures = failureLinesOf(acceptance?.summary ?? '');
+        }
+
+        const summary = [
+          accepted
+            ? `delivery accepted on ${spent === 1 ? 'the first attempt' : `attempt ${spent} of ${maxRounds}`}`
+            : abort !== undefined
+              ? `delivery reached no verdict: ${abort}`
+              : `delivery refused after ${spent} of ${maxRounds} attempt(s): the last failure was written back to the requirement document`,
+          ...roundSummaries,
+        ].join('\n');
+        run.stepStatus[stepId] = accepted ? 'completed' : 'failed';
+        if (!accepted) run.status = 'failed';
+        if (!accepted) failedIds.add(stepId);
+        stepResults.push({
+          stepId,
+          status: accepted ? 'completed' : 'failed',
+          summary,
+          artifacts: subArtifacts,
+          tests: subTests,
+        });
+        ctx.onEvent?.(
+          stepId,
+          accepted
+            ? `delivery accepted after ${spent} attempt(s)`
+            : `delivery refused after ${spent} attempt(s) — the delivery step is skipped`,
+        );
         done.add(stepId);
         continue;
       }
@@ -1220,20 +1363,31 @@ export async function executeWorkflow(
             };
             let appended: { id: string; duplicate: boolean } | undefined;
             let appendError: string | undefined;
-            try {
-              const res = appendFeedback(requirementText, feedbackInput);
-              if (res.duplicate) {
-                appended = { id: res.id, duplicate: true };
-              } else {
-                parseYamlText(res.text);
-                fsMod.writeFileSync(path.join(ctx.cwd, requirementRef), res.text, 'utf8');
-                digestAfter = requirementDigest(res.text);
-                appended = { id: res.id, duplicate: false };
+            // A round that is going to be RETRIED must not edit the human's document (ADR-034): a run
+            // writes exactly one failure back, and only the attempt that is not followed by another
+            // writes it. Intermediate rounds therefore leave the document — and its digest — untouched.
+            const withholdFeedback = ctx.withholdAcceptanceFeedback === true;
+            if (withholdFeedback) {
+              feedbackLine = 'feedback: withheld — this failure is being repaired, so only the last round writes it back (ADR-034)';
+            } else {
+              try {
+                const res = appendFeedback(requirementText, feedbackInput);
+                if (res.duplicate) {
+                  appended = { id: res.id, duplicate: true };
+                } else {
+                  parseYamlText(res.text);
+                  fsMod.writeFileSync(path.join(ctx.cwd, requirementRef), res.text, 'utf8');
+                  digestAfter = requirementDigest(res.text);
+                  appended = { id: res.id, duplicate: false };
+                }
+              } catch (e) {
+                appendError = e instanceof Error ? e.message : String(e);
               }
-            } catch (e) {
-              appendError = e instanceof Error ? e.message : String(e);
             }
-            if (appended === undefined) {
+            if (withholdFeedback) {
+              // `feedbackLine` already says the write-back is withheld. Nothing was attempted, so the
+              // "could not be recorded" branch below must not claim a failure that never happened.
+            } else if (appended === undefined) {
               feedbackLine = `feedback: COULD NOT be recorded in ${requirementRef} (${appendError ?? 'unknown error'}) — the rejection is recorded but the loop is not closed`;
             } else if (appended.duplicate) {
               feedbackLine = `feedback: ${appended.id} already records this run at ${shortDigest(digest)}`;
@@ -1275,7 +1429,7 @@ export async function executeWorkflow(
               ...(checks.length === 0 ? ['  checks: []'] : ['  checks:', ...checks.map((c) => `    - "${c.result}: ${c.check.replace(/"/g, "'")}"`)]),
               'rejected:',
               `  failing: [${failing.map((c) => `"${c.check.replace(/"/g, "'")}"`).join(', ')}]`,
-              `  feedback: ${appended === undefined ? 'none' : appended.id}`,
+              `  feedback: ${appended === undefined ? (withholdFeedback ? 'withheld (this failure is being repaired)' : 'none') : appended.id}`,
               `  feedbackOpen: [${open.map((e) => e.id).join(', ')}]`,
               `  documentChanged: ${digestAfter === digest ? 'false' : 'true'}`,
               'confirmed:',

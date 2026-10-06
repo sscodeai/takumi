@@ -23,6 +23,7 @@ export const WORKFLOW_STEP_TYPES = [
   'rule_review',
   'judge_forge',
   'acceptance',
+  'repair',
   'delivery',
 ] as const;
 
@@ -93,6 +94,16 @@ export interface WorkflowStep {
    * forged a judge, the acceptance MUST use that judge, and the engine refuses any other harness.
    */
   acceptanceRef?: string;
+  /**
+   * `repair`: the sub-workflow this step runs for each delivery attempt (ADR-034), loaded through the
+   * run's workflow loader. Required: a repair loop with nothing to run is not a repair.
+   */
+  repairRef?: string;
+  /**
+   * `repair`: how many delivery attempts the step may spend, 1..5. Required: a repair budget is a number
+   * a human chose, and an unbounded one is an unattended agent spending money until it feels done.
+   */
+  maxRounds?: number;
 }
 
 export interface WorkflowManifestIssue {
@@ -159,6 +170,23 @@ export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManif
         stepId,
         message: `step ${stepId} is a ${String(step?.type)} step whose prompt references {judge…}: the judge is for the acceptance step only, and a step that can see it can fit it`,
       });
+    }
+    if (step?.type === 'repair') {
+      // A repair with nothing to run, or with an unbounded budget, is refused at load: both are
+      // numbers/nodes a human chose, and neither can be repaired at run time.
+      if (typeof step.repairRef !== 'string' || step.repairRef.trim().length === 0) {
+        issues.push({
+          stepId,
+          message: `step ${stepId} is a repair and requires a non-empty repairRef (the sub-workflow it runs for each delivery attempt)`,
+        });
+      }
+      const rounds = step.maxRounds;
+      if (typeof rounds !== 'number' || !Number.isInteger(rounds) || rounds < 1 || rounds > 5) {
+        issues.push({
+          stepId,
+          message: `step ${stepId} is a repair whose maxRounds is ${String(rounds)}: it must be an integer from 1 to 5 (a repair budget is a number a human chose, and an unbounded one is an unattended agent spending money until it feels done)`,
+        });
+      }
     }
     if (step?.type === 'acceptance') {
       // An acceptance is a verdict about ONE requirement document, judged by a harness that lives
