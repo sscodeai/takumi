@@ -180,7 +180,7 @@ anticipate this.
 
 ### Note — a pre-existing Japanese string
 
-`delivery/delivery-manifest.md` renders `# 納品物一覧 (Delivery Manifest)`. That
+`delivery/delivery-manifest.md` renders `# <CJK elided> (Delivery Manifest)`. That
 string is pre-existing core output, untouched by this slice; it is recorded here only
 because the repository's language policy is English for new work.
 
@@ -770,6 +770,259 @@ that the human's choice was right (the next acceptance does); the intake's compl
 contract is a prompt and a shape, not a proof — its output is checked as a document, and its JUDGEMENT is
 the human's confirmation; and the brief contains no generated content, deliberately, because deciding
 what an undecided point should offer needs the semantics of the request.
+
+## 14. The loop, end to end on a real runtime: four runs, the last one green
+
+Sections 7 to 13 were run mostly with the `fake` runtime, with the deliverable hand-placed, and with a
+demonstration document. This section is the real thing: the `pi` runtime, a request whose requirement
+document was produced by a real intake and confirmed by a human, an implementer that chose its own
+language and stack, and the forged judge generated from that document. It took four runs. Each one
+stopped at a different layer, and each stop is a bug ledger row.
+
+The commits this section is about, from `git log --oneline` and `git show --stat <sha>`:
+
+| commit | subject | what it is |
+|---|---|---|
+| `58d8352` | feat(core): the document declares what its answers MEAN to a judge | ADR-031, `JUDGE_DECISION_MODES` + validator |
+| `20f9e27` | feat(extensions): the judge tests the declared meaning, and the intake must declare it | the forge's mode tables |
+| `69138a4` | feat(core): a step may point at the document the run was confirmed against | `{requirement}` binding |
+| `f4d668f` | fix(core): a prompt that names {requirement} is handed the confirmed document | ledger #34 |
+| `31c019d` | fix(core): the change set is the worktree's, not the project's | ledger #35 |
+| `4a77f3e` | test(core): a run naming {requirement} without a confirmation is refused up front | the refusal test |
+| `58fa7a7` | fix(core): a manifest the delivery creates is not a change to configuration | ledger #36 |
+| `9146275` | feat(core): a requirement document declares the world its judge builds fixtures in | ADR-033 validator |
+| `0e10d0b` | feat(judges): the forged judge builds its fixtures in the world the document declares | ledger #37 |
+| `9d0193c` | feat(core): a refused delivery is repaired before it is returned (ADR-034) | repair rounds |
+| `5925419` | fix(core): the delivery bundle contains the run's own artifacts | ledger #38 |
+| `07745e8` | chore(requirements): re-confirm the station document, and the record of what the failure was | the re-confirmation |
+
+The confirmed digest in force now, read off the real command:
+
+```
+$ node apps/cli/dist/index.js requirement digest docs/requirements/intake.yaml
+docs/requirements/intake.yaml
+sha256:289d489fe3897148ee72a3d501c7c74e8d12546af8675371b7c4565fd37a97e2
+```
+
+The run i5-i7 ran under `sha256:021f16e4ac663db4658c54f583a155f0d5f772342cc4dc39c60a20f8e03cb93a`
+(recorded in `REJECT-001` as `requirement.digest`), and after the write-back the document hashed to
+`dc6bc78aa609` (`REJECT-001`'s `requirement.digestAfterFeedback:
+sha256:dc6bc78aa609006d72d81bc114c847527bdd6e83ae1f7ed4d0a6f31dbe7e7081`).
+
+### 14.1 i5 — the run delivered the WRONG document (ledger #34)
+
+The implementer's own report states which document it followed: `Requirement:
+/srv/hermes/workspaces/takumi/docs/requirements/poc-blackbox-acceptance.yaml` and a
+`csv-summary.mjs` for employee/department salaries, while the run was confirmed against a
+station-temperature `intake.yaml`. Then the review step failed on a change set that was right there:
+
+```
+  workflow[rule_review]: rule review FAILED: rule_review precondition failed: the change set
+    f667a3a86b25..98fdbbde3d5f could not be reviewed: the reviewer could not read the change set:
+    git diff exited 128: fatal: bad object f667a3a86b252ed6dfee0a21ad00dd4e3bc84094
+```
+
+(`/tmp/i5-delivery.log`, lines 15 and 146.) Two defects in one run: the prompt kept the literal
+`{requirement}` because the engine only substituted it for steps carrying a `requirementRef` and not
+for steps carrying a `prompt`, so the agent went looking for a requirement and found a plausible one
+(ledger #34, `f4d668f`); and `rule_review` resolved its refs in the PROJECT repository while
+collecting the change set from the DELIVERY worktree, two repositories with no shared objects
+(ledger #35, `31c019d`).
+
+### 14.2 i6 — the right document, stopped by the protected-path rule (ledger #36)
+
+This run got the requirement right and stopped before its judge:
+
+```
+  step implementation: completed — Implemented and committed in
+    `/srv/hermes/workspaces/takumi/.takumi/worktree-station2`.
+  step quality_gate: completed — quality_gate PASSED: 0 failing over 67 tests, exit 0
+  step rule_review: failed — rule_review FAILED: a human must decide this — a machine may not decide
+    it, and the automation must not continue
+protected-path (package.json): this path is protected (CI configuration, dependency manifest,
+  container build or takumi's own configuration): a machine must not wave it through, and an agent
+  must not "fix" a legitimate change by reverting it — a human decides — this delivery waits for a
+  person
+  step judge_forge: skipped — skipped (dependency failed: rule_review)
+```
+
+(`/tmp/i6-delivery.log`, lines 15, 104, 153-158.) 67 tests green, and the delivery halted on a
+`package.json` it had written itself. ADR-032 is this fix (`58fa7a7`).
+
+### 14.3 i7 — reached the acceptance, and the judge judged its own world (ledger #37)
+
+The first run to reach the judge. The forge and the acceptance ran, `rule_review` passed with the
+created-manifest note, and then:
+
+```
+  workflow[rule_review]: rule review passed (1 note(s))
+  workflow[judge_forge]: judge forged: /srv/hermes/.../judge.sh sha256:9e7b78aff827
+  workflow[artifact_acceptance]: acceptance FAILED: acceptance FAILED: the harness reported a
+    failing verdict
+...
+  verdict: fail
+  checks: 2/10 ok
+  ok 1 - REL-001 row-order-invariance: reshuffling the rows changes nothing
+  not ok 2 - REL-002 additivity: department totals sum to 0 but the report says  — sum=0 reported=
+  not ok 3 - REL-003 duplicate-resolution: the chosen option "merge" does not hold (headcount 0 want
+    5, late-date total  want 628, early-date total  want 628) — headcount=0/5 totals=/628,/628
+...
+rejection: REJECT-001 written (acceptance/REJECT-001.md)
+feedback: FB-001 written into docs/requirements/intake.yaml (open) — the document now hashes to
+  dc6bc78aa609, so its confirmation no longer matches it and the next run needs a re-confirmation
+```
+
+(`/tmp/i7-delivery.log`, lines 15-17, 168-189, 210.) The deliverable was a correct station tool
+("67 of its own tests green"), and the judge's fixtures were employee rows -- ADR-033 is this fix
+(`9146275`, `0e10d0b`). One relation passed on two EMPTY outputs, which is the vacuous green the
+same work removed.
+
+### 14.4 i8 — GREEN: acceptance 10/10, the bundle, exit 0
+
+After the repair rounds landed (ADR-034, `9d0193c`), the same workflow on the same request:
+
+```
+  workflow[delivery_attempt]: delivery attempt 1 of 2
+  workflow[quality_gate]: quality gate PASSED (0 failing)
+  workflow[rule_review]: rule review passed (1 note(s))
+  workflow[judge_forge]: judge forged: /srv/hermes/.../judge.sh sha256:d05b0affc8d9
+  workflow[artifact_acceptance]: acceptance PASSED (10 check(s) ok) — ACCEPT-001 written
+  workflow[delivery]: delivery manifest written (7 artifacts)
+  step delivery_attempt: completed — delivery accepted on the first attempt
+---
+requirement: docs/requirements/intake.yaml sha256:289d489fe389
+confirmed: docs/requirements/intake.yaml sha256:289d489fe389
+verdict: pass
+checks: 10/10 ok
+exit: 0
+ok 1 - REL-001 row-order-invariance: reshuffling the rows changes nothing
+ok 2 - REL-002 additivity: the parts sum to the whole the tool printed (count)
+ok 3 - REL-003 duplicate-resolution: the chosen option "merge" holds on both duplicate fixtures
+ok 4 - REL-004 malformed-row-accounting: 3 malformed rows are out of the aggregates, 5 valid rows
+  still report a summary (skip-count)
+ok 5 - DIFF-001 independent-aggregation: an independent recomputation (rounding: half-up) matches
+  the report
+ok 6 - DOC-001 every open decision has a chosen option (5/5)
+ok 7 - DEC-001 AMB-001 honoured: "skip-count: ..." (checked by REL-004)
+ok 8 - DEC-002 AMB-002 honoured: "merge: ..." (checked by REL-003)
+ok 9 - DEC-003 AMB-003 honoured: "half-up: round half away from zero" (checked by DIFF-001)
+ok 10 - DEC-004 AMB-005 honoured: "valid readings only: ..." (checked by REL-002)
+  step delivery: completed — delivery bundle ready (7 artifacts)
+✓ workflow "request-to-delivery" completed
+RUN_EXIT=0
+```
+
+(`/tmp/i8-delivery.log`, lines 7-20, 28-45, 66.) All four DEC lines are present and ok. `ACCEPT-001`
+was written with this run's requirement digest (`sha256:289d489fe3897148ee72a3d501c7c74e8d12546af8675371b7c4565fd37a97e2`)
+and judge digest (`sha256:d05b0affc8d95c6c7107f537a74bc683db66ef183393c4df71b6f95dc8a00f22`); the run
+exited 0 in a single attempt, so the repair path did not fire here.
+
+### 14.5 Independent verification of the delivered tool (not the harness)
+
+The judge is not the only check. The delivered `summary.sh` was extracted and fed a CSV written by
+hand, with no involvement of the takumi harness:
+
+```
+$ cat /tmp/my-stations.csv
+date,station,temperature_c
+2024-03-01,ALPHA,10.0
+2024-03-01,BRAVO,-2.2
+2024-03-02,ALPHA,11.5
+2024-03-02,BRAVO,-1.8
+2024-03-03,ALPHA,bad
+2024-03-03,BRAVO,0.5
+2024-03-04,ALPHA,9.5
+
+$ bash .takumi/worktree-station4/summary.sh /tmp/my-stations.csv
+ALPHA 3 9.5 11.5 10.3
+BRAVO 3 -2.2 0.5 -1.2
+SKIPPED 1
+TOTAL 6
+exit=0
+```
+
+Checked against a hand computation: ALPHA valid readings 10.0, 11.5, 9.5 -> count 3, min 9.5, max
+11.5, mean 10.333... -> half-up 10.3. BRAVO valid readings -2.2, -1.8, 0.5 -> count 3, min -2.2, max
+0.5, mean -1.1666... -> -1.2. The `bad` row is skipped and counted on `SKIPPED 1`; `TOTAL 6` is the
+sum of the per-station counts. Both lines, the skip count and the total agree with the hand result.
+
+### 14.6 The suite, as it stands
+
+```
+$ pnpm -r --workspace-concurrency=1 test    # log: /tmp/tk-suite-green.log
+$ grep -h '^# tests ' /tmp/tk-suite-green.log | awk '{s+=$3} END {print "blocks="NR" total="s}'
+blocks=19 total=716
+$ grep -h '^# fail ' /tmp/tk-suite-green.log | awk '{s+=$3} END {print "total_fail="s}'
+total_fail=0
+```
+
+716 tests over 19 workspace packages, 0 failures, and every `typecheck:` line in the log ends
+`Done` (the log's last lines are `apps/console typecheck: Done` / `apps/cli typecheck: Done`); a grep
+for `ERR_PNPM`, `ELIFECYCLE`, `error TS` or `typecheck: Failed` matches nothing. `repair-rounds.test.ts`
+holds 4 tests and `judge-vocabulary.test.ts` 3 (counted from their `test(` lines).
+
+### 14.7 The state of the tree, and what is NOT proven
+
+```
+$ git status -sb
+## feat/blackbox-acceptance...github/dev [ahead 64]
+$ git rev-list --count github/dev..HEAD
+64
+```
+
+Local only: 64 commits ahead of `github/dev`, nothing pushed, no npm publish. The working tree is
+otherwise clean apart from files added while this record was written (the three ADRs, this section,
+`docs/design/mutation-relation.md`, and uncommitted edits to the quality-gate files from concurrent
+work).
+
+Not proven, stated plainly:
+
+- **The repair-round path has unit tests but has not fired in a real run.** `repair-rounds.test.ts`
+  (4 tests, real harness whose verdict flips when the implementation is fixed) covers it, and the i8
+  run reached acceptance on `delivery attempt 1 of 2` — it never needed round 2. So the code path is
+  tested but unexercised on the real runtime.
+- **The delivered tool is verified independently (14.5), but the judge that accepted it has a
+  fixture-coverage limit, and one class of defect survives it.** Changing only the rounding constant
+  in the accepted `summary.sh` (`ROUND_HALF_UP` -> `ROUND_HALF_EVEN`) leaves the judge at
+  `# pass 10 / ACCEPT_VERDICT: pass`, because every mean in the declared sample
+  (`10.4, -2.5, 11.6, -1.5, 9.5`) is exactly representable at one decimal place and the two modes
+  agree on all of them. The delivery's own suite of 39 tests DOES catch it (`# pass 32 / # fail 7`,
+  exit 1). The forged judge does not. This is ADR-033's "no way to declare a projected fixture"
+  limit made concrete, and it is a real gap between what the judge claims to check and what its
+  fixtures can distinguish.
+- **The browser-scenario and mutation relations are being added**, not present.
+  `docs/design/mutation-relation.md` is a design (untracked) whose status line reads "agreed with the
+  operator (all three integration seams approved); implementation follows the `browser-scenario`
+  relation" — i.e. `browser-scenario` is referenced as the next relation to land, and
+  `mutation-detection` after it. Neither exists in the forge yet (`IMPLEMENTED` still names the five
+  original relations).
+- **No push and no publish**, as above; the branch and the ADRs exist only on this machine.
+- **The delivery manifest's title is still non-English in the artifact on disk.**
+  `.takumi/artifacts/delivery/delivery-manifest.md` begins with the Japanese title line quoted in the ledger even
+  though ledger #38 and the commit `5925419` record that the title was fixed. See 14.8.
+
+### 14.8 A contradiction found in the logs, reported rather than smoothed over
+
+Three things in the evidence do not match the summary that was handed to this record.
+
+1. **The manifest's title fix is not visible in the artifact.** Ledger #38 says commit `5925419`
+   "fixes the manifest's title, which was written in the author's first language — `# [CJK elided]
+   (Delivery Manifest)`". The manifest currently on disk begins with exactly that line. The i8 run
+   that produced it was `RUN_EXIT=0` with `delivery manifest written (7 artifacts)`, and the run that
+   wrote that artifact is at commit `9d0193c` (`ACCEPT-001`'s `artifact.head`), which is BEFORE
+   `5925419`. So the artifact predates the fix and was not regenerated; the fix is correct for the
+   next run, but the on-disk evidence still carries the old title. Stated because a reader of the
+   artifact would otherwise think the fix never landed.
+2. **The i7 log is truncated mid-line at the point the summary of the failure is read.**
+   `/tmp/i7-delivery.log` line 187 reads `not ok 9 - DEC-` and stops -- no `DEC-003` or `DEC-004`
+   line. The run's own `failing checks` line (188-190) lists `DEC-003, DEC-004` among the failures, so
+   the information is not lost, only the quoted line. The `not ok 9` line recorded here is therefore
+   incomplete on disk; it is not a claim about the judge, it is a truncated log.
+3. **One of the "three deliberately broken copies" in ledger #37's claim does not fail.** Ledger #37
+   states "three deliberately broken copies -> `fail` naming the right relation/decision". The three
+   are not named. A broken copy of a DIFFERENT kind -- the rounding constant, above -- passes. That
+   does not make #37's sentence false (its copies broke relations the fixtures exercise), but a reader
+   should not take it as "any broken copy fails", and 14.7 records which kind does not.
 
 
 
