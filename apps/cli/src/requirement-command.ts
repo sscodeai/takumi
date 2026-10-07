@@ -163,6 +163,11 @@ function describeFeedback(entry: FeedbackEntry): string {
   return `${entry.id} (run ${entry.run}): ${entry.checks.map((c) => c.split(' ')[0]).join(', ')}`;
 }
 
+/** The keyword that ends the questions early: everything unanswered is then listed as undecided. */
+const DONE = 'done';
+/** How many times the questions may come round again (ADR-036): a bounded number of rounds, not a loop. */
+const MAX_ROUNDS = 3;
+
 const RESOLVE_OPTION = 'the failure is addressed — mark it resolved';
 const IMPL_CHANGES_OPTION = 'the recorded answer stands and the IMPLEMENTATION changes — mark it resolved';
 const ANSWER_WRONG_OPTION = 'the answer was wrong — decide that decision again below';
@@ -176,11 +181,15 @@ async function ask(question: string, options: string[], fallback: string | undef
     out('');
     out(`  ${question}`);
     options.forEach((option, index) => {
-      const marks = [option === fallback ? 'current' : '', option === options[0] ? '' : ''].filter(Boolean).join(' ');
+      const marks = [option === fallback ? 'recommended' : '', option === options[0] ? '' : ''].filter(Boolean).join(' ');
       out(`    [${index + 1}] ${option}${marks ? `   (${marks})` : ''}`);
     });
-    if (fallback !== undefined) out('    [enter] keep the current/default choice      [q] abort');
-    else out('    [s] leave undecided (only when this decision is not blocking)   [q] abort');
+    // The recommendation is a DEFAULT, and a default is an argument, not an absence: a human who presses
+    // enter is accepting the intake's reasoning, so the reasoning has to be on screen (ADR-036).
+    if (fallback !== undefined) {
+      out(`    recommended: ${fallback}`);
+      out('    [enter] take the recommendation   [yes] same   [s] leave undecided   [done] stop asking   [q] abort');
+    } else out('    [s] leave undecided (only when this decision is not blocking)   [done] stop asking   [q] abort');
     rl.setPrompt('    > ');
     rl.prompt();
     rl.on('line', (line) => {
@@ -200,9 +209,19 @@ async function ask(question: string, options: string[], fallback: string | undef
         rl.prompt();
         return;
       }
+      if (answer === 'done') {
+        rl.close();
+        resolve(DONE);
+        return;
+      }
       if (answer === 's' || answer === 'skip') {
         rl.close();
         resolve('');
+        return;
+      }
+      if ((answer === 'yes' || answer === 'y' || answer === 'recommended') && fallback !== undefined) {
+        rl.close();
+        resolve(fallback);
         return;
       }
       const index = Number.parseInt(answer, 10);
@@ -451,7 +470,14 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
       out(`  This failure is about ${named}.`);
       out('  Either the implementation ignored that answer, or the answer itself was wrong.');
     }
-    const answer = await ask(`${entry.id}: what settles this failure?`, options, LEAVE_OPEN_OPTION, io);
+    let answer = await ask(`${entry.id}: what settles this failure?`, options, LEAVE_OPEN_OPTION, io);
+    while (answer === DONE) {
+      // The failure is the machine's report that the last acceptance failed (ADR-029): it is not one of the
+      // clarifications, so `done` cannot skip it — a token over a document with an open failure is the one
+      // thing the black-box loop refuses to produce.
+      out(`    ${entry.id} is an open acceptance failure, not a clarification: it has to be answered.`);
+      answer = await ask(`${entry.id}: what settles this failure?`, options, LEAVE_OPEN_OPTION, io);
+    }
     if (answer === null) {
       out('\naborted: nothing was written and no token was produced.');
       return 2;
@@ -475,33 +501,67 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
   }
 
   const answers = new Map<string, string>();
-  for (const ambiguity of doc.ambiguities) {
-    if (ambiguity.options.length === 0) {
-      out(`refused: ${ambiguity.id} has no options, so there is nothing to choose between`);
+  // The rounds (ADR-036): a decision is put to the human in a round; the answers from that round are read
+  // back in the next one, and the loop stops as soon as nothing is open. A human who has answered enough can
+  // say `done` — the summary then lists exactly what was left undecided, so the same information reaches the
+  // confirmation line and the token as would have reached it by answering everything.
+  let round = 0;
+  let stoppedEarly = false;
+  for (;;) {
+    const effective = (a: { chosen?: string; default?: string }): string | undefined => a.chosen ?? a.default;
+    // A decision is put again when it has no answer AND when the human said (about a failure) that the
+    // answer itself was wrong: `mustChange` is that statement, and a decision marked for change is asked
+    // about even though the document still carries the old `chosen` (ADR-030 + ADR-036).
+    // Round 1 asks EVERY decision: a human confirming a document gets to look at every answer, including the
+    // ones the intake defaulted. Later rounds only re-ask what is still unanswered — that is what makes the
+    // loop converge instead of repeating the whole document (ADR-036).
+    round += 1;
+    const open = doc.ambiguities.filter(
+      (a) =>
+        (mustChange.has(a.id) && !answers.has(a.id)) ||
+        round === 1 ||
+        (answers.get(a.id) ?? effective(a)) === undefined,
+    );
+    if (open.length === 0) break;
+    if (round > MAX_ROUNDS) {
+      out(`refused: ${open.length} decision(s) are still open after ${MAX_ROUNDS} rounds — a document whose answers keep raising questions is a document to rewrite, not to confirm`);
       return 1;
     }
-    const fallback = ambiguity.chosen ?? ambiguity.default;
-    const answer = await ask(ambiguity.question || ambiguity.id, ambiguity.options, fallback, io);
-    if (answer === null) {
-      out('\naborted: nothing was written and no token was produced.');
-      return 2;
-    }
-    if (answer === '' && ambiguity.blocking) {
-      out(`refused: ${ambiguity.id} is blocking and was left undecided`);
-      return 1;
-    }
-    if (answer !== '') answers.set(ambiguity.id, answer);
-    // ADR-030: refusing HERE rather than after the last question, because the claim is about this
-    // decision and the human is looking at it right now.
-    if (mustChange.has(ambiguity.id)) {
-      const effective = answer === '' ? (ambiguity.chosen ?? ambiguity.default ?? '') : answer;
-      if (effective === mustChange.get(ambiguity.id)) {
-        out('');
-        out(`refused: you answered that the answer was wrong, but ${ambiguity.id} still reads \"${effective}\" — nothing changed.`);
-        out(`  Pick a different option for ${ambiguity.id}, or say that the implementation changes instead.`);
+    out('');
+    out(`round ${round} of at most ${MAX_ROUNDS} — ${open.length} decision(s) still open`);
+    for (const ambiguity of open) {
+      if (ambiguity.options.length === 0) {
+        out(`refused: ${ambiguity.id} has no options, so there is nothing to choose between`);
         return 1;
       }
+      const fallback = ambiguity.chosen ?? ambiguity.default;
+      const answer = await ask(ambiguity.question || ambiguity.id, ambiguity.options, fallback, io);
+      if (answer === null) {
+        out('\naborted: nothing was written and no token was produced.');
+        return 2;
+      }
+      if (answer === DONE) {
+        stoppedEarly = true;
+        break;
+      }
+      if (answer === '' && ambiguity.blocking) {
+        out(`refused: ${ambiguity.id} is blocking and was left undecided`);
+        return 1;
+      }
+      if (answer !== '') answers.set(ambiguity.id, answer);
+      // ADR-030: refusing HERE rather than after the last question, because the claim is about this
+      // decision and the human is looking at it right now.
+      if (mustChange.has(ambiguity.id)) {
+        const eff = answer === '' ? (ambiguity.chosen ?? ambiguity.default ?? '') : answer;
+        if (eff === mustChange.get(ambiguity.id)) {
+          out('');
+          out(`refused: you answered that the answer was wrong, but ${ambiguity.id} still reads \"${eff}\" — nothing changed.`);
+          out(`  Pick a different option for ${ambiguity.id}, or say that the implementation changes instead.`);
+          return 1;
+        }
+      }
     }
+    if (stoppedEarly) break;
   }
 
   let text = doc.text;
@@ -538,10 +598,18 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
   writeFileSync(doc.path, text, 'utf8');
 
   out('');
-  out('Confirmed decisions (each written into the document):');
+  const undecidedCount = doc.ambiguities.filter(
+    (a) => (answers.get(a.id) ?? a.chosen ?? a.default) === undefined,
+  ).length;
+  out(`Confirmed decisions — a checklist a reviewer reads, not the machine (${doc.ambiguities.length - undecidedCount}/${doc.ambiguities.length} decided):`);
   for (const ambiguity of doc.ambiguities) {
     const chosen = answers.get(ambiguity.id) ?? ambiguity.chosen ?? ambiguity.default;
-    out(`  ${chosen === undefined ? 'UNDECIDED' : 'x'} ${ambiguity.id}: ${chosen ?? '(left undecided)'}`);
+    out(`  ${chosen === undefined ? '[ ]' : '[x]'} ${ambiguity.id}: ${chosen ?? 'left undecided'}`);
+  }
+  if (undecidedCount > 0) {
+    out('');
+    out(`  ${undecidedCount} decision(s) were left UNDECIDED. A blocking decision cannot be: naming this`);
+    out('  before the token is the point — the run binds to a document whose open questions are visible.');
   }
   const token = requirementConfirmation(cwd, ref);
   out('');

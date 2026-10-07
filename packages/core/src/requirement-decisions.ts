@@ -39,6 +39,17 @@ export const JUDGE_DECISION_MODES: Record<string, readonly string[]> = {
   'independent-aggregation': ['half-up', 'truncate'],
 };
 
+/**
+ * How many decisions a document may still leave OPEN when it is confirmed (ADR-036).
+ *
+ * Spec-kit caps `[NEEDS CLARIFICATION]` markers at three because a spec full of open questions is not a
+ * spec; ours are explicit decisions with bounded options, so the budget is checked in two places: the
+ * validator refuses a document that CARRIES more than this many decisions at all (the intake has to reach
+ * for fewer, sharper questions), and the human's confirmation token carries how many were still open, so
+ * "I confirmed this while three things were unanswered" is visible in the artifact rather than implied.
+ */
+export const MAX_OPEN_DECISIONS = 5;
+
 /** The modes a relation kind can test, or undefined when the relation needs no meaning (it is a property). */
 export function decisionModesFor(relation: string): readonly string[] | undefined {
   return JUDGE_DECISION_MODES[relation];
@@ -398,7 +409,12 @@ export function validateRequirementDocument(text: string): string[] {
         issues.push(`${binding.checkId} declares the relation "${binding.relation}", which no judge can check (implemented: ${implemented}): the document would be refused at acceptance time, after the implementation`);
       }
     }
-    const decisionById = new Map(decisions.map((d) => [d.id, d]));
+    if (decisions.length > MAX_OPEN_DECISIONS) {
+    issues.push(
+      `the document carries ${decisions.length} decisions, over the budget of ${MAX_OPEN_DECISIONS}: an intake that asks more than ${MAX_OPEN_DECISIONS} questions is a document that has not decided what it is about (merge the related ones, or choose a default and say so in prose)`,
+    );
+  }
+  const decisionById = new Map(decisions.map((d) => [d.id, d]));
     for (const binding of block.bindings) {
       const modes = decisionModesFor(binding.relation);
       if (modes === undefined || binding.decides === undefined) continue;

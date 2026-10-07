@@ -247,8 +247,32 @@ test('validate: the confirmed PoC document itself passes the contract', () => {
   assert.deepEqual(validateRequirementDocument(real), []);
 });
 
+test('validate: a document over the decision budget is refused before a human confirms it (ADR-036)', () => {
+  // Six decisions is more than an intake may carry: the budget is what stops a document from being a list of
+  // questions, and it is checked here rather than at acceptance time (when the implementation is already paid for).
+  const decision = (n: number): string[] => [
+    `  - id: AMB-00${n}`,
+    `    question: Question ${n}?`,
+    '    options: ["a", "b"]',
+    '    default: "a"',
+    '    chosen: "a"',
+    '    blocking: false',
+  ];
+  // Rebuild the document with six decisions: keep everything before `ambiguities:` and everything from
+  // `deliverable:` on. Each `[0]` is guarded because `split` is typed as possibly-empty.
+  const head = DOC.split('\nambiguities:')[0] ?? '';
+  const tail = `\ndeliverable:${(DOC.split('\ndeliverable:')[1] ?? '')}`;
+  const many = [
+    ...head.split('\n'),
+    'ambiguities:',
+    ...[1, 2, 3, 4, 5, 6].flatMap(decision),
+    ...tail.split('\n'),
+  ].join('\n');
+  assert.match(validateRequirementDocument(many).join(' | '), /carries 6 decisions, over the budget of 5/);
+});
+
 test('validate: the scenario block is checked before a human confirms it (ADR-035)', () => {
-  const scenarios = (block: string): string => `${DOC.split('\n  relations:')[0]}\n${block}\n  relations:\n    - id: REL-001\n      relation: row-order-invariance\n      description: Shuffling the rows changes nothing.\n`;
+  const scenarios = (block: string): string => `${DOC.split('\n  relations:')[0] ?? ''}\n${block}\n  relations:\n    - id: REL-001\n      relation: row-order-invariance\n      description: Shuffling the rows changes nothing.\n`;
 
   // A scenario with no command, and one whose report the judge could never find.
   const noRun = scenarios('  scenarios:\n    - id: SCN-001\n      expect: the page shows the summary\n');

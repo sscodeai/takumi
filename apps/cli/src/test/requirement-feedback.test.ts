@@ -164,7 +164,7 @@ test('requirement confirm: leaving a written-back failure open refuses the confi
   const f = project(WITH_FAILURE);
   try {
     // The failure question comes first; [enter] keeps the current state, which is "leave it open".
-    const { code, lines } = await walk(f.dir, f.ref, ['', '', '']);
+    const { code, lines } = await walk(f.dir, f.ref, ['']);
     assert.equal(code, 1, lines.join('\n'));
     assert.match(lines.join('\n'), /FB-001 is still open/);
     assert.ok(!lines.join('\n').includes('sha256:'), 'no token is produced while a failure is open');
@@ -177,8 +177,8 @@ test('requirement confirm: leaving a written-back failure open refuses the confi
 test('requirement confirm: answering the failure resolves it in the same act as the confirmation', async () => {
   const f = project(WITH_FAILURE);
   try {
-    // [1] = the failure is addressed; then [enter] keeps the one decision.
-    const { code, lines } = await walk(f.dir, f.ref, ['1', '2']);
+    // [1] = the failure is addressed; then [enter] keeps the one decision (round 1 asks every decision).
+    const { code, lines } = await walk(f.dir, f.ref, ['1', '']);
     assert.equal(code, 0, lines.join('\n'));
     const written = readFileSync(f.path, 'utf8');
     assert.match(written, /^    status: resolved$/m);
@@ -250,6 +250,56 @@ function bound(text = BOUND): { dir: string; ref: string; path: string } {
   return { dir, ref, path: join(dir, ref) };
 }
 
+test('requirement confirm: a decision with no answer is asked in a round, and the recommendation is named', async () => {
+  const withSecond = BOUND.replace(
+    '    blocking: true\n',
+    '    blocking: true\n  - id: AMB-002\n    question: How is a station with no rows reported?\n    options: ["an error", "a row of zeros"]\n    blocking: true\n',
+  ).replace(
+    '      description: A repeated id resolves the way AMB-001 decided.',
+    '      description: A repeated id resolves the way AMB-001 decided.\n    - id: REL-008\n      relation: row-order-invariance\n      decides: AMB-002\n      description: The scenario that settles AMB-002.',
+  );
+  const f = bound(withSecond);
+  try {
+    // The fixture also carries an open failure, so the order is: what settles the failure (1 = the
+    // implementation changes, nothing to re-decide), then round 1 asks EVERY decision in document order —
+    // [enter] keeps AMB-001's current answer, then `2` answers AMB-002.
+    const { code, lines } = await walk(f.dir, f.ref, ['1', '', '2']);
+    const text = lines.join('\n');
+    assert.match(text, /round 1 of at most 3 — 2 decision\(s\) still open/, text);
+    assert.match(text, /\[1\] an error/);
+    assert.match(text, /\[2\] a row of zeros/);
+    assert.equal(code, 0, text);
+    // A decision with NO default cannot be assumed, so the round asks it: `2` writes option 2.
+    assert.match(readFileSync(f.path, 'utf8'), /- id: AMB-002[\s\S]*?chosen: "a row of zeros"/, 'the answer is written');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement confirm: `done` stops the questions and the checklist names what was left open', async () => {
+  const withSecond = BOUND.replace(
+    '    blocking: true\n',
+    '    blocking: true\n  - id: AMB-002\n    question: How is a station with no rows reported?\n    options: ["an error", "a row of zeros"]\n    blocking: false\n',
+  ).replace(
+    '      description: A repeated id resolves the way AMB-001 decided.',
+    '      description: A repeated id resolves the way AMB-001 decided.\n    - id: REL-008\n      relation: row-order-invariance\n      decides: AMB-002\n      description: The check that settles AMB-002.',
+  );
+  const f = bound(withSecond);
+  try {
+    // [enter] keeps AMB-001 (round 1 asks it), then `done` stops before AMB-002 — which is non-blocking, so
+    // the document is still confirmable and the checklist names it as left undecided.
+    const { code, lines } = await walk(f.dir, f.ref, ['1', '', 'done']);
+    const text = lines.join('\n');
+    assert.equal(code, 0, text);
+    assert.match(text, /\[x\] AMB-001: /, 'a decided entry is ticked in the reviewer list');
+    assert.match(text, /\[ \] AMB-002: left undecided/);
+    assert.match(text, /1 decision\(s\) were left UNDECIDED/);
+    assert.match(text, /sha256:/, 'the token is still produced: a non-blocking decision may be left open');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test('requirement brief: the failing check is traced to its decision, its answer and the alternatives', async () => {
   const f = bound();
   try {
@@ -271,7 +321,7 @@ test('requirement brief: the failing check is traced to its decision, its answer
 test('requirement confirm: the failure is put as a choice between the implementation and the answer', async () => {
   const f = bound();
   try {
-    // [2] = the answer was wrong; then pick option 1 ("First row wins") for AMB-001.
+    // [2] = the answer was wrong; then pick option 1 ("First row wins") for AMB-001 when it is re-asked.
     const { code, lines } = await walk(f.dir, f.ref, ['2', '1']);
     assert.equal(code, 0, lines.join('\n'));
     const text = lines.join('\n');
