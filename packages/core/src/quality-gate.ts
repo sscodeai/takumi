@@ -6,7 +6,7 @@
 // which turned "unrecognised output" into "1 passing test" — is deliberately
 // gone, because it let jest/vitest/pytest/gradle runs pass vacuously.
 
-export type TestShape = 'tap' | 'jest' | 'pytest' | 'maven' | 'gradle';
+export type TestShape = 'tap' | 'jest' | 'pytest' | 'maven' | 'gradle' | 'ctrf';
 
 export type TestReport =
   | { shape: TestShape; total: number; failed: number; skipped: number }
@@ -42,13 +42,48 @@ function sum(list: Counts[]): Counts {
 const RUNNER_REPORTING_LINE = /^[ \t]*(?:#.*|ok\b.*|not ok\b.*)$/gm;
 
 /**
+ * A JSON string literal element of a test name inside a MACHINE-READABLE report (CTRF records every test's
+ * name, and the name may contain anything — `"kind": "BUILD FAILURE"` in a name is a name).
+ *
+ * The TAP scrubber above cannot see this: with the whole report on ONE line, the line does not start with
+ * `ok`, so the strip leaves the JSON intact and the detector reads the names inside it. The repository's own
+ * `acceptance-gate-delivery.test.ts` writes a CTRF-ish report on a single line — which is why this was
+ * invisible until a test aimed at it existed (docs/bugs-fixed.md #40).
+ *
+ * The escaping is handled one level at a time — `\\` before `\"` — so a name ending in a backslash cannot
+ * swallow the closing quote. What is removed is only the string ELEMENT (`"name": "…"` and its value);
+ * `"summary": {"failed": 1}` stays, so a report that really says a test failed is still read.
+ */
+const REPORT_TEST_NAME = /"(?:name|fullName|suite|title|testName)"\s*:\s*"(?:[^"\\]|\\.)*"/g;
+
+/**
+ * The MESSAGE of a failing test, on the other hand, is the BUILD speaking: a CTRF suite whose only failing
+ * test says `FATAL: the toolchain refused to start` is reporting a hard failure, and a scrubber that deleted
+ * messages would make the detector blind exactly where it was just taught to look. Messages survive; NAMES
+ * do not.
+ */
+const REPORT_TEST_MESSAGE = /"message"\s*:\s*"(?:[^"\\]|\\.)*"/g;
+
+/**
+ * Remove the test NAMES carried inside a JSON report, so a hard-failure marker that appears in a name is
+ * not mistaken for the build failing.
+ */
+function withoutReportTestNames(out: string): string {
+  // Names first (they are what a suite testing this detector writes), then messages restored verbatim:
+  // removing names only would already leave messages alone, but making the two explicit keeps the next
+  // reader from "simplifying" the message case away.
+  return out.replace(REPORT_TEST_NAME, '""').replace(REPORT_TEST_MESSAGE, (hit) => hit);
+}
+
+/**
  * Whether the output carries a hard failure of the BUILD (not of a test): a
  * compile error, a toolchain that refused to start, a build that gave up before
  * the tests ran. Judged on the build's own output, with the runner's reporting
  * lines removed.
  */
 export function detectHardFailure(out: string): boolean {
-  return /BUILD FAILURE|BUILD FAILED|FATAL/i.test(out.replace(RUNNER_REPORTING_LINE, ''));
+  const build = out.replace(RUNNER_REPORTING_LINE, '');
+  return /BUILD FAILURE|BUILD FAILED|FATAL/i.test(withoutReportTestNames(build));
 }
 
 /**
@@ -57,8 +92,9 @@ export function detectHardFailure(out: string): boolean {
  * Recognised shapes: TAP (`# tests N` / `# fail N` / `# skip N` / `not ok`),
  * jest and vitest (`Tests: ... total` / `Tests  N passed (N)`), pytest
  * (`= 1 failed, 2 passed in 0.4s` and the bare `N passed` form), Maven
- * (`Tests run: N, Failures: N, Errors: N, Skipped: N`) and gradle/JUnit
- * (`N tests completed, M failed`). Everything else is `unrecognised`.
+ * (`Tests run: N, Failures: N, Errors: N, Skipped: N`), gradle/JUnit
+ * (`N tests completed, M failed`) and CTRF (Common Test Report Format, the
+ * JSON test-result interchange standard). Everything else is `unrecognised`.
  *
  * Every summary block in the output is counted, not just the first one: a
  * monorepo prints one block per package, and reporting only the first block
@@ -80,10 +116,13 @@ export function parseTestReport(out: string): TestReport {
   const gradle = parseGradle(out);
   if (gradle) return { shape: 'gradle', ...gradle };
 
+  const ctrf = parseCtrf(out);
+  if (ctrf) return { shape: 'ctrf', ...ctrf };
+
   return {
     shape: 'unrecognised',
     reason:
-      'no known test summary was found in the output (recognised: TAP, jest/vitest, pytest, Maven, gradle/JUnit)',
+      'no known test summary was found in the output (recognised: TAP, jest/vitest, pytest, Maven, gradle/JUnit, CTRF)',
   };
 }
 
@@ -215,6 +254,99 @@ function parseGradle(out: string): Counts | undefined {
     blocks.push(counts(parseInt(m[1] ?? '0', 10), parseInt(m[2] ?? '0', 10), parseInt(m[3] ?? '0', 10)));
   }
   return blocks.length > 0 ? sum(blocks) : undefined;
+}
+
+/**
+ * CTRF (Common Test Report Format): an open MIT standard for JSON test-result
+ * interchange, so any external E2E tool that emits a CTRF document can be the
+ * evidence of a gate run without a per-tool adapter.
+ *
+ * A CTRF document is a JSON object with `reportFormat: "CTRF"`, a `specVersion`
+ * and a `results` object holding `tool`, `summary` and `tests` (spec v0.1.0,
+ * 2026-10-03; the JSON Schema in Appendix A is normative). `summary.tests` is
+ * the total, `summary.failed` the failures and `summary.skipped` the skips;
+ * each `tests[]` entry carries `name`, `status` (passed|failed|skipped|pending
+ * |other) and `duration`.
+ *
+ * Where the document is malformed, is a JSON array, or carries none of those
+ * markers, it is NOT a CTRF report: returning `unrecognised` keeps the gate
+ * failing closed. A report claiming `tests > 0` is evidence even when nothing
+ * else in the output is parseable, which is why CTRF is tried after the
+ * text shapes.
+ *
+ * A summary that disagrees with its own test list must not under-report, so the
+ * failure and skip counts are the larger of the summary count and the number of
+ * entries the list itself marks `failed` / `skipped`. The spec says
+ * `summary.tests` SHOULD equal the length of the `tests` array, so the array
+ * length may raise the total but never lower it. `pending` and `other` are
+ * unresolved outcomes, not evidence of a pass, so they are counted as skipped.
+ */
+function parseCtrf(out: string): Counts | undefined {
+  const doc = parseCtrfDocument(out);
+  if (!doc) return undefined;
+
+  const entries = doc.results.tests;
+  const summary = doc.results.summary;
+  const marked = (status: string) => entries.filter((t) => t?.status === status).length;
+
+  const total = Math.max(summary.tests, entries.length);
+  const failed = Math.max(summary.failed, marked('failed'));
+  const skipped = Math.max(summary.skipped + summary.pending + summary.other, marked('skipped') + marked('pending') + marked('other'));
+  return counts(total, failed, skipped);
+}
+
+/** The minimal, well-typed view of a CTRF document this gate needs. */
+interface CtrfDocument {
+  results: {
+    summary: { tests: number; failed: number; skipped: number; pending: number; other: number };
+    tests: Array<{ status?: unknown }>;
+  };
+}
+
+/**
+ * Recognise a CTRF document and read its summary and test list. Returns
+ * `undefined` for anything that is not a CTRF document: malformed or
+ * non-object JSON, a JSON array, `reportFormat` other than "CTRF", a missing
+ * or non-integer `summary`, or a `tests` value that is not an array.
+ */
+function parseCtrfDocument(out: string): CtrfDocument | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+
+  const doc = parsed as Record<string, unknown>;
+  if (doc.reportFormat !== 'CTRF') return undefined;
+  // CTRF is pre-1.0; only the schema's "MAJOR.MINOR.PATCH" shape is required.
+  if (typeof doc.specVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(doc.specVersion)) return undefined;
+
+  const results = doc.results;
+  if (typeof results !== 'object' || results === null || Array.isArray(results)) return undefined;
+  const { summary, tests } = results as Record<string, unknown>;
+  if (typeof summary !== 'object' || summary === null || Array.isArray(summary)) return undefined;
+  if (!Array.isArray(tests)) return undefined;
+
+  const s = summary as Record<string, unknown>;
+  return {
+    results: {
+      summary: {
+        tests: num(s.tests),
+        failed: num(s.failed),
+        skipped: num(s.skipped),
+        pending: num(s.pending),
+        other: num(s.other),
+      },
+      tests: tests as Array<{ status?: unknown }>,
+    },
+  };
+}
+
+/** A summary counter, or 0 when it is absent or not a non-negative integer. */
+function num(v: unknown): number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0;
 }
 
 /**
