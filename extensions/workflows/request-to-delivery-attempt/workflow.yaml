@@ -1,5 +1,5 @@
 name: request-to-delivery-attempt
-version: 0.1.0
+version: 0.2.0
 description: >
   ONE delivery attempt: a CONFIRMED requirement document becomes a runnable, judged delivery. The
   implementer chooses language/architecture/stack and no human reads the design or the code; the project's
@@ -8,6 +8,22 @@ description: >
   attempt is told exactly which checks the first one failed (ADR-034).
 runtime: pi
 steps:
+  - id: ci_config
+    # The host's pipeline, written into the DELIVERY before the implementer commits (ADR-037). Order matters:
+    # takumi never commits — the agent's boundary IS the commit — so a pipeline written after that commit
+    # would be an uncommitted file the host never runs. The test command is a discovery snippet so the
+    # pipeline runs the DELIVERED project's own tests whatever stack the implementer chooses, never takumi's;
+    # and a `ci_config` whose step declares no test command is refused rather than written as decoration.
+    # The created pipeline file is a protected path the deterministic reviewer reports as a note inside the
+    # delivery (ADR-032) — see the `rules.protectedPaths` on `rule_review` below for the forgejo path.
+    type: ci_config
+    testCommand: |
+      if [ -f package.json ]; then pnpm test 2>&1 | tail -60;
+      elif [ -f run-tests.sh ]; then bash run-tests.sh 2>&1 | tail -60;
+      elif ls *.test.mjs >/dev/null 2>&1; then node --test *.test.mjs 2>&1 | tail -60;
+      else echo "no test command found in this project" >&2; exit 1; fi
+    dialect: forgejo
+    requirementRef: "{requirement}"
   - id: implementation
     type: agent
     prompt: |
@@ -16,6 +32,10 @@ steps:
       the input world it is about, the exact output line shapes (and what each field of them means), and
       which decisions it settles. You choose the language, architecture and stack; no human will read
       your design or your code.
+
+      A pipeline file has already been written into this directory at `.forgejo/workflows/ci.yml`: keep it,
+      and make sure your commit includes it. takumi never commits — the host runs what YOU commit — so the
+      delivery must be one commit that contains your work AND that pipeline file.
 
       This is delivery attempt {repairRound}. If the text between the markers below is empty, this is the
       FIRST attempt at this delivery and there is nothing to repair. If it is not empty, a previous
@@ -34,6 +54,7 @@ steps:
       plan. Satisfy the entry point the requirement names, and honour the option chosen for every AMB-nnn
       entry. When done, summarise the files you created or changed, the stack you chose and why, and how
       each acceptance criterion is met.
+    dependsOn: [ci_config]
   - id: unit_and_integration_tests
     type: agent
     prompt: |
@@ -43,7 +64,8 @@ steps:
 
       The run's smoke gate has to be able to RUN your tests, so leave a discoverable entry point: a
       package.json script, or `run-tests.sh` at the project root that runs the suite and exits non-zero on
-      failure. A suite nothing can invoke is a suite that does not count.
+      failure. A suite nothing can invoke is a suite that does not count. Commit your work: the host runs
+      what you commit.
     dependsOn: [implementation]
   - id: quality_gate
     type: quality_gate
@@ -64,6 +86,14 @@ steps:
     # delivery added. A distance (`HEAD~1`) would silently review only the commit on top of whatever
     # the implementer happened to leave last.
     baseRef: root
+    # The delivery now CREATES a pipeline file (`.forgejo/workflows/ci.yml`) that will judge it. The
+    # reviewer's defaults already cover `.github/workflows/`; this ADDS the forgejo/Gitea path so the
+    # created pipeline is reported by the SAME protected-path rule (ADR-013) as a note inside the delivery
+    # (ADR-032) rather than being silently waved through. A change to a pipeline that already existed still
+    # keeps `human` severity and stops the run.
+    rules:
+      protectedPaths:
+        - '(^|/)\.forgejo/workflows/'
     prompt: |
       Deterministic rule review of the delivered change set. Fail closed on a block finding, on a human
       decision, or on a change set that cannot be reviewed.

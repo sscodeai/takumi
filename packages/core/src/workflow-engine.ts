@@ -16,6 +16,8 @@ import { groupByLevel } from './workflow.js';
 import { detectHardFailure, judgeGate, parseTestReport } from './quality-gate.js';
 import { createGitRunner, type GitRunner } from './git-runner.js';
 import { ProviderError } from './provider-error.js';
+import type { DeliveryProvider, PullRequestRef } from './delivery.js';
+import { executeCiConfigStep, executeAwaitChecksStep } from './ci-pipeline.js';
 import { collectReviewInput, verdictFromFindings } from './review.js';
 import {
   describeFindings,
@@ -101,6 +103,19 @@ export interface WorkflowExecutionContext {
    * definition. Absent means a `repair` step fails closed, saying so.
    */
   loadWorkflow?: (ref: string) => Promise<WorkflowDefinition>;
+  /**
+   * The host this run may publish to (ADR-037): the delivery port, injected by the caller exactly like the
+   * workflow loader. The engine never talks to a code host on its own — an unattended run that can push
+   * wherever it likes is a run nobody can reason about — so a `publish` step with no provider FAILS rather
+   * than quietly producing a local bundle and calling it delivered.
+   *
+   * `openIssue` is optional on the seam because the port itself is pull-request shaped: a host that cannot
+   * record an issue says so in the step summary instead of the run pretending one exists.
+   */
+  delivery?: DeliveryProvider & {
+    openIssue?: (req: { title: string; body: string; labels?: string[] }) => Promise<{ number: string; url: string }>;
+    commentOnPullRequest?: (ref: PullRequestRef, body: string) => Promise<void>;
+  };
   /**
    * Set by the repair loop on every round that is NOT the last: the failure being handled is going to be
    * retried, so the requirement document must not be edited per attempt (ADR-034). Exactly one `FB-nnn`
@@ -1467,8 +1482,207 @@ export async function executeWorkflow(
         continue;
       }
 
+      // CI config step (ADR-037): write the host's pipeline into the delivery, derived from the
+      // requirement document's `deliverable.run` and the delivered project's own test command. Refused
+      // when the step declares no test command, and refused when the named document cannot be read.
+      if (step.type === 'ci_config') {
+        run.stepStatus[stepId] = 'running';
+        const resolvedRef = requirementRefOf(step.requirementRef);
+        const ciWorktree = (await import('node:path')).resolve(ctx.worktree ?? ctx.cwd);
+        const ciResult = await executeCiConfigStep({
+          stepId,
+          runId,
+          projectDir: ctx.cwd,
+          worktree: ciWorktree,
+          ...(step.testCommand === undefined ? {} : { testCommand: step.testCommand }),
+          ...(step.dialect === undefined ? {} : { dialect: step.dialect }),
+          ...(resolvedRef.ref.length === 0 ? {} : { requirementRef: resolvedRef.ref }),
+          artifacts: ctx.artifacts,
+          trace: taskTraceFor(step, vars),
+        });
+        run.stepStatus[stepId] = ciResult.status;
+        if (ciResult.status === 'failed') {
+          run.status = 'failed';
+          failedIds.add(stepId);
+        }
+        stepResults.push({ stepId, status: ciResult.status, summary: ciResult.summary, artifacts: ciResult.artifacts, tests: [] });
+        ctx.onEvent?.(stepId, ciResult.summary.split('\n')[0] ?? ciResult.summary);
+        done.add(stepId);
+        continue;
+      }
+
+      // Await checks step (ADR-037): wait for the host's pipeline on the delivered head. `success` for
+      // every check is the only pass; a missing provider, a host without the checks capability, a host
+      // that throws, a host that reports nothing, a red check and a pending check at the timeout all fail
+      // the run CLOSED — the step never reports a green pipeline it did not actually read.
+      if (step.type === 'await_checks') {
+        run.stepStatus[stepId] = 'running';
+        const declaredRef = ((step as WorkflowStep & { ref?: string }).ref ?? vars['deliveryRef'] ?? '').trim();
+        let checksRef: PullRequestRef | undefined;
+        if (declaredRef.length > 0) {
+          checksRef = { number: declaredRef, url: /^https?:/i.test(declaredRef) ? declaredRef : '', headSha: '', baseSha: '' };
+        } else if (ctx.worktree !== undefined) {
+          const git = ctx.git ?? createGitRunner();
+          const branchRun = await git.run(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: ctx.worktree });
+          const headRun = await git.run(['rev-parse', 'HEAD'], { cwd: ctx.worktree });
+          const branch = branchRun.stdout.trim();
+          const head = headRun.stdout.trim();
+          if (branchRun.exitCode === 0 && branch.length > 0 && branch !== 'HEAD' && head.length > 0) {
+            checksRef = { number: branch, url: '', headSha: head, baseSha: '' };
+          }
+        }
+        const awaitResult = await executeAwaitChecksStep({
+          stepId,
+          ...(ctx.delivery === undefined ? {} : { delivery: ctx.delivery }),
+          ...(checksRef === undefined ? {} : { ref: checksRef }),
+          ...(step.waitSeconds === undefined ? {} : { waitSeconds: step.waitSeconds }),
+          onEvent: (message) => ctx.onEvent?.(stepId, message),
+        });
+        run.stepStatus[stepId] = awaitResult.status;
+        if (awaitResult.status === 'failed') {
+          run.status = 'failed';
+          failedIds.add(stepId);
+        }
+        stepResults.push({ stepId, status: awaitResult.status, summary: awaitResult.summary, artifacts: [], tests: [] });
+        ctx.onEvent?.(stepId, awaitResult.summary.split('\n')[0] ?? awaitResult.summary);
+        done.add(stepId);
+        continue;
+      }
+
       // Delivery step: package the run's artifacts into a delivery bundle.
       // Produces a delivery manifest + a ZIP-able summary of all artifacts.
+      // Publish step (ADR-037): the host-side half of a delivery. Everything up to here happened in a
+      // worktree nobody else can see; this is the one place a run is allowed to write to a code host, and it
+      // is deliberately narrow: push the committed branch (never a force), open EXACTLY ONE pull request
+      // whose body carries the confirmed requirement and its digest, and — when the host can record one —
+      // an issue that says what was asked for. A host that cannot do the first part fails the run.
+      if (step.type === 'publish') {
+        run.stepStatus[stepId] = 'running';
+        const failPublish = (summary: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `publish FAILED: ${summary.split('\n')[0]}`);
+        };
+        const provider = ctx.delivery;
+        const worktree = ctx.worktree;
+        if (provider === undefined) {
+          failPublish('this run has no delivery provider (ctx.delivery), so there is no host to publish to: a local bundle is not a delivery');
+          done.add(stepId);
+          continue;
+        }
+        if (worktree === undefined) {
+          failPublish('a publish step needs a delivery worktree (--worktree): there is nothing to push');
+          done.add(stepId);
+          continue;
+        }
+        const git = ctx.git ?? createGitRunner();
+        const branchRun = await git.run(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: worktree });
+        const branch = branchRun.stdout.trim();
+        const baseBranch = step.baseBranch ?? 'main';
+        const remote = step.remote ?? 'origin';
+        if (branchRun.exitCode !== 0 || branch.length === 0 || branch === 'HEAD') {
+          failPublish(`the delivery worktree is not on a branch (git said "${branch}"): a detached head cannot be published`);
+          done.add(stepId);
+          continue;
+        }
+        const baseRun = await git.run(['rev-parse', '--verify', `${remote}/${baseBranch}^{commit}`], { cwd: worktree });
+        const baseSha = baseRun.exitCode === 0 ? baseRun.stdout.trim() : '';
+        const headRun = await git.run(['rev-parse', 'HEAD'], { cwd: worktree });
+        const headSha = headRun.stdout.trim();
+        if (baseSha.length === 0) {
+          failPublish(`the base branch ${remote}/${baseBranch} could not be resolved in the delivery worktree: a pull request with no base is not a pull request`);
+          done.add(stepId);
+          continue;
+        }
+        const confirmed = ctx.confirmedRequirement;
+        const itemId = confirmed?.ref ?? workflow.name;
+        const requirementLine =
+          confirmed === undefined
+            ? 'Requirement: (this run was not bound to a confirmed requirement)'
+            : `Requirement: \`${confirmed.ref}\` at \`sha256:${confirmed.digest}\``;
+        const body = [
+          `Run: ${runId}`,
+          requirementLine,
+          `Item: ${itemId}`,
+          '',
+          'This pull request was produced by a black-box delivery run: the requirement above is the document a',
+          'human confirmed, the acceptance artifact records the judge that accepted this commit, and the',
+          'commit boundary is the implementer\'s own.',
+        ].join('\n');
+        try {
+          const outcome = await provider.deliver(
+            {
+              worktree,
+              branch,
+              baseBranch,
+              remote,
+              itemId,
+              runId,
+              ...(step.prTitle === undefined ? {} : { title: step.prTitle }),
+              body,
+            },
+            { baseSha },
+          );
+          // `pr` is optional in the port: a bare git remote has a pushed branch and nothing to review. That
+          // is reported as what it is — never as a pull request that does not exist.
+          const pr = outcome.pr;
+          const lines = [
+            pr === undefined
+              ? `published ${branch} -> ${baseBranch}: the branch is pushed and this host has no review surface`
+              : `published ${branch} -> ${baseBranch} as pull request ${pr.number}`,
+            ...(pr === undefined ? [] : [`  url: ${pr.url}`, `  head: ${pr.headSha}`, `  base: ${pr.baseSha} (${baseSha})`]),
+            `  push: ${outcome.push.mode} (${outcome.push.branch} at ${outcome.push.head})`,
+            `  ${requirementLine}`,
+            ...outcome.notes.map((note) => `  note: ${note}`),
+          ];
+          if (outcome.push.mode === 'force') {
+            // The port says a forced push is a contract violation; a provider that reports one has broken the
+            // boundary this layer exists to keep, so the run refuses to treat the delivery as published.
+            failPublish([`the provider pushed with a FORCE, which the port forbids: the reviewed history is gone`, ...lines].join('\n'));
+            done.add(stepId);
+            continue;
+          }
+          // The issue is a RECORD, not a gate: a host that cannot record one is reported, never silent, and
+          // never allowed to undo a pull request that already exists (the same rule the board mirror keeps).
+          let issueLine = 'issue: not opened (the provider cannot record issues)';
+          if (provider.openIssue !== undefined) {
+            try {
+              const issue = await provider.openIssue({
+                title: step.issueTitle ?? `${itemId}: ${branch}`,
+                body: [
+                  requirementLine,
+                  ...(pr === undefined ? [`Branch: \`${branch}\``] : [`Pull request: ${pr.url}`]),
+                  '',
+                  'Opened by a black-box delivery run as the record of this work.',
+                ].join('\n'),
+              });
+              issueLine = `issue: ${issue.number} opened (${issue.url})`;
+            } catch (e) {
+              issueLine = `issue: COULD NOT be opened (${e instanceof Error ? e.message : String(e)}) — the pull request exists; the record does not`;
+            }
+          }
+          lines.push(`  ${issueLine}`);
+          run.stepStatus[stepId] = 'completed';
+          stepResults.push({ stepId, status: 'completed', summary: lines.join('\n'), artifacts: [], tests: [] });
+          // The pipeline step judges the head the HOST has, so the reference travels with the run: a later
+          // `await_checks` reads the checks of the pull request this step opened rather than guessing.
+          if (pr !== undefined) vars['deliveryRef'] = pr.number;
+          ctx.onEvent?.(
+            stepId,
+            pr === undefined
+              ? `publish: ${branch} pushed (this host has no review surface)`
+              : `publish: pull request ${pr.number} opened (${pr.url})`,
+          );
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e);
+          failPublish(`the host refused the delivery: ${detail}`);
+        }
+        done.add(stepId);
+        continue;
+      }
+
       if (step.type === 'delivery') {
         run.stepStatus[stepId] = 'running';
         const fsx3 = await import('node:fs/promises');

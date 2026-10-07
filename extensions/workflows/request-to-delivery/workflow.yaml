@@ -1,11 +1,13 @@
 name: request-to-delivery
-version: 0.2.0
+version: 0.3.0
 description: >
   The black-box flow, end to end: a CONFIRMED requirement document becomes a delivered product with no
   human reading the design or the code. The delivery is ATTEMPTED (request-to-delivery-attempt) and, when
   the forged judge refuses it, repaired against the failing checks and judged again, up to `maxRounds`
   attempts (ADR-034). Only a run that spends every attempt writes its failure back into the requirement
-  document — a run that repairs itself leaves the human's document untouched.
+  document — a run that repairs itself leaves the human's document untouched. A run that is accepted is
+  PUBLISHED to the host and then WAITS for the host's own pipeline on the published head: a red or
+  still-pending pipeline fails the run closed, naming the checks (ADR-037).
 runtime: pi
 steps:
   - id: delivery_attempt
@@ -16,7 +18,23 @@ steps:
     type: repair
     repairRef: request-to-delivery-attempt
     maxRounds: 2
+  - id: publish
+    # The host-side half of the delivery (ADR-037): push the committed branch and open exactly one pull
+    # request. Everything before this happened in a worktree nobody else can see, and the delivery's own
+    # pipeline (written by the attempt's `ci_config` step) travels with the commit.
+    type: publish
+    dependsOn: [delivery_attempt]
+  - id: await_checks
+    # Wait for the host's pipeline on the head `publish` pushed (ADR-037). `success` for every check is the
+    # only pass: a red check fails the run naming the check and its URL, a check still pending at the
+    # timeout fails naming what is still pending, and a host that cannot report checks at all fails with
+    # that said plainly — the run never reports a green pipeline it did not actually read. The wait is
+    # bounded (declared seconds, default 300, ceiling 1800); the head is derived from the delivery worktree
+    # when no explicit `ref` is declared.
+    type: await_checks
+    waitSeconds: 300
+    dependsOn: [publish]
   - id: delivery
     type: delivery
     prompt: Package the run's artifacts into a delivery manifest.
-    dependsOn: [delivery_attempt]
+    dependsOn: [await_checks]

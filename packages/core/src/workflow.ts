@@ -24,6 +24,9 @@ export const WORKFLOW_STEP_TYPES = [
   'judge_forge',
   'acceptance',
   'repair',
+  'ci_config',
+  'await_checks',
+  'publish',
   'delivery',
 ] as const;
 
@@ -104,6 +107,28 @@ export interface WorkflowStep {
    * a human chose, and an unbounded one is an unattended agent spending money until it feels done.
    */
   maxRounds?: number;
+  /**
+   * `ci_config`: the command that runs the DELIVERED project's own tests, written into the pipeline file.
+   * Required: a pipeline that does not run the delivery's tests is decoration.
+   */
+  testCommand?: string;
+  /** `ci_config`: which dialect to write — `forgejo` (also Gitea) or `github`. Defaults to `forgejo`. */
+  dialect?: string;
+  /** `await_checks`: how long to wait for the host's pipeline, in seconds (default 300, ceiling 1800). */
+  waitSeconds?: number;
+  /** `publish`: the base branch the pull request targets (default `main`). */
+  baseBranch?: string;
+  /** `publish`: the remote to push to (default `origin`). */
+  remote?: string;
+  /**
+   * `await_checks`: which pull request's checks to read — a number or a URL. Absent means the run's own
+   * published reference (`vars.deliveryRef`), and failing that the worktree's branch and HEAD.
+   */
+  ref?: string;
+  /** `publish`: the pull request title; the provider has its own default (a run marker line). */
+  prTitle?: string;
+  /** `publish`: the issue title; defaults to the confirmed requirement ref and the branch. */
+  issueTitle?: string;
 }
 
 export interface WorkflowManifestIssue {
@@ -170,6 +195,38 @@ export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManif
         stepId,
         message: `step ${stepId} is a ${String(step?.type)} step whose prompt references {judge…}: the judge is for the acceptance step only, and a step that can see it can fit it`,
       });
+    }
+    if (step?.type === 'ci_config') {
+      // A pipeline file with no test command would run nothing and still report green: the command is
+      // required, and it is the DELIVERED project's, not takumi's (ADR-037).
+      if (typeof step.testCommand !== 'string' || step.testCommand.trim().length === 0) {
+        issues.push({
+          stepId,
+          message: `step ${stepId} writes a pipeline configuration and requires a non-empty testCommand (the command that runs the delivered project's own tests)`,
+        });
+      }
+      const dialect = step.dialect ?? 'forgejo';
+      if (dialect !== 'forgejo' && dialect !== 'github') {
+        issues.push({
+          stepId,
+          message: `step ${stepId} declares dialect "${dialect}": implemented are forgejo (also Gitea) and github`,
+        });
+      }
+    }
+    if (step?.type === 'await_checks') {
+      const seconds = step.waitSeconds ?? 300;
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 1800) {
+        issues.push({
+          stepId,
+          message: `step ${stepId} declares waitSeconds ${String(step.waitSeconds)}: it must be an integer from 1 to 1800 (a pipeline that is still pending when the budget runs out fails, it does not pass)`,
+        });
+      }
+    }
+    if (step?.type === 'publish') {
+      // Publishing needs a base branch to target: a pull request against nothing is not a pull request.
+      if (typeof step.baseBranch === 'string' && step.baseBranch.trim().length === 0) {
+        issues.push({ stepId, message: `step ${stepId} declares an empty baseBranch: a pull request needs a branch to target` });
+      }
     }
     if (step?.type === 'repair') {
       // A repair with nothing to run, or with an unbounded budget, is refused at load: both are
