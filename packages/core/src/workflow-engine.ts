@@ -1252,10 +1252,14 @@ export async function executeWorkflow(
           result: m[1] === 'ok' ? 'pass' : 'fail',
           check: (m[2] ?? '').trim(),
         }));
+        // The verdict is about a COMMIT: the head of the repository the acceptance is about — the
+        // delivery worktree when there is one, else the project. Resolving it in the project repo recorded
+        // the wrong commit on a black-box run (the ACCEPT artifact named the project's HEAD, not the
+        // delivered tree it had just judged) — the same wrong-repository family as ledger #35.
         const head = await (async (): Promise<string | undefined> => {
           try {
             const g = ctx.git ?? createGitRunner();
-            const r = await g.run(['rev-parse', 'HEAD']);
+            const r = await g.run(['rev-parse', 'HEAD'], { cwd: ctx.worktree ?? ctx.cwd });
             return r.exitCode === 0 ? r.stdout.trim() : undefined;
           } catch {
             return undefined;

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -87,10 +88,24 @@ interface Fixture {
   requirementRef: string;
 }
 
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'T',
+  GIT_AUTHOR_EMAIL: 't@example.invalid',
+  GIT_COMMITTER_NAME: 'T',
+  GIT_COMMITTER_EMAIL: 't@example.invalid',
+};
+
 function project(judgeBody: string, requirementText = REQUIREMENT): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'takumi-feedback-'));
   const worktree = join(dir, 'worktree');
   mkdirSync(worktree, { recursive: true });
+  // A real delivery worktree: a repository of its own, with its own HEAD — which is the commit the
+  // acceptance is about (a verdict that names the project's HEAD names the wrong tree).
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: worktree, env: GIT_ENV });
+  writeFileSync(join(worktree, 'deliverable.txt'), 'the delivered thing\n');
+  execFileSync('git', ['add', '-A'], { cwd: worktree, env: GIT_ENV });
+  execFileSync('git', ['commit', '-q', '-m', 'feat: the delivery'], { cwd: worktree, env: GIT_ENV });
   mkdirSync(join(dir, 'docs/requirements'), { recursive: true });
   writeFileSync(join(dir, 'docs/requirements/feature.yaml'), requirementText);
   writeFileSync(join(dir, 'forge.sh'), forge(judgeBody));
@@ -135,6 +150,35 @@ const acceptArtifactOf = (dir: string): string =>
   join(dir, '.takumi', 'artifacts', 'acceptance', `ACCEPT-${'001'}.md`);
 
 const requirementOf = (f: Fixture): string => readFileSync(join(f.dir, f.requirementRef), 'utf8');
+
+/** The commit the delivery worktree is at — what an ACCEPT artifact must name. */
+const deliveredHeadOf = (f: Fixture): string =>
+  execFileSync('git', ['rev-parse', 'HEAD'], { cwd: f.worktree, encoding: 'utf8', env: GIT_ENV }).trim();
+
+test('the ACCEPT artifact names the commit in the WORKTREE, not the project repository\'s HEAD', async () => {
+  const f = project(passingJudge);
+  try {
+    const res = await executeWorkflow(workflow(), context(f));
+    assert.equal(res.status, 'completed');
+    const artifact = readFileSync(acceptArtifactOf(f.dir), 'utf8');
+    assert.match(artifact, new RegExp(`head: ${deliveredHeadOf(f)}`), 'the delivered commit is the one on record');
+    assert.ok(
+      !artifact.includes(projectHeadOf(f)) || projectHeadOf(f) === deliveredHeadOf(f),
+      'the project repository\'s HEAD must not be recorded as the thing that was judged',
+    );
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+/** The project repository's own HEAD, made distinguishable from the worktree's. */
+function projectHeadOf(f: Fixture): string {
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: f.dir, env: GIT_ENV });
+  writeFileSync(join(f.dir, 'project.txt'), 'the project\n');
+  execFileSync('git', ['add', '-A'], { cwd: f.dir, env: GIT_ENV });
+  execFileSync('git', ['commit', '-q', '-m', 'chore: the project'], { cwd: f.dir, env: GIT_ENV });
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: f.dir, encoding: 'utf8', env: GIT_ENV }).trim();
+}
 
 test('feedback: a failed acceptance writes a REJECT artifact and a feedback entry into the document', async () => {
   const f = project(failingJudge);
