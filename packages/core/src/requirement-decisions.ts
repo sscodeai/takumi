@@ -20,7 +20,11 @@ export const JUDGE_RELATION_VOCABULARY = [
   'duplicate-resolution',
   'malformed-row-accounting',
   'independent-aggregation',
+  'browser-scenario',
 ] as const;
+
+/** The report formats a `browser-scenario` may name as its evidence, beyond the command's exit code. */
+export const JUDGE_SCENARIO_REPORTS = ['ctrf', 'junit', 'tap'] as const;
 
 /**
  * The MEANING of a decision's answer, per relation kind (ADR-031). Prose is for humans; a judge needs to
@@ -70,8 +74,35 @@ export interface OutputLineFormat {
   fields: string[];
 }
 
+/**
+ * A declared end-to-end scenario of the delivered surface (ADR-035). The document says what to START, what
+ * to run and what to expect; the forged judge runs it and decides from the command's exit code and,
+ * when declared, the report file it wrote. Nothing about a browser, a framework or a network lives in the
+ * judge — the commands are the document's own, so the check is reproducible and the judge stays independent
+ * of the thing it judges.
+ */
+export interface Scenario {
+  id: string;
+  /** The command that must exit 0 for the scenario to hold, run in the delivery worktree. */
+  run: string;
+  /** The decision this scenario settles, when it settles one. */
+  decides?: string;
+  /** How the surface is brought up (optional); the judge starts it and always kills what it started. */
+  start?: string;
+  /** A URL the judge waits for (bounded) before running `run`, when `start` was given. */
+  url?: string;
+  /** Where the verdict lives when the command writes a report rather than trusting its exit code. */
+  report?: string;
+  reportPath?: string;
+  /** Required: the criterion in the human's words, so a failure reads as a requirement, not a script. */
+  expect: string;
+  timeoutMs?: number;
+}
+
 export interface DeliverableBlock {
   run?: string;
+  /** The declared scenarios, in document order (ADR-035). */
+  scenarios: Scenario[];
   /** The declared output shape a judge may parse, as written. */
   outputFormat?: unknown;
   /** The typed input world, and the shapes a judge may parse, when the document declares them. */
@@ -93,10 +124,39 @@ export interface Decision {
   checkedAs?: string;
 }
 
+/**
+ * The `scenarios:` list inside `deliverable`, as written. Flat keys, because the forge reads the document
+ * line-wise and a nested structure it cannot read would just move the guesswork (ADR-035).
+ */
+export function parseScenarios(text: string): Scenario[] {
+  const list = deliverableOf(text)?.['scenarios'];
+  if (!Array.isArray(list)) return [];
+  const scenarios: Scenario[] = [];
+  for (const raw of list) {
+    if (raw === null || typeof raw !== 'object') continue;
+    const entry = raw as Record<string, unknown>;
+    const id = stringOf(entry['id']);
+    if (id === undefined) continue;
+    const number = entry['timeoutMs'];
+    scenarios.push({
+      id,
+      run: stringOf(entry['run']) ?? '',
+      expect: stringOf(entry['expect']) ?? '',
+      ...(stringOf(entry['decides']) === undefined ? {} : { decides: stringOf(entry['decides']) }),
+      ...(stringOf(entry['start']) === undefined ? {} : { start: stringOf(entry['start']) }),
+      ...(stringOf(entry['url']) === undefined ? {} : { url: stringOf(entry['url']) }),
+      ...(stringOf(entry['report']) === undefined ? {} : { report: stringOf(entry['report']) }),
+      ...(stringOf(entry['report_path']) === undefined ? {} : { reportPath: stringOf(entry['report_path']) }),
+      ...(typeof number === 'number' && Number.isFinite(number) ? { timeoutMs: number } : {}),
+    });
+  }
+  return scenarios;
+}
+
 export interface DecisionBinding {
   /** `REL-003`, `DIFF-001`, … the id the judge reports a check under. */
   checkId: string;
-  kind: 'relation' | 'anchor';
+  kind: 'relation' | 'anchor' | 'scenario';
   /** `duplicate-resolution`, `independent-aggregation`, … */
   relation: string;
   /** The `AMB-nnn` this check settles; absent when the check exercises no decision. */
@@ -150,7 +210,7 @@ export function parseDecisionBindings(text: string): DecisionBinding[] {
   if (parsed === null || typeof parsed !== 'object') return [];
   const deliverable = (parsed as { deliverable?: unknown }).deliverable;
   if (deliverable === null || typeof deliverable !== 'object') return [];
-  const block = deliverable as { relations?: unknown; differential?: unknown };
+  const block = deliverable as { relations?: unknown; differential?: unknown; scenarios?: unknown };
   const bindings: DecisionBinding[] = [];
   const collect = (list: unknown, kind: 'relation' | 'anchor'): void => {
     if (!Array.isArray(list)) return;
@@ -166,6 +226,12 @@ export function parseDecisionBindings(text: string): DecisionBinding[] {
   };
   collect(block.relations, 'relation');
   collect(block.differential, 'anchor');
+  // A scenario is a check like any other: it may settle a decision (`decides:`), and then its verdict is
+  // reported as a DEC-nnn line exactly as a relation's is (ADR-035).
+  for (const scenario of parseScenarios(text)) {
+    if (scenario.decides === undefined || scenario.decides.length === 0) continue;
+    bindings.push({ checkId: scenario.id, kind: 'scenario', relation: 'browser-scenario', decides: scenario.decides });
+  }
   return bindings;
 }
 
@@ -241,6 +307,12 @@ export function parseOutputLines(text: string): OutputLineFormat[] {
   return lines;
 }
 
+/** Whether a top-level key under `deliverable` was WRITTEN at all (an empty list parses as `[]`, so the
+ *  validator cannot tell "declared empty" from "absent" by looking at the parsed value alone). */
+function objectHasKey(text: string, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(deliverableOf(text) ?? {}, key);
+}
+
 /** The `deliverable` mapping as written, for the parsers above. */
 function deliverableOf(text: string): Record<string, unknown> | undefined {
   let parsed: unknown;
@@ -266,6 +338,7 @@ export function parseDeliverableBlock(text: string): DeliverableBlock | undefine
     ...(block['output_format'] === undefined ? {} : { outputFormat: block['output_format'] }),
     ...(input === undefined ? {} : { input }),
     outputLines: parseOutputLines(text),
+    scenarios: parseScenarios(text),
     bindings: parseDecisionBindings(text),
   };
 }
@@ -417,6 +490,51 @@ export function validateRequirementDocument(text: string): string[] {
         issues.push(
           `${decision.id} says checkedAs: "latest-start-date", which picks the row with the latest date, but input_format declares ${dateColumns} column(s) with role date: the judge has nothing to order by`,
         );
+      }
+    }
+
+    // ADR-035: a scenario is a check the document declares, so the same front-door discipline applies —
+    // a scenario that cannot be run, cannot be read back, or settles nothing is refused BEFORE a human
+    // confirms it, and long before an implementation is paid for.
+    const scenarioIds = block.scenarios.map((s) => s.id);
+    scenarioIds.forEach((id, index) => {
+      const expected = `SCN-${String(index + 1).padStart(3, '0')}`;
+      if (id !== expected) {
+        issues.push(`the SCN ids are not sequential: entry ${index + 1} is ${id} where ${expected} was expected, and the judge reports a scenario by that id`);
+      }
+    });
+    if (objectHasKey(text, 'scenarios') && block.scenarios.length === 0) {
+      issues.push('the deliverable block declares an empty scenarios list: a scenario block that declares nothing is a document claiming a check it does not have');
+    }
+    const relationIds = new Set(block.bindings.filter((b) => b.kind !== 'scenario').map((b) => b.checkId));
+    for (const scenario of block.scenarios) {
+      if (relationIds.has(scenario.id)) {
+        issues.push(`${scenario.id} is declared twice (as a scenario and as a relation): a check id has to identify one check`);
+      }
+      if (scenario.run.trim().length === 0) {
+        issues.push(`${scenario.id} declares no run: a scenario with no command to run is not a check`);
+      }
+      if (scenario.expect.trim().length === 0) {
+        issues.push(`${scenario.id} declares no expect: the criterion has to be in words a human can read, because the scenario's verdict is reported against it`);
+      }
+      if ((scenario.report === undefined) !== (scenario.reportPath === undefined)) {
+        issues.push(
+          scenario.report === undefined
+            ? `${scenario.id} declares report_path but no report: the judge would read a file without being told what wrote it (report: ${JUDGE_SCENARIO_REPORTS.join(' | ')})`
+            : `${scenario.id} declares report "${scenario.report}" but no report_path: a report the judge cannot find is not evidence`,
+        );
+      }
+      if (scenario.report !== undefined && !(JUDGE_SCENARIO_REPORTS as readonly string[]).includes(scenario.report)) {
+        issues.push(`${scenario.id} declares the report format "${scenario.report}", which no judge can read (implemented: ${JUDGE_SCENARIO_REPORTS.join(', ')})`);
+      }
+      if (scenario.url !== undefined && scenario.start === undefined) {
+        issues.push(`${scenario.id} declares a url but nothing to start: the judge waits for a surface it was never told how to bring up`);
+      }
+      if (scenario.timeoutMs !== undefined && scenario.timeoutMs < 1000) {
+        issues.push(`${scenario.id} declares timeoutMs ${scenario.timeoutMs}: a scenario is given at least a second, or the timeout is a refusal nobody sees`);
+      }
+      if (scenario.decides !== undefined && !decisionById.has(scenario.decides)) {
+        issues.push(`${scenario.id} settles ${scenario.decides}, which is not a decision in this document`);
       }
     }
 

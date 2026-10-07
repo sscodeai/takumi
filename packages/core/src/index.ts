@@ -78,11 +78,13 @@ export {
   JUDGE_COLUMN_ROLES,
   JUDGE_DECISION_MODES,
   JUDGE_FIELD_ROLES,
+  JUDGE_SCENARIO_REPORTS,
   JUDGE_RELATION_VOCABULARY,
   decisionModesFor,
   parseDeliverableBlock,
   parseInputFormat,
   parseOutputLines,
+  parseScenarios,
   parseRequirements,
   validateRequirementDocument,
 } from './requirement-decisions.js';
@@ -92,6 +94,7 @@ export type {
   DeliverableBlock,
   InputFormat,
   OutputLineFormat,
+  Scenario,
 } from './requirement-decisions.js';
 export { FEEDBACK_BRIEF_MARKER, analyseFeedback, failuresWithoutDecision, renderFeedbackBrief } from './feedback-brief.js';
 export type { AnalysedFailure, AnalysedFeedback, FailureKind } from './feedback-brief.js';

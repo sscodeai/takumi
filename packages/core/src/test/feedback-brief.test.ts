@@ -247,6 +247,46 @@ test('validate: the confirmed PoC document itself passes the contract', () => {
   assert.deepEqual(validateRequirementDocument(real), []);
 });
 
+test('validate: the scenario block is checked before a human confirms it (ADR-035)', () => {
+  const scenarios = (block: string): string => `${DOC.split('\n  relations:')[0]}\n${block}\n  relations:\n    - id: REL-001\n      relation: row-order-invariance\n      description: Shuffling the rows changes nothing.\n`;
+
+  // A scenario with no command, and one whose report the judge could never find.
+  const noRun = scenarios('  scenarios:\n    - id: SCN-001\n      expect: the page shows the summary\n');
+  assert.match(validateRequirementDocument(noRun).join(' | '), /SCN-001 declares no run/);
+
+  const orphanReport = scenarios(
+    '  scenarios:\n    - id: SCN-001\n      run: "bash e2e.sh"\n      expect: the page shows the summary\n      report: ctrf\n',
+  );
+  assert.match(validateRequirementDocument(orphanReport).join(' | '), /declares report "ctrf" but no report_path/);
+
+  const unknownFormat = scenarios(
+    '  scenarios:\n    - id: SCN-001\n      run: "bash e2e.sh"\n      expect: x\n      report: allure\n      report_path: r.json\n',
+  );
+  assert.match(validateRequirementDocument(unknownFormat).join(' | '), /report format "allure", which no judge can read/);
+
+  const urlWithoutStart = scenarios(
+    '  scenarios:\n    - id: SCN-001\n      run: "bash e2e.sh"\n      expect: x\n      url: "http://127.0.0.1:9/"\n',
+  );
+  assert.match(validateRequirementDocument(urlWithoutStart).join(' | '), /declares a url but nothing to start/);
+
+  const emptyList = scenarios('  scenarios:\n    - id: SCN-002\n      run: "bash e2e.sh"\n      expect: x\n');
+  assert.match(validateRequirementDocument(emptyList).join(' | '), /SCN ids are not sequential: entry 1 is SCN-002/);
+
+  // A scenario that settles a decision the document does not contain.
+  const dangling = scenarios(
+    '  scenarios:\n    - id: SCN-001\n      run: "bash e2e.sh"\n      expect: x\n      decides: AMB-999\n',
+  );
+  assert.match(validateRequirementDocument(dangling).join(' | '), /SCN-001 settles AMB-999, which is not a decision in this document/);
+
+  // A well-formed scenario passes, and its decision is bound (so a blocking decision may be settled by a
+  // scenario exactly as a relation settles it).
+  const good = scenarios(
+    '  scenarios:\n    - id: SCN-001\n      run: "bash e2e.sh"\n      expect: the page shows the summary\n      report: ctrf\n      report_path: "e2e/report.json"\n',
+  );
+  const issues = validateRequirementDocument(good);
+  assert.deepEqual(issues.filter((i) => i.includes('SCN-')), [], 'a well-formed scenario is not refused');
+});
+
 test('validate: the deliverable block is checked before a human confirms it (ADR-031)', () => {
   // No invocation: a judge with no way to run the thing cannot check anything.
   const noRun = DOC.replace('  run: "node csv-summary.mjs {csv}"\n', '');

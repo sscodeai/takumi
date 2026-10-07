@@ -58,6 +58,14 @@ deliverable:
     total_line:
       shape: "TOTAL <count>"
       fields: [count]
+  scenarios:                            # the surface a person LOOKS AT, when the request asks for one
+    - id: SCN-001
+      run: "bash e2e/check.sh"          # required: exits 0 when the scenario holds
+      expect: "the page lists one row per station with count, min, max and mean"   # required, in words
+      start: "python3 -m http.server 8731 -d site"    # optional: the judge starts this and always kills it
+      url: "http://127.0.0.1:8731/index.html"         # optional: the judge waits for this before running
+      report: ctrf                    ## optional: one of the three formats below (see rule 13)
+      report_path: "e2e/report.json"  # required when `report` is given
   relations:                            # what a judge must be able to CHECK, from output alone
     - id: REL-001
       relation: additivity
@@ -130,6 +138,8 @@ from your text alone.
       - `duplicate-resolution`   what happens when a key repeats (needs a decision)
       - `malformed-row-accounting`  what happens to a bad row (needs a decision)
       - `independent-aggregation`   recompute the answer independently and compare (differential)
+      - `browser-scenario`       run a declared end-to-end scenario of the surface and judge it by the
+                                 command's exit code and the report it writes (see rule 13)
     A relation outside this list will be REFUSED at acceptance time (after the implementation has been
     paid for), so use only these. Every BLOCKING decision must be settled by one of them, through
     `decides: <AMB-nnn>` — a blocking decision that no relation exercises is refused as well. A decision
@@ -152,9 +162,17 @@ from your text alone.
  instead of the decision is REFUSED — before the human confirms it, and again when the judge is
  forged — so put it in the right place (the first real run of this prompt put all three on the
  relations and the gate refused the document, which is the gate working).
-13. `differential` declares at least one anchor (`DIFF-nnn`) that recomputes part of the answer
+13. `scenarios` declares end-to-end checks of a surface a person interacts with (a page, a CLI session, a
+    service). The judge runs YOUR commands: it starts what `start` names, waits for `url`, runs `run`,
+    reads the `report` at `report_path` when one is declared, and always kills what it started. A scenario
+    that exits 0 but whose report counts a failing test FAILS; a report that cannot be read FAILS — never a
+    silent pass. Give at most a few scenarios, each naming one thing a human would check; a scenario whose
+    only test is "the command exited 0" is worth less than a `relation` that recomputes a number. Refused
+    before a human confirms: no `run`, no `expect`, `report` without `report_path` (or the reverse), a
+    `report` outside the three formats, `url` with nothing to `start`, ids that are not `SCN-nnn` in order.
+14. `differential` declares at least one anchor (`DIFF-nnn`) that recomputes part of the answer
     independently of the tool's own arithmetic. Equality with the tool's own output is not a check.
-14. Prose criteria that no fixture can decide (performance, file-size limits, human readability) stay as
+15. Prose criteria that no fixture can decide (performance, file-size limits, human readability) stay as
     acceptance criteria on their requirements and are NEVER claimed by a relation: the judge reports them
     as not mechanised, and a criterion reported as checked when it is not is the worst thing you can
     emit here.

@@ -97,6 +97,88 @@ if [ -z "$RELATIONS" ]; then
   refuse "the requirement document declares no deliverable.relations: a judge with nothing to check is not a judge"
 fi
 
+# --- the declared scenarios (ADR-035) -----------------------------------------------------------
+# Flat, line-wise: `id|run|expect|start|url|report|report_path|timeoutMs|decides`, one record per
+# scenario, values joined with the unit separator so a command containing spaces survives.
+SCENARIOS=$(awk '
+  function flush() {
+    if (id == "") return
+    # TAB-separated, one scenario per line: `read -r` splits it back without treating the separator as a
+    # regular expression, which is how the first attempt lost every field after the fourth.
+    sep = "\t"
+    print id sep run sep expect sep start sep url sep report sep rpath sep tmo sep decides
+    id = ""; run = ""; expect = ""; start = ""; url = ""; report = ""; rpath = ""; tmo = ""; decides = ""
+  }
+  # The value of `key:` — with the YAML list marker stripped first. A scenario id is the one field that
+  # arrives as `- id: SCN-001`, and `sub("^[[:space:]]*id:…")` cannot match it (the `- ` is not
+  # whitespace), so the whole line would become the id and every later field would read as empty
+  # (docs/bugs-fixed.md #41).
+  function ind(s) { match(s, /^[ ]*/); return RLENGTH }
+  function unmark(s) { sub(/^[[:space:]]*-[[:space:]]*/, "", s); return s }
+  function val(s, k) { s = unmark(s); sub("^[[:space:]]*" k ":[[:space:]]*", "", s); gsub(/^"|"$/, "", s); return s }
+  /^[[:space:]]*scenarios:[[:space:]]*$/ { ins = 1; si = 2; next }
+  # The section ends at the next key INDENTED NO FURTHER than the scenarios key itself. The previous
+  # terminator only matched an unindented key, so a document declaring scenarios under deliverable never
+  # left the block and the parser kept reading later keys (a decides: AMB-nnn far below became a
+  # report field) — docs/bugs-fixed.md #41. Apostrophes and backticks are absent from these comments on
+  # purpose: a single quote inside an unquoted shell context closes the program and the rest of the block
+  # becomes shell syntax.
+  ins && ind($0) <= si && $0 ~ /^[[:space:]]*[a-zA-Z_]+:[[:space:]]*$/ { flush(); ins = 0; next }
+  ins && /^[[:space:]]*-[[:space:]]*id:[[:space:]]*SCN-/ { flush(); id = val($0, "id"); next }
+  ins && /^[[:space:]]*run:[[:space:]]*/ { run = val($0, "run"); next }
+  ins && /^[[:space:]]*expect:[[:space:]]*/ { expect = val($0, "expect"); next }
+  ins && /^[[:space:]]*start:[[:space:]]*/ { start = val($0, "start"); next }
+  ins && /^[[:space:]]*url:[[:space:]]*/ { url = val($0, "url"); next }
+  ins && /^[[:space:]]*report:[[:space:]]*/ { report = val($0, "report"); next }
+  ins && /^[[:space:]]*report_path:[[:space:]]*/ { rpath = val($0, "report_path"); next }
+  ins && /^[[:space:]]*timeoutMs:[[:space:]]*/ { tmo = val($0, "timeoutMs"); next }
+  ins && /^[[:space:]]*decides:[[:space:]]*/ { decides = val($0, "decides"); next }
+  END { flush() }
+' "$DOC")
+
+SCENARIO_IDS=" $(printf '%s\n' "$SCENARIOS" | awk -F'\t' 'NF { printf "%s ", $1 }')"
+scenario_field() { # $1 id, $2 field number
+  # awk, and not `while IFS=$'\t' read -r f1 … f9`: TAB is an IFS WHITESPACE character, so `read` folds a
+  # run of tabs into one separator and every field after an EMPTY one shifts left — a scenario with no
+  # `run:` reported its own `expect:` text as its run (docs/bugs-fixed.md #41).
+  printf '%s\n' "$SCENARIOS" | awk -F'\t' -v id="$1" -v n="$2" '$1 == id { print $n; exit }'
+}
+has_scenario() { case "$SCENARIO_IDS" in *" $1 "*) echo yes ;; *) echo no ;; esac; }
+
+SCENARIO_REPORT_MODES="ctrf junit tap"
+# The declared scenarios are checks too (ADR-035): they join the dispatch list as
+# `<SCN-id> browser-scenario`, so the loop that runs every relation runs them as well and every downstream
+# rule (a blocking decision must be exercised, DEC-nnn lines, the check-id sets) sees them like any other.
+for sid in $SCENARIO_IDS; do
+  [ -z "$sid" ] && continue
+  # The separator is a LEADING newline: `$RELATIONS` does not end in one (command substitution strips
+  # trailing newlines), and appending `$(printf '%s\n' …)` also strips it — which glued the last relation
+  # and the first scenario into one unparseable record.
+  RELATIONS="$RELATIONS$(printf '\n%s browser-scenario' "$sid")"
+done
+
+while read -r sid; do
+  [ -z "${sid:-}" ] && continue
+  srun=$(scenario_field "$sid" 2)
+  [ -n "$srun" ] || refuse "the scenario $sid declares no run: a scenario with no command to run is not a check"
+  [ -n "$(scenario_field "$sid" 3)" ] || refuse "the scenario $sid declares no expect: the criterion has to be in words a human can read"
+  sreport=$(scenario_field "$sid" 6)
+  srpath=$(scenario_field "$sid" 7)
+  [ -n "$sreport" ] || [ -z "$srpath" ] || refuse "the scenario $sid declares report_path but no report: the judge would read a file without being told what wrote it (report: $SCENARIO_REPORT_MODES)"
+  [ -z "$sreport" ] || [ -n "$srpath" ] || refuse "the scenario $sid declares report \"$sreport\" but no report_path: a report the judge cannot find is not evidence"
+  # Only a DECLARED report is checked: a scenario that judges by exit code alone is complete without one,
+  # and matching `""` against the format list refused every such scenario (docs/bugs-fixed.md #41).
+  if [ -n "$sreport" ]; then
+    case " $SCENARIO_REPORT_MODES " in
+      *" $sreport "*) ;;
+      *) refuse "the scenario $sid declares the report format \"$sreport\", which no judge can read (implemented: $SCENARIO_REPORT_MODES)" ;;
+    esac
+  fi
+done <<EOF
+$SCENARIO_IDS
+EOF
+
+
 # The ambiguities: id|blocking|chosen|checkedAs|options (options joined by ';').
 AMBIGUITIES=$(awk '
   /^[[:space:]]*ambiguities:[[:space:]]*$/ { ina = 1; next }
@@ -124,7 +206,7 @@ decides_of() { # $1 relation/anchor id -> the decision it exercises, or empty
 has_rel() { printf '%s\n' "$RELATIONS" | awk -v r="$1" '$2 == r { f = 1 } END { print f ? "yes" : "no" }'; }
 
 # Every declared relation must be one this forge implements: refusing beats a silent gap.
-IMPLEMENTED=" row-order-invariance additivity duplicate-resolution malformed-row-accounting independent-aggregation "
+IMPLEMENTED=" row-order-invariance additivity duplicate-resolution malformed-row-accounting independent-aggregation browser-scenario "
 MISSING=""
 while read -r id relation; do
   [ -z "${relation:-}" ] && continue
@@ -605,6 +687,65 @@ run_tool() { # $1 = absolute csv path; leaves the tool's combined output in RUN_
   cmd=$(printf '%s' "$RUN_TEMPLATE" | sed "s|{csv}|$csv|g")
   RUN_OUT=$( ( cd "$WORKTREE" && sh -c "$cmd" ) 2>&1 ); RUN_STATUS=$?
 }
+
+# --- declared scenarios (ADR-035) ---------------------------------------------------------------
+# The judge runs the document's OWN commands: it starts what the document says to start, waits for the
+# surface the document names, runs the scenario command, reads the report the document names, and ALWAYS
+# kills what it started — on success, on failure and on the report path. No browser, no framework and no
+# network assumption lives here: an unreadable report is a failure, never a pass.
+SCENARIO_PIDS=""
+start_scenario_surface() { # $1 scenario id, $2 command -> pid in SCENARIO_PID (its own process group leader)
+  SCENARIO_PID=""
+  [ -n "$2" ] || return 0
+  # `setsid` makes the started surface the leader of its OWN process group, so the kill below reaches the
+  # real server and not just the `sh -c` wrapper that started it. Without it a leaked `python3 -m
+  # http.server` keeps answering and the NEXT run's scenario passes for the wrong reason (bug #41).
+  setsid sh -c "cd '$WORKTREE' && exec sh -c '$2'" >"$JUDGE_DIR/$1-surface.log" 2>&1 &
+  SCENARIO_PID=$!
+  SCENARIO_PIDS="$SCENARIO_PIDS $SCENARIO_PID"
+}
+kill_scenario_surfaces() {
+  local p
+  for p in $SCENARIO_PIDS; do
+    # Negative pid = the whole process group. TERM first, then KILL for anything that ignores it.
+    kill -TERM "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+    sleep 1
+    kill -KILL "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+  done
+  SCENARIO_PIDS=""
+}
+wait_for_url() { # $1 url, $2 seconds -> 0 when it answered
+  local i=0 max="$2"
+  while [ "$i" -lt "$max" ]; do
+    if curl -fsS -o /dev/null --max-time 2 "$1" 2>/dev/null; then return 0; fi
+    i=$((i + 1)); sleep 1
+  done
+  return 1
+}
+scenario_report_failures() { # $1 format, $2 path -> prints a reason, or nothing when the report is clean
+  local fmt="$1" path="$2"
+  [ -f "$path" ] || { printf 'the report %s does not exist' "$path"; return 0; }
+  case "$fmt" in
+    ctrf)
+      grep -q '"reportFormat"[[:space:]]*:[[:space:]]*"CTRF"' "$path" || { printf '%s does not look like a CTRF report' "$path"; return 0; }
+      awk '
+        { if (match($0, /"failed"[[:space:]]*:[[:space:]]*[0-9]+/)) { m = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", m); if (m + 0 > 0) { print "the CTRF report says " m " failing test(s)"; found = 1 } } }
+        END { if (!found) exit 0 }
+      ' "$path"
+      ;;
+    junit)
+      grep -qiE '<testsuites|<testsuite' "$path" || { printf '%s does not look like a JUnit report' "$path"; return 0; }
+      n=$(grep -oE 'failures="[0-9]+"' "$path" | grep -oE '[0-9]+' | awk '{ s += $1 } END { print s + 0 }')
+      [ "${n:-0}" -eq 0 ] || printf 'the JUnit report counts %s failing test(s)' "$n"
+      ;;
+    tap)
+      n=$(grep -cE '^not ok' "$path" || true)
+      [ "${n:-0}" -eq 0 ] || printf 'the TAP report has %s not-ok line(s)' "$n"
+      ;;
+    *) printf 'the judge does not implement the report format "%s"' "$fmt" ;;
+  esac
+}
 HEADER
 
   printf '\nRUN_TEMPLATE=%s\n' "'$(sq "$RUN_TEMPLATE")'"
@@ -626,6 +767,14 @@ HEADER
   printf 'TOTAL_RE=%s\n' "'$(sq "$TOTAL_RE")'"
   printf 'SKIP_RE=%s\n' "'$(sq "$SKIP_RE")'"
   printf 'ROW_ORDER_NOTE=%s\n' "'$(sq "$ROW_ORDER_NOTE")'"
+  # The scenarios, as records the judge reads back (unit-separated, so a command with spaces survives).
+  printf '\nSCENARIOS=%s\n' "'$(sq "$SCENARIOS")'"
+  # The reader is emitted as ONE printf with a quoted TAB in the field separator. `read -r` in a pipeline
+  # subshell cannot stop the loop on a match (`return` only leaves the subshell, and the loop then reads the
+  # NEXT record), which returned another record's field — how a scenario's report came back as `AMB-002`.
+  printf 'scenario_field() { # $1 id, $2 field number\n'
+  printf '  printf "%%s\\n" "$SCENARIOS" | awk -F"\t" -v id="$1" -v n="$2" '"'"'$1 == id { print $n; exit }'"'"'\n'
+  printf '}\n'
 
   emit_fixture() { # $1 filename, $2 content
     printf 'cat > "$FIX/%s" <<%sTAKUMI_FIXTURE%s\n%s\nTAKUMI_FIXTURE\n' "$1" "'" "'" "$2"
@@ -844,6 +993,11 @@ BODY
 
   cat <<'RUNS'
 
+# Whatever the judge started, it kills — including when a scenario fails or the run ends early. A leaked
+# server would make the NEXT run's scenario pass for the wrong reason (the surface from this run still
+# answering), which is the kind of rot that never announces itself.
+trap 'kill_scenario_surfaces' EXIT INT TERM
+
 # --- the relations (one check per id the document declared) --------------------------------------
 run_tool "$FIX/base.csv"
 base_output="$RUN_OUT"
@@ -995,6 +1149,47 @@ else
   fi
 fi
 DIFF001
+        ;;
+      browser-scenario)
+        cat <<'SCN' | sed "s/@RID@/$rid/g"
+sid="@RID@"
+srun=$(scenario_field "$sid" 2)
+sexpect=$(scenario_field "$sid" 3)
+sstart=$(scenario_field "$sid" 4)
+surl=$(scenario_field "$sid" 5)
+sreport=$(scenario_field "$sid" 6)
+srpath=$(scenario_field "$sid" 7)
+stmo=$(scenario_field "$sid" 8)
+[ -n "$stmo" ] || stmo=60
+if [ -z "$srun" ]; then
+  relation not_ok "$sid" "browser-scenario: $sexpect" "the forged judge has no run for this scenario"
+else
+  start_scenario_surface "$sid" "$sstart"
+  if [ -n "$surl" ]; then
+    if ! wait_for_url "$surl" 20; then
+      relation not_ok "$sid" "$sexpect" "the surface the document declares ($surl) did not answer within 20s of starting \"$sstart\""
+      kill_scenario_surfaces
+      sid=""
+    fi
+  fi
+  if [ -n "$sid" ]; then
+    scn_out=$( ( cd "$WORKTREE" && timeout "$stmo" sh -c "$srun" ) 2>&1 )
+    scn_status=$?
+    reason=""
+    if [ "$scn_status" != 0 ]; then
+      [ "$scn_status" = 124 ] && reason="the scenario command timed out after ${stmo}s" || reason="the scenario command exited $scn_status"
+    elif [ -n "$sreport" ]; then
+      reason=$(scenario_report_failures "$sreport" "$WORKTREE/$srpath")
+    fi
+    kill_scenario_surfaces
+    if [ -z "$reason" ]; then
+      relation ok "$sid" "$sexpect"
+    else
+      relation not_ok "$sid" "$sexpect" "$reason: $(printf '%s' "$scn_out" | tail -3 | tr '\n' ' ')"
+    fi
+  fi
+fi
+SCN
         ;;
     esac
   done <<EOF
