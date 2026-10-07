@@ -202,6 +202,10 @@ Usage:
   takumi init                          Initialize a Takumi project
   takumi run "<prompt>"                Run an agent task
   takumi run requirements.md [--runtime fake] [--workflow jp-si-standard]
+                                       A workflow with a 'publish' step publishes through the
+                                       'delivery:' section of takumi.yaml
+                                       (e.g. delivery: { provider: forgejo, repo: owner/name });
+                                       with no such section the run is refused BEFORE it starts
   takumi runtime list                  List available runtimes
   takumi board [--provider github --repo owner/name]
                                        Read-only view of a task board (ADR-006)

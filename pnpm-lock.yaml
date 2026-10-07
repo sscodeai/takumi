@@ -38,6 +38,9 @@ importers:
       '@takumi/delivery-fake':
         specifier: workspace:*
         version: link:../../deliveries/fake
+      '@takumi/delivery-forgejo':
+        specifier: workspace:*
+        version: link:../../packages/delivery-forgejo
       '@takumi/delivery-git':
         specifier: workspace:*
         version: link:../../deliveries/git

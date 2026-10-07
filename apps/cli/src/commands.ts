@@ -15,6 +15,8 @@ import {
 import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
 import { CliRuntimeAdapter } from '@takumi/runtime-cli';
+import { createDeliveryFromSection } from './delivery-command.js';
+import type { DeliveryProviderWithReporting, DeliverySection } from './delivery-command.js';
 
 /**
  * Interactive approval gate. Prompts the user with [a] approve / [r] reject /
@@ -74,6 +76,13 @@ export interface ProjectConfig {
     deliveries?: string;
   };
   artifacts: string;
+  /**
+   * The host a `publish` step publishes through (ADR-007 / ADR-037), selected by configuration.
+   * Absent means a workflow that declares a `publish` step is refused BEFORE the run starts: a run
+   * that spends its work and only then discovers it cannot publish is the failure that refusal
+   * exists to prevent.
+   */
+  delivery?: DeliverySection;
   /** Audit trail dir (default `.takumi/audit`). */
   audit?: string;
   /**
@@ -302,6 +311,23 @@ export async function runTask(opts: RunOptions): Promise<{
 
   if (opts.workflow) {
     const wf = await loadWorkflow(opts.cwd, opts.config, opts.workflow);
+    // THE FRONT DOOR (ADR-037). A workflow that declares a `publish` step needs a host to publish
+    // to, and that host comes from `takumi.yaml`. Building it here — before any step runs — is the
+    // whole point: the alternative is a run that spends its work (and an agent's money) and only
+    // then discovers it cannot publish. An invalid section (an unknown provider, a missing repo)
+    // refuses here too, naming what is wrong.
+    const publishSteps = wf.steps.filter((s) => s.type === 'publish').map((s) => s.id);
+    let delivery: DeliveryProviderWithReporting | undefined;
+    if (opts.config.delivery !== undefined) {
+      delivery = await createDeliveryFromSection(opts.config.delivery);
+    } else if (publishSteps.length > 0) {
+      throw new Error(
+        `workflow "${wf.name}" declares a publish step [${publishSteps.join(', ')}] but takumi.yaml has no ` +
+          '`delivery:` section: there is no host to publish to, and the run would discover that only after ' +
+          'spending its work. Add a `delivery:` section naming the provider and its options ' +
+          '(e.g. `delivery: { provider: forgejo, repo: owner/name }`).',
+      );
+    }
     // Durable resume: rebuild completed steps from the newest audit record.
     let resumeCtx: { completed: Map<string, WorkflowStepResult> } | undefined;
     if (opts.resume) {
@@ -342,6 +368,18 @@ export async function runTask(opts: RunOptions): Promise<{
         // engine keeps no opinion about where a project keeps its workflows.
         loadWorkflow: (ref: string) => loadWorkflow(opts.cwd, opts.config, ref),
         resume: resumeCtx,
+        ...(delivery === undefined ? {} : { delivery }),
+        // The `publish` step falls back to these when the step itself declares neither: the base
+        // branch and remote are deployment decisions, so a project names them once in takumi.yaml
+        // rather than in every workflow.
+        ...(opts.config.delivery === undefined
+          ? {}
+          : {
+              deliveryDefaults: {
+                ...(opts.config.delivery.baseBranch === undefined ? {} : { baseBranch: opts.config.delivery.baseBranch }),
+                ...(opts.config.delivery.remote === undefined ? {} : { remote: opts.config.delivery.remote }),
+              },
+            }),
         ...(opts.confirmedRequirement === undefined ? {} : { confirmedRequirement: opts.confirmedRequirement }),
         ...(opts.worktree === undefined ? {} : { worktree: opts.worktree }),
         onApproval: async (req) => {
