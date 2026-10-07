@@ -1,0 +1,397 @@
+{
+  "redaction": "the host address in this transcript was replaced with forgejo.internal.invalid; the unredacted transcript is retained by the operator outside the repository",
+  "base": "http://forgejo.internal.invalid:3000",
+  "owner": "dev",
+  "repo": "takumi-delivery-selftest",
+  "runId": "f93e2545",
+  "evidence": [
+    {
+      "step": "1. create the throwaway repository",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest",
+      "status": 200,
+      "body": "{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":25,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":1,\"open_pr_counter\":0,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:01:55+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki\":true,\"wiki_branch\":\"main\",\"globally_editable_wiki\":false,\"has_pull_requests\":true,\"has_projects\":true,\"has_releases\":true,\"has_packages\":true,\"has_actions\":true,\"ignore_whitespace_conflicts\":false,\"allow_merge_commits\":true,\"allow_rebase\":true,\"allow_rebase_explicit\":true,\"allow_squash_merge\":true,\"allow_fast_forward_only_merge\":true,\"allow_rebase_update\":true,\"default_delete_branch_after_merge\":false,\"default_merge_style\":\"merge\",\"default_allow_maintainer_edit\":false,\"default_update_style\":\"merge\",\"avatar_url\":\"\",\"internal\":false,\"mirror_interval\":\"\",\"object_format_name\":\"sha1\",\"mirror_updated\":\"0001-01-01T00:00:00Z\",\"repo_transfer\":null,\"topics\":null}\n"
+    },
+    {
+      "step": "2. clone, branch and commit",
+      "kind": "git",
+      "args": [
+        "clone",
+        "http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git",
+        "/tmp/takumi-fj-selftest-NTI8RX/repo"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX",
+      "stdout": ""
+    },
+    {
+      "step": "2. clone, branch and commit",
+      "kind": "git",
+      "args": [
+        "config",
+        "user.email",
+        "takumi-selftest@example.invalid"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": ""
+    },
+    {
+      "step": "2. clone, branch and commit",
+      "kind": "git",
+      "args": [
+        "config",
+        "user.name",
+        "takumi selftest"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": ""
+    },
+    {
+      "step": "2. clone, branch and commit",
+      "kind": "git",
+      "args": [
+        "rev-parse",
+        "HEAD"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": "d26d05f8e376cb5354a8602cba88bab34cccd1c1"
+    },
+    {
+      "step": "2. clone, branch and commit",
+      "kind": "git",
+      "args": [
+        "switch",
+        "-c",
+        "takumi/selftest-f93e2545"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": ""
+    },
+    {
+      "step": "2. clone, branch and commit",
+      "kind": "git",
+      "args": [
+        "commit",
+        "-am",
+        "selftest: branch 1 (run f93e2545)"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": "[takumi/selftest-f93e2545 06e1654] selftest: branch 1 (run f93e2545)\n 1 file changed, 3 insertions(+)"
+    },
+    {
+      "step": "2. clone, branch and commit",
+      "kind": "git",
+      "args": [
+        "rev-parse",
+        "HEAD"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": "06e165499f59864219a8a858a49f891ce4fb7de1"
+    },
+    {
+      "step": "3. deliver() — plain push, exactly one pull request",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls?state=open&limit=50",
+      "status": 200,
+      "body": "[]\n"
+    },
+    {
+      "step": "3. deliver() — plain push, exactly one pull request",
+      "kind": "http",
+      "method": "POST",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls",
+      "status": 201,
+      "body": "{\"id\":3,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"number\":3,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest f93e2545\",\"body\":\"Live delivery self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:41.301Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"open\",\"draft\":false,\"is_locked\":false,\"comments\":0,\"review_comments\":0,\"additions\":3,\"deletions\":0,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.patch\",\"mergeable\":true,\"merged\":false,\"merged_at\":null,\"merge_commit_sha\":null,\"merged_by\":null,\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"d26d05f8e376cb5354a8602cba88bab34cccd1c1\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":25,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":1,\"open_pr_counter\":0,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:01:55+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki\":true,\"wiki_branch\":\"main\",\"globally_editable_wiki\":false,\"has_pull_requests\":true,\"has_projects\":true,\"has_releases\":true,\"has_packages\":true,\"has_actions\":true,\"ignore_whitespace_conflicts\":false,\"allow_merge_commits\":true,\"allow_rebase\":true,\"allow_rebase_explicit\":true,\"allow_squash_merge\":true,\"allow_fast_forward_only_merge\":true,\"allow_rebase_update\":true,\"default_delete_branch_after_merge\":false,\"default_merge_style\":\"merge\",\"default_allow_maintainer_edit\":false,\"default_update_style\":\"merge\",\"avatar_url\":\"\",\"internal\":false,\"mirror_interval\":\"\",\"object_format_name\":\"sha1\",\"mirror_updated\":\"0001"
+    },
+    {
+      "step": "3. deliver() — plain push, exactly one pull request",
+      "kind": "deliver",
+      "created": true,
+      "pr": {
+        "number": "3",
+        "url": "http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3",
+        "headSha": "06e165499f59864219a8a858a49f891ce4fb7de1",
+        "baseSha": "main"
+      },
+      "push": {
+        "mode": "plain",
+        "branch": "takumi/selftest-f93e2545",
+        "head": "06e165499f59864219a8a858a49f891ce4fb7de1"
+      },
+      "notes": []
+    },
+    {
+      "step": "3. deliver() — plain push, exactly one pull request",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls?state=open&limit=50",
+      "status": 200,
+      "body": "[{\"id\":3,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"number\":3,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest f93e2545\",\"body\":\"Live delivery self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:41.301Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"open\",\"draft\":false,\"is_locked\":false,\"comments\":0,\"review_comments\":0,\"additions\":3,\"deletions\":0,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.patch\",\"mergeable\":true,\"merged\":false,\"merged_at\":null,\"merge_commit_sha\":null,\"merged_by\":null,\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"d26d05f8e376cb5354a8602cba88bab34cccd1c1\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":26,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":1,\"open_pr_counter\":1,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:01:55+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki\":true,\"wiki_branch\":\"main\",\"globally_editable_wiki\":false,\"has_pull_requests\":true,\"has_projects\":true,\"has_releases\":true,\"has_packages\":true,\"has_actions\":true,\"ignore_whitespace_conflicts\":false,\"allow_merge_commits\":true,\"allow_rebase\":true,\"allow_rebase_explicit\":true,\"allow_squash_merge\":true,\"allow_fast_forward_only_merge\":true,\"allow_rebase_update\":true,\"default_delete_branch_after_merge\":false,\"default_merge_style\":\"merge\",\"default_allow_maintainer_edit\":false,\"default_update_style\":\"merge\",\"avatar_url\":\"\",\"internal\":false,\"mirror_interval\":\"\",\"object_format_name\":\"sha1\",\"mirror_updated\":\"000"
+    },
+    {
+      "step": "3. deliver() — plain push, exactly one pull request",
+      "kind": "deliver-repeat",
+      "created": false,
+      "pr": {
+        "number": "3",
+        "url": "http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3",
+        "headSha": "06e165499f59864219a8a858a49f891ce4fb7de1",
+        "baseSha": "main"
+      },
+      "push": {
+        "mode": "plain",
+        "branch": "takumi/selftest-f93e2545",
+        "head": "06e165499f59864219a8a858a49f891ce4fb7de1"
+      },
+      "notes": [
+        "reused the open pull request #3 for takumi/selftest-f93e2545"
+      ]
+    },
+    {
+      "step": "4. status() and checks()",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/3",
+      "status": 200,
+      "body": "{\"id\":3,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"number\":3,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest f93e2545\",\"body\":\"Live delivery self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:41.301Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"open\",\"draft\":false,\"is_locked\":false,\"comments\":0,\"review_comments\":0,\"additions\":3,\"deletions\":0,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.patch\",\"mergeable\":true,\"merged\":false,\"merged_at\":null,\"merge_commit_sha\":null,\"merged_by\":null,\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"d26d05f8e376cb5354a8602cba88bab34cccd1c1\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":26,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":1,\"open_pr_counter\":1,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:02:42+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki\":true,\"wiki_branch\":\"main\",\"globally_editable_wiki\":false,\"has_pull_requests\":true,\"has_projects\":true,\"has_releases\":true,\"has_packages\":true,\"has_actions\":true,\"ignore_whitespace_conflicts\":false,\"allow_merge_commits\":true,\"allow_rebase\":true,\"allow_rebase_explicit\":true,\"allow_squash_merge\":true,\"allow_fast_forward_only_merge\":true,\"allow_rebase_update\":true,\"default_delete_branch_after_merge\":false,\"default_merge_style\":\"merge\",\"default_allow_maintainer_edit\":false,\"default_update_style\":\"merge\",\"avatar_url\":\"\",\"internal\":false,\"mirror_interval\":\"\",\"object_format_name\":\"sha1\",\"mirror_updated\":\"0001"
+    },
+    {
+      "step": "4. status() and checks()",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/commits/06e165499f59864219a8a858a49f891ce4fb7de1/status",
+      "status": 200,
+      "body": "{\"state\":\"\",\"sha\":\"\",\"total_count\":0,\"statuses\":null,\"repository\":null,\"commit_url\":\"\",\"url\":\"\"}\n"
+    },
+    {
+      "step": "4. status() and checks()",
+      "kind": "status",
+      "status": {
+        "state": "open",
+        "mergeable": true,
+        "headSha": "06e165499f59864219a8a858a49f891ce4fb7de1",
+        "baseSha": "main"
+      }
+    },
+    {
+      "step": "4. status() and checks()",
+      "kind": "checks",
+      "checks": []
+    },
+    {
+      "step": "5. openIssue()",
+      "kind": "http",
+      "method": "POST",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/issues",
+      "status": 201,
+      "body": "{\"id\":5,\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/issues/4\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/issues/4\",\"number\":4,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"original_author\":\"\",\"original_author_id\":0,\"title\":\"selftest issue f93e2545\",\"body\":\"Opened by the takumi delivery self-test for run f93e2545.\",\"ref\":\"\",\"assets\":[],\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"state\":\"open\",\"is_locked\":false,\"comments\":0,\"created_at\":\"2026-10-05T18:02:42+08:00\",\"updated_at\":\"2026-10-05T18:02:42+08:00\",\"closed_at\":null,\"due_date\":null,\"pull_request\":null,\"repository\":{\"id\":204,\"name\":\"takumi-delivery-selftest\",\"owner\":\"dev\",\"full_name\":\"dev/takumi-delivery-selftest\"},\"pin_order\":0}\n"
+    },
+    {
+      "step": "5. openIssue()",
+      "kind": "openIssue",
+      "issue": {
+        "number": "4",
+        "url": "http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/issues/4"
+      }
+    },
+    {
+      "step": "6. commentOnPullRequest()",
+      "kind": "http",
+      "method": "POST",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/issues/3/comments",
+      "status": 201,
+      "body": "{\"id\":7,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3#issuecomment-7\",\"pull_request_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"issue_url\":\"\",\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@noreply.forgejo.internal.invalid\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"original_author\":\"\",\"original_author_id\":0,\"body\":\"Live self-test comment for run f93e2545.\",\"assets\":[],\"created_at\":\"2026-10-05T18:02:42+08:00\",\"updated_at\":\"2026-10-05T18:02:42+08:00\"}\n"
+    },
+    {
+      "step": "6. commentOnPullRequest()",
+      "kind": "commentOnPullRequest",
+      "comment": {
+        "id": "7",
+        "url": "http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3#issuecomment-7"
+      }
+    },
+    {
+      "step": "7. merge() with the correct expectedHeadSha",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/3",
+      "status": 200,
+      "body": "{\"id\":3,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"number\":3,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest f93e2545\",\"body\":\"Live delivery self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:41.301Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"open\",\"draft\":false,\"is_locked\":false,\"comments\":1,\"review_comments\":0,\"additions\":3,\"deletions\":0,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.patch\",\"mergeable\":true,\"merged\":false,\"merged_at\":null,\"merge_commit_sha\":null,\"merged_by\":null,\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"d26d05f8e376cb5354a8602cba88bab34cccd1c1\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":26,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":2,\"open_pr_counter\":1,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:02:42+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki\":true,\"wiki_branch\":\"main\",\"globally_editable_wiki\":false,\"has_pull_requests\":true,\"has_projects\":true,\"has_releases\":true,\"has_packages\":true,\"has_actions\":true,\"ignore_whitespace_conflicts\":false,\"allow_merge_commits\":true,\"allow_rebase\":true,\"allow_rebase_explicit\":true,\"allow_squash_merge\":true,\"allow_fast_forward_only_merge\":true,\"allow_rebase_update\":true,\"default_delete_branch_after_merge\":false,\"default_merge_style\":\"merge\",\"default_allow_maintainer_edit\":false,\"default_update_style\":\"merge\",\"avatar_url\":\"\",\"internal\":false,\"mirror_interval\":\"\",\"object_format_name\":\"sha1\",\"mirror_updated\":\"0001"
+    },
+    {
+      "step": "7. merge() with the correct expectedHeadSha",
+      "kind": "http",
+      "method": "POST",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/3/merge",
+      "status": 200,
+      "body": ""
+    },
+    {
+      "step": "7. merge() with the correct expectedHeadSha",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/3",
+      "status": 200,
+      "body": "{\"id\":3,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"number\":3,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest f93e2545\",\"body\":\"Live delivery self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:41.301Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"closed\",\"draft\":false,\"is_locked\":false,\"comments\":1,\"review_comments\":0,\"additions\":3,\"deletions\":0,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.patch\",\"mergeable\":true,\"merged\":true,\"merged_at\":\"2026-10-05T18:02:43+08:00\",\"merge_commit_sha\":\"be8f0011b7d51e0f5be07f36f99dc923a126a80a\",\"merged_by\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@noreply.forgejo.internal.invalid\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"be8f0011b7d51e0f5be07f36f99dc923a126a80a\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":26,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":2,\"open_pr_counter\":0,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:02:42+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki"
+    },
+    {
+      "step": "7. merge() with the correct expectedHeadSha",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/3",
+      "status": 200,
+      "body": "{\"id\":3,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"number\":3,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest f93e2545\",\"body\":\"Live delivery self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:41.301Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"closed\",\"draft\":false,\"is_locked\":false,\"comments\":1,\"review_comments\":0,\"additions\":3,\"deletions\":0,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3.patch\",\"mergeable\":true,\"merged\":true,\"merged_at\":\"2026-10-05T18:02:43+08:00\",\"merge_commit_sha\":\"be8f0011b7d51e0f5be07f36f99dc923a126a80a\",\"merged_by\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@noreply.forgejo.internal.invalid\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"be8f0011b7d51e0f5be07f36f99dc923a126a80a\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":26,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":2,\"open_pr_counter\":0,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:02:43+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki"
+    },
+    {
+      "step": "7. merge() with the correct expectedHeadSha",
+      "kind": "merge",
+      "merged": {
+        "merged": true,
+        "method": "merge",
+        "headSha": "06e165499f59864219a8a858a49f891ce4fb7de1",
+        "url": "http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/3"
+      },
+      "statusAfter": {
+        "state": "merged",
+        "mergeable": true,
+        "headSha": "06e165499f59864219a8a858a49f891ce4fb7de1",
+        "baseSha": "main"
+      }
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "git",
+      "args": [
+        "switch",
+        "main"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": "Your branch is up to date with 'origin/main'."
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "git",
+      "args": [
+        "switch",
+        "-c",
+        "takumi/selftest-stale-f93e2545"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": ""
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "git",
+      "args": [
+        "commit",
+        "-am",
+        "selftest: branch 2 (run f93e2545)"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": "[takumi/selftest-stale-f93e2545 6e95fcd] selftest: branch 2 (run f93e2545)\n 1 file changed, 1 insertion(+), 1 deletion(-)"
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "git",
+      "args": [
+        "rev-parse",
+        "HEAD"
+      ],
+      "cwd": "/tmp/takumi-fj-selftest-NTI8RX/repo",
+      "stdout": "6e95fcde15f1b9768c37567155f813154d645bc3"
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls?state=open&limit=50",
+      "status": 200,
+      "body": "[]\n"
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "http",
+      "method": "POST",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls",
+      "status": 201,
+      "body": "{\"id\":4,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5\",\"number\":5,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest stale-head f93e2545\",\"body\":\"Live stale-head merge self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-stale-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:44.576Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"open\",\"draft\":false,\"is_locked\":false,\"comments\":0,\"review_comments\":0,\"additions\":1,\"deletions\":1,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5.patch\",\"mergeable\":true,\"merged\":false,\"merged_at\":null,\"merge_commit_sha\":null,\"merged_by\":null,\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"be8f0011b7d51e0f5be07f36f99dc923a126a80a\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":26,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":2,\"open_pr_counter\":0,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:02:43+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki\":true,\"wiki_branch\":\"main\",\"globally_editable_wiki\":false,\"has_pull_requests\":true,\"has_projects\":true,\"has_releases\":true,\"has_packages\":true,\"has_actions\":true,\"ignore_whitespace_conflicts\":false,\"allow_merge_commits\":true,\"allow_rebase\":true,\"allow_rebase_explicit\":true,\"allow_squash_merge\":true,\"allow_fast_forward_only_merge\":true,\"allow_rebase_update\":true,\"default_delete_branch_after_merge\":false,\"default_merge_style\":\"merge\",\"default_allow_maintainer_edit\":false,\"default_update_style\":\"merge\",\"avatar_url\":\"\",\"internal\":false,\"mirror_interval\":\"\",\"object_format_name\":\"sha"
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "deliver2",
+      "pr": {
+        "number": "5",
+        "url": "http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5",
+        "headSha": "e5abf28fd5900633f504bd6fa7a8937b46aa13cb",
+        "baseSha": "main"
+      },
+      "push": {
+        "mode": "plain",
+        "branch": "takumi/selftest-stale-f93e2545",
+        "head": "e5abf28fd5900633f504bd6fa7a8937b46aa13cb"
+      },
+      "notes": [
+        "absorbed the advanced base origin/main with a plain merge; the delivered head is e5abf28fd590…"
+      ]
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/5",
+      "status": 200,
+      "body": "{\"id\":4,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5\",\"number\":5,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest stale-head f93e2545\",\"body\":\"Live stale-head merge self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-stale-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:44.576Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"open\",\"draft\":false,\"is_locked\":false,\"comments\":0,\"review_comments\":0,\"additions\":1,\"deletions\":1,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5.patch\",\"mergeable\":true,\"merged\":false,\"merged_at\":null,\"merge_commit_sha\":null,\"merged_by\":null,\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"be8f0011b7d51e0f5be07f36f99dc923a126a80a\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":27,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":2,\"open_pr_counter\":1,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:02:45+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki\":true,\"wiki_branch\":\"main\",\"globally_editable_wiki\":false,\"has_pull_requests\":true,\"has_projects\":true,\"has_releases\":true,\"has_packages\":true,\"has_actions\":true,\"ignore_whitespace_conflicts\":false,\"allow_merge_commits\":true,\"allow_rebase\":true,\"allow_rebase_explicit\":true,\"allow_squash_merge\":true,\"allow_fast_forward_only_merge\":true,\"allow_rebase_update\":true,\"default_delete_branch_after_merge\":false,\"default_merge_style\":\"merge\",\"default_allow_maintainer_edit\":false,\"default_update_style\":\"merge\",\"avatar_url\":\"\",\"internal\":false,\"mirror_interval\":\"\",\"object_format_name\":\"sha"
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "http",
+      "method": "POST",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/5/merge",
+      "status": 409,
+      "body": "{\"message\":\"head out of date\",\"url\":\"http://forgejo.internal.invalid:3000/api/swagger\"}\n"
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "staleHeadMerge",
+      "expectedHeadSha": "6e95fcde15f1b9768c37567155f813154d645bc3",
+      "prHeadSha": "e5abf28fd5900633f504bd6fa7a8937b46aa13cb",
+      "failed": true,
+      "error": "DeliveryError(precondition): Forgejo refused to merge pull request 5 at 6e95fcde15f1… (HTTP 409): {\"message\":\"head out of date\",\"url\":\"http://forgejo.internal.invalid:3000/api/swagger\"}"
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/5",
+      "status": 200,
+      "body": "{\"id\":4,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5\",\"number\":5,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest stale-head f93e2545\",\"body\":\"Live stale-head merge self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-stale-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:44.576Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"open\",\"draft\":false,\"is_locked\":false,\"comments\":0,\"review_comments\":0,\"additions\":1,\"deletions\":1,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5.patch\",\"mergeable\":true,\"merged\":false,\"merged_at\":null,\"merge_commit_sha\":null,\"merged_by\":null,\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"be8f0011b7d51e0f5be07f36f99dc923a126a80a\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":27,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":2,\"open_pr_counter\":1,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:02:45+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki\":true,\"wiki_branch\":\"main\",\"globally_editable_wiki\":false,\"has_pull_requests\":true,\"has_projects\":true,\"has_releases\":true,\"has_packages\":true,\"has_actions\":true,\"ignore_whitespace_conflicts\":false,\"allow_merge_commits\":true,\"allow_rebase\":true,\"allow_rebase_explicit\":true,\"allow_squash_merge\":true,\"allow_fast_forward_only_merge\":true,\"allow_rebase_update\":true,\"default_delete_branch_after_merge\":false,\"default_merge_style\":\"merge\",\"default_allow_maintainer_edit\":false,\"default_update_style\":\"merge\",\"avatar_url\":\"\",\"internal\":false,\"mirror_interval\":\"\",\"object_format_name\":\"sha"
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "status2",
+      "status": {
+        "state": "open",
+        "mergeable": true,
+        "headSha": "e5abf28fd5900633f504bd6fa7a8937b46aa13cb",
+        "baseSha": "main"
+      }
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "http",
+      "method": "GET",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/5",
+      "status": 200,
+      "body": "{\"id\":4,\"url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5\",\"number\":5,\"user\":{\"id\":1,\"login\":\"cool\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"cool@hbut.net\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/66acfb3bc106934eb178f6ebcbc9343d\",\"html_url\":\"http://forgejo.internal.invalid:3000/cool\",\"language\":\"en-US\",\"is_admin\":true,\"last_login\":\"2026-08-16T16:37:27+08:00\",\"created\":\"2026-04-19T20:47:00+08:00\",\"restricted\":false,\"active\":true,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"public\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"cool\"},\"title\":\"takumi selftest stale-head f93e2545\",\"body\":\"Live stale-head merge self-test.\\n\\nItem: SELFTEST-1\\n\\nRun: f93e2545\\n\\n\\u003c!-- takumi:run=f93e2545 --\\u003e\\n\\n\\u003c!-- takumi:boardstate:v1 {\\\"schema\\\":1,\\\"runId\\\":\\\"f93e2545\\\",\\\"item\\\":\\\"SELFTEST-1\\\",\\\"baseBranch\\\":\\\"main\\\",\\\"branch\\\":\\\"takumi/selftest-stale-f93e2545\\\",\\\"reviewRound\\\":0,\\\"updatedAt\\\":\\\"2026-10-05T10:02:44.576Z\\\"} --\\u003e\",\"labels\":[],\"milestone\":null,\"assignee\":null,\"assignees\":null,\"requested_reviewers\":null,\"requested_reviewers_teams\":null,\"state\":\"open\",\"draft\":false,\"is_locked\":false,\"comments\":0,\"review_comments\":0,\"additions\":1,\"deletions\":1,\"changed_files\":1,\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5\",\"diff_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5.diff\",\"patch_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest/pulls/5.patch\",\"mergeable\":false,\"merged\":false,\"merged_at\":null,\"merge_commit_sha\":null,\"merged_by\":null,\"allow_maintainer_edit\":false,\"base\":{\"label\":\"main\",\"ref\":\"main\",\"sha\":\"be8f0011b7d51e0f5be07f36f99dc923a126a80a\",\"repo_id\":204,\"repo\":{\"id\":204,\"owner\":{\"id\":5,\"login\":\"dev\",\"login_name\":\"\",\"source_id\":0,\"full_name\":\"\",\"email\":\"\",\"avatar_url\":\"http://forgejo.internal.invalid:3000/avatars/e77989ed21758e78331b20e477fc5582\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev\",\"language\":\"\",\"is_admin\":false,\"last_login\":\"0001-01-01T00:00:00Z\",\"created\":\"2026-04-27T01:13:19+08:00\",\"restricted\":false,\"active\":false,\"prohibit_login\":false,\"location\":\"\",\"pronouns\":\"\",\"website\":\"\",\"description\":\"\",\"visibility\":\"private\",\"followers_count\":0,\"following_count\":0,\"starred_repos_count\":0,\"username\":\"dev\"},\"name\":\"takumi-delivery-selftest\",\"full_name\":\"dev/takumi-delivery-selftest\",\"description\":\"\",\"empty\":false,\"private\":true,\"fork\":false,\"template\":false,\"parent\":null,\"mirror\":false,\"size\":27,\"language\":\"\",\"languages_url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/languages\",\"html_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest\",\"url\":\"http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest\",\"link\":\"\",\"ssh_url\":\"ssh://git@forgejo.internal.invalid:222/dev/takumi-delivery-selftest.git\",\"clone_url\":\"http://forgejo.internal.invalid:3000/dev/takumi-delivery-selftest.git\",\"original_url\":\"\",\"website\":\"\",\"stars_count\":0,\"forks_count\":0,\"watchers_count\":1,\"open_issues_count\":2,\"open_pr_counter\":1,\"release_counter\":0,\"default_branch\":\"main\",\"archived\":false,\"created_at\":\"2026-10-05T18:01:48+08:00\",\"updated_at\":\"2026-10-05T18:02:45+08:00\",\"archived_at\":\"1970-01-01T08:00:00+08:00\",\"permissions\":{\"admin\":true,\"push\":true,\"pull\":true},\"has_issues\":true,\"internal_tracker\":{\"enable_time_tracker\":true,\"allow_only_contributors_to_track_time\":true,\"enable_issue_dependencies\":true},\"has_wiki\":true,\"wiki_branch\":\"main\",\"globally_editable_wiki\":false,\"has_pull_requests\":true,\"has_projects\":true,\"has_releases\":true,\"has_packages\":true,\"has_actions\":true,\"ignore_whitespace_conflicts\":false,\"allow_merge_commits\":true,\"allow_rebase\":true,\"allow_rebase_explicit\":true,\"allow_squash_merge\":true,\"allow_fast_forward_only_merge\":true,\"allow_rebase_update\":true,\"default_delete_branch_after_merge\":false,\"default_merge_style\":\"merge\",\"default_allow_maintainer_edit\":false,\"default_update_style\":\"merge\",\"avatar_url\":\"\",\"internal\":false,\"mirror_interval\":\"\",\"object_format_name\":\"sh"
+    },
+    {
+      "step": "8. a second pull request and a STALE-head merge",
+      "kind": "http",
+      "method": "POST",
+      "url": "http://forgejo.internal.invalid:3000/api/v1/repos/dev/takumi-delivery-selftest/pulls/5/merge",
+      "status": 405,
+      "body": "{\"message\":\"Please try again later\",\"url\":\"http://forgejo.internal.invalid:3000/api/swagger\"}\n"
+    }
+  ]
+}
