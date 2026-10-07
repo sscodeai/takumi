@@ -172,16 +172,18 @@ deliverable:
 
 confirmation:
   by: "SS"
-  at: "2026-10-01T14:09:07.944Z"
+  at: "2026-10-05T02:49:51.528Z"
   method: bounded-choice
-
 feedback:
   - id: FB-001
     at: "2026-10-01T14:55:52.547Z"
     run: "wf-f6df8588"
     requirementDigest: "021f16e4ac663db4658c54f583a155f0d5f772342cc4dc39c60a20f8e03cb93a"
     judgeDigest: "sha256:9e7b78aff8274345428c7810d605bfdf07c4aff3c094dcd059a055aeca1e8ecb"
-    status: open
+    status: resolved
+    resolvedAt: "2026-10-05T02:49:51.509Z"
+    resolvedBy: "SS"
+    resolvedNote: "the recorded answer stands; the implementation changes (bounded choice at re-confirmation, 2026-10-05T02:49:51.509Z)"
     checks:
       - "REL-002 additivity: department totals sum to 0 but the report says  — sum=0 reported="
       - "REL-003 duplicate-resolution: the chosen option \"merge\" does not hold (headcount 0 want 5, late-date total  want 628, early-date total  want 628) — headcount=0/5 totals=/628,/628"
