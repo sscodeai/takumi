@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ArtifactStore, executeWorkflow, WorkflowDefinition } from '../index.js';
@@ -178,11 +178,22 @@ test('Independent Review: unknown marker value → failed closed', async () => {
   assert.match(res.step?.summary ?? '', /unrecognised REVIEW_VERDICT/);
 });
 
-test('Delivery: manifest lists all artifacts, workflow completes', async () => {
+test('Delivery: the manifest is the RUN\'s artifacts, not everything the store happens to hold', async () => {
+  // A store is a directory, not a run. Listing it shipped a stale `REJECT-001.md` from an earlier,
+  // refused run inside the manifest of a delivery that had passed (docs/bugs-fixed.md #38), so the
+  // bundle is now built from the step results that produced the artifacts.
   const dir = mkdtempSync(join(tmpdir(), 'del-'));
   try {
     const store = new ArtifactStore(join(dir, 'a'));
-    await store.write({ taskId: 't1', kind: 'req', fileName: 'r.md', content: '# REQ', contentType: 'text/markdown', trace: ['REQ-001'] });
+    // An artifact belonging to somebody else: another run's rejection, still on disk.
+    await store.write({
+      taskId: 'other-run:acceptance',
+      kind: 'acceptance',
+      fileName: 'REJECT-001.md',
+      content: '# REJECT-001 (from an earlier run)',
+      contentType: 'text/markdown',
+      trace: [],
+    });
     const rt = new TestRuntime(() => 'ok', undefined, 'del');
     const wf: WorkflowDefinition = {
       name: 'del', version: '0.1.0', description: '',
@@ -195,9 +206,20 @@ test('Delivery: manifest lists all artifacts, workflow completes', async () => {
     assert.equal(res.status, 'completed');
     const del = res.steps.find((s) => s.stepId === 'deliver');
     assert.ok(del && del.status === 'completed');
-    const all = await store.list();
-    const manifest = all.find((a) => a.path.startsWith('delivery/'));
-    assert.ok(manifest, 'delivery manifest artifact written');
+
+    // This run's own artifact is in the bundle…
+    const own = res.steps.find((s) => s.stepId === 'impl')?.artifacts ?? [];
+    assert.ok(own.length > 0, 'the agent step wrote its own artifact');
+    const manifestPath = (await store.list()).find((a) => a.path.startsWith('delivery/'))?.path;
+    assert.ok(manifestPath, 'delivery manifest artifact written');
+    const manifest = readFileSync(manifestPath.startsWith('/') ? manifestPath : join(dir, 'a', manifestPath), 'utf8');
+    for (const path of own) assert.ok(manifest.includes(path), `${path} belongs to this run and must be listed`);
+    assert.match(manifest, /## artifacts \(\d+\)/);
+
+    // …and the other run's rejection is NOT, with the exclusion said out loud.
+    assert.ok(!manifest.includes('acceptance/REJECT-001.md'), 'another run\'s rejection must not travel in this bundle');
+    assert.match(manifest, /belong to OTHER runs and are not part/);
+    assert.match(del.summary ?? '', /delivery bundle ready \(1 artifacts\)/, 'the step reports what it bundled');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

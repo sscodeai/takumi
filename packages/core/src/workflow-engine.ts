@@ -1469,15 +1469,27 @@ export async function executeWorkflow(
         run.stepStatus[stepId] = 'running';
         const fsx3 = await import('node:fs/promises');
         const path3 = await import('node:path');
+        // The bundle is THIS RUN's artifacts, taken from the step results that produced them, not
+        // everything the store happens to hold: listing the store shipped a stale `REJECT-001.md` from an
+        // earlier, refused run inside the manifest of a delivery that had passed (docs/bugs-fixed.md #38).
+        const mine = new Set(stepResults.flatMap((s) => s.artifacts));
         const all = await ctx.artifacts.list();
+        const runArtifacts = all.filter((a) => mine.has(a.path));
         const lines = [
-          `# 納品物一覧 (Delivery Manifest)`,
+          `# Delivery Manifest`,
           `workflow: ${workflow.name}  |  run: ${runId}`,
           `generated: ${new Date().toISOString()}`,
           ``,
-          `## artifacts (${all.length})`,
+          `## artifacts (${runArtifacts.length})`,
         ];
-        for (const a of all) lines.push(`- ${a.path}  (kind=${a.kind}, trace=[${(a.trace ?? []).join(', ')}])`);
+        for (const a of runArtifacts) lines.push(`- ${a.path}  (kind=${a.kind}, trace=[${(a.trace ?? []).join(', ')}])`);
+        if (all.length > runArtifacts.length) {
+          lines.push(
+            ``,
+            `${all.length - runArtifacts.length} artifact(s) in the store belong to OTHER runs and are not part`,
+            `of this delivery: a bundle that cannot say which run it is from is a bundle nobody can trust.`,
+          );
+        }
         const manifest = lines.join('\n');
         const deliveryArtifact = await ctx.artifacts.write({
           taskId: `${runId}:${stepId}`,
@@ -1487,9 +1499,9 @@ export async function executeWorkflow(
           contentType: 'text/markdown',
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
         });
-        stepResults.push({ stepId, status: 'completed', summary: `delivery bundle ready (${all.length} artifacts)`, artifacts: [deliveryArtifact.path], tests: [] });
+        stepResults.push({ stepId, status: 'completed', summary: `delivery bundle ready (${runArtifacts.length} artifacts)`, artifacts: [deliveryArtifact.path], tests: [] });
         run.stepStatus[stepId] = 'completed';
-        ctx.onEvent?.(stepId, `delivery manifest written (${all.length} artifacts)`);
+        ctx.onEvent?.(stepId, `delivery manifest written (${runArtifacts.length} artifacts)`);
         done.add(stepId);
         continue;
       }
