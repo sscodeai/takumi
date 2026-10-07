@@ -92,6 +92,36 @@ async function runStep(
   }
 }
 
+/**
+ * Run several steps through the REAL engine, seeding the run vars (so `vars.deliveryRef`, which the
+ * `publish` step normally sets, can be present without a publish step). This is what the host-report
+ * tests need: a red pipeline AND a published reference, driven by the engine, not simulated.
+ */
+async function runSteps(
+  p: Project,
+  steps: StepWithRef[],
+  delivery: DeliveryProvider | undefined,
+  vars: Record<string, string>,
+): Promise<{ status: string; steps: Array<{ stepId: string; status: string; summary: string }> }> {
+  const artifacts = mkdtempSync(join(tmpdir(), 'takumi-ci-artifacts-'));
+  try {
+    const wf: WorkflowDefinition = { name: 'ci-steps', version: '0.0.1', description: '', steps };
+    const ctx: Parameters<typeof executeWorkflow>[1] = {
+      cwd: p.dir,
+      worktree: p.worktree,
+      runtime: new TestRuntime(() => 'ok'),
+      artifacts: new ArtifactStore(artifacts),
+      onApproval: () => true,
+      confirmedRequirement: { ref: p.docRef, digest: 'confirmed-digest' },
+    };
+    if (delivery !== undefined) ctx.delivery = delivery;
+    const res = await executeWorkflow(wf, ctx, vars);
+    return { status: res.status, steps: res.steps.map((s) => ({ stepId: s.stepId, status: s.status, summary: s.summary })) };
+  } finally {
+    rmSync(artifacts, { recursive: true, force: true });
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // (a) ci_config — write the host's pipeline into the delivery
 // ---------------------------------------------------------------------------------------------
@@ -341,6 +371,163 @@ test('await_checks: a run with no delivery provider fails — a pipeline nobody 
     const r = await runStep(p, awaitStep(), undefined);
     assert.equal(r.status, 'failed');
     assert.match(r.step?.summary ?? '', /no delivery provider \(ctx\.delivery\)/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// (c) reporting a RED pipeline to the host (ADR-037): one issue + a pull-request comment, ONLY for
+// a genuine pipeline failure with a published reference, and never able to change the run's outcome.
+// ---------------------------------------------------------------------------------------------
+
+interface ReportingStub extends DeliveryProvider {
+  calls: number;
+  issues: Array<{ title: string; body: string }>;
+  comments: Array<{ number: string; body: string }>;
+  openIssue?: (req: { title: string; body: string; labels?: string[] }) => Promise<{ number: string; url: string }>;
+  commentOnPullRequest?: (ref: PullRequestRef, body: string) => Promise<unknown>;
+}
+
+/** A provider that reads a scripted pipeline AND records the issue/comment it is asked to file. */
+function reportingProvider(
+  sequence: CheckSummary[][],
+  opts: { canRunChecks?: boolean; issueThrows?: boolean; noIssue?: boolean; noComment?: boolean } = {},
+): ReportingStub {
+  const provider: ReportingStub = {
+    calls: 0,
+    issues: [],
+    comments: [],
+    metadata: () => ({ id: 'stub', name: 'stub', version: '0' }),
+    capabilities: () => ({ canPushBranch: true, canOpenPullRequest: true, canRunChecks: opts.canRunChecks !== false, canMerge: false }),
+    async deliver() {
+      return { created: true, push: { mode: 'plain', branch: 'task', head: 'head1' }, notes: [] };
+    },
+    async status() {
+      return { state: 'open', headSha: 'head1', baseSha: 'base1', mergeable: true };
+    },
+    async checks(): Promise<CheckSummary[]> {
+      const at = Math.min(provider.calls, sequence.length - 1);
+      provider.calls += 1;
+      return sequence[at] ?? [];
+    },
+    async merge() {
+      return { merged: true, method: 'merge', headSha: 'head1', url: 'https://host/pulls/7' };
+    },
+  };
+  if (opts.noIssue !== true) {
+    provider.openIssue = async (req) => {
+      if (opts.issueThrows === true) throw new Error('the host refused the issue (403)');
+      provider.issues.push({ title: req.title, body: req.body });
+      const number = String(20 + provider.issues.length);
+      return { number, url: `https://host/issues/${number}` };
+    };
+  }
+  if (opts.noComment !== true) {
+    provider.commentOnPullRequest = async (ref, body) => {
+      provider.comments.push({ number: String(ref.number), body });
+    };
+  }
+  return provider;
+}
+
+test('await_checks: a RED pipeline opens ONE issue and comments on the pull request with the failing checks', async () => {
+  const p = fixture();
+  const provider = reportingProvider([
+    [{ name: 'build', conclusion: 'failure', url: 'https://host/checks/1' }, { name: 'tests', conclusion: 'success' }],
+  ]);
+  try {
+    const r = await runSteps(p, [awaitStep()], provider, { deliveryRef: '7' });
+    assert.equal(r.status, 'failed');
+    const step = r.steps[0];
+    assert.match(step?.summary ?? '', /1 check\(s\) FAILED/);
+    assert.equal(provider.issues.length, 1, 'exactly one issue records the failure');
+    assert.equal(provider.comments.length, 1, 'the pull request carries the same list');
+    assert.match(provider.issues[0]?.title ?? '', /Pipeline not green on pull request 7: 1 check\(s\)/);
+    assert.match(provider.issues[0]?.body ?? '', /- build: failure \(https:\/\/host\/checks\/1\)/);
+    assert.ok(!(provider.issues[0]?.body ?? '').includes('tests: success'), 'a passing check is not part of the failure list');
+    assert.match(provider.comments[0]?.body ?? '', /- build: failure \(https:\/\/host\/checks\/1\)/);
+    // The step summary says what was reported, so a reader of the run knows an issue exists.
+    assert.match(step?.summary ?? '', /issue 21 opened \(https:\/\/host\/issues\/21\)/);
+    assert.match(step?.summary ?? '', /commented on pull request 7/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('await_checks: a pipeline still PENDING at the timeout is reported to the host too', async () => {
+  const p = fixture();
+  const provider = reportingProvider([[{ name: 'build', conclusion: 'pending', url: 'https://host/checks/1' }]]);
+  try {
+    const r = await runSteps(p, [awaitStep(1)], provider, { deliveryRef: '7' });
+    assert.equal(r.status, 'failed');
+    assert.match(r.steps[0]?.summary ?? '', /still PENDING after 1s/);
+    assert.equal(provider.issues.length, 1, 'a pending-at-timeout pipeline is a genuine failure to report');
+    assert.match(provider.issues[0]?.body ?? '', /- build: pending \(https:\/\/host\/checks\/1\)/);
+    assert.equal(provider.comments.length, 1);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('await_checks: a RED pipeline with NO published reference reports nothing — there is nothing to report to', async () => {
+  const p = fixture();
+  const provider = reportingProvider([[{ name: 'build', conclusion: 'failure' }]]);
+  try {
+    const r = await runSteps(p, [awaitStep()], provider, {});
+    assert.equal(r.status, 'failed');
+    assert.equal(provider.issues.length, 0, 'no issue without a published pull request');
+    assert.equal(provider.comments.length, 0);
+    assert.ok(!(r.steps[0]?.summary ?? '').includes('host report:'), 'the summary claims no report');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('await_checks: a host that cannot report checks is NOT reported as a pipeline failure (nothing was read)', async () => {
+  const p = fixture();
+  const provider = reportingProvider([[]], { canRunChecks: false });
+  try {
+    const r = await runSteps(p, [awaitStep()], provider, { deliveryRef: '7' });
+    assert.equal(r.status, 'failed');
+    assert.match(r.steps[0]?.summary ?? '', /cannot report checks/);
+    assert.equal(provider.issues.length, 0, 'a read failure is not a pipeline failure');
+    assert.equal(provider.comments.length, 0);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('await_checks: a failure to open the issue is LOUD, never claims an issue, and keeps the run RED', async () => {
+  const p = fixture();
+  const provider = reportingProvider([[{ name: 'build', conclusion: 'failure' }]], { issueThrows: true });
+  try {
+    const r = await runSteps(p, [awaitStep()], provider, { deliveryRef: '7' });
+    // The run was failed by the PIPELINE and stays failed by the pipeline: a host that cannot record
+    // the failure must not turn it into a different kind of failure.
+    assert.equal(r.status, 'failed');
+    assert.match(
+      r.steps[0]?.summary ?? '',
+      /issue COULD NOT be opened \(the host refused the issue \(403\)\) — the pull request exists; the failure record does not/,
+    );
+    assert.equal(provider.issues.length, 0, 'no issue is claimed when none was opened');
+    assert.equal(provider.comments.length, 1, 'the pull-request comment still happens');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('await_checks: two red steps file at most ONE issue per run (comments still reach the host)', async () => {
+  const p = fixture();
+  const provider = reportingProvider([[{ name: 'build', conclusion: 'failure' }]]);
+  const first: StepWithRef = { id: 'await_checks', type: 'await_checks', ref: 'https://host/pulls/7' };
+  const second: StepWithRef = { id: 'await_checks_again', type: 'await_checks', ref: 'https://host/pulls/7' };
+  try {
+    const r = await runSteps(p, [first, second], provider, { deliveryRef: '7' });
+    assert.equal(r.status, 'failed');
+    assert.equal(provider.issues.length, 1, 'never more than one issue per run');
+    assert.equal(provider.comments.length, 2, 'each genuine failure still reaches the pull request');
+    assert.match(r.steps[1]?.summary ?? '', /issue not opened \(one pipeline-failure issue per run was already filed\)/);
   } finally {
     p.cleanup();
   }

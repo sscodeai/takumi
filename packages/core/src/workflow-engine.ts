@@ -16,7 +16,7 @@ import { groupByLevel } from './workflow.js';
 import { detectHardFailure, judgeGate, parseTestReport } from './quality-gate.js';
 import { createGitRunner, type GitRunner } from './git-runner.js';
 import { ProviderError } from './provider-error.js';
-import type { DeliveryProvider, PullRequestRef } from './delivery.js';
+import type { CheckSummary, DeliveryProvider, PullRequestRef } from './delivery.js';
 import { executeCiConfigStep, executeAwaitChecksStep } from './ci-pipeline.js';
 import { collectReviewInput, verdictFromFindings } from './review.js';
 import {
@@ -49,6 +49,17 @@ export function failureLinesOf(acceptanceSummary: string): string {
     return 'the acceptance failed without naming a failing check the engine could read: treat the run log as the brief, and note that a judge which reported nothing has told you nothing';
   }
   return failing.slice(0, 40).join('\n');
+}
+
+/**
+ * One line per check that is not green, for the host issue and the pull-request comment. The list is
+ * what the failure IS: a check that passed is not part of it, and a check's URL travels with it so a
+ * reader can open the failing run.
+ */
+function renderNotGreenChecks(checks: readonly CheckSummary[]): string[] {
+  return checks
+    .filter((c) => c.conclusion !== 'success')
+    .map((c) => `- ${c.name}: ${c.conclusion}${c.url !== undefined && c.url.length > 0 ? ` (${c.url})` : ''}`);
 }
 
 export interface WorkflowExecutionContext {
@@ -114,8 +125,18 @@ export interface WorkflowExecutionContext {
    */
   delivery?: DeliveryProvider & {
     openIssue?: (req: { title: string; body: string; labels?: string[] }) => Promise<{ number: string; url: string }>;
-    commentOnPullRequest?: (ref: PullRequestRef, body: string) => Promise<void>;
+    // The return value is not used by the engine (only the host's identity is, when the call
+    // succeeds), so it is `unknown` rather than `void`: a real provider answers with the comment's
+    // id/url, and `Promise<{id,url}>` is not assignable to `Promise<void>`.
+    commentOnPullRequest?: (ref: PullRequestRef, body: string) => Promise<unknown>;
   };
+  /**
+   * Defaults a `publish` step falls back to when the step does not declare them, taken from the
+   * project's `delivery:` configuration. A step's own `baseBranch`/`remote` still wins. Without this
+   * a base branch named once in `takumi.yaml` would reach no step, which is the "config with no
+   * reader" defect in a new costume.
+   */
+  deliveryDefaults?: { baseBranch?: string; remote?: string };
   /**
    * Set by the repair loop on every round that is NOT the last: the failure being handled is going to be
    * retried, so the requirement document must not be edited per attempt (ADR-034). Exactly one `FB-nnn`
@@ -464,6 +485,13 @@ export async function executeWorkflow(
   }
   // Rejections are numbered in the order they happen: a run may hold several acceptances.
   let rejectSeq = 0;
+  /**
+   * At most ONE pipeline-failure issue per run (ADR-037). A host issue is a record of a failure;
+   * a second `await_checks` step failing for the same run must not file a second one. The flag is
+   * set BEFORE the attempt, so a create that actually succeeded but whose response was lost cannot
+   * produce a duplicate on the next step.
+   */
+  let pipelineIssueFiled = false;
 
   try {
     // P2 parallel: pre-execute all no-dependency AGENT steps concurrently.
@@ -1543,8 +1571,67 @@ export async function executeWorkflow(
           run.status = 'failed';
           failedIds.add(stepId);
         }
-        stepResults.push({ stepId, status: awaitResult.status, summary: awaitResult.summary, artifacts: [], tests: [] });
-        ctx.onEvent?.(stepId, awaitResult.summary.split('\n')[0] ?? awaitResult.summary);
+        let awaitSummary = awaitResult.summary;
+        // REPORT a GENUINE pipeline failure to the host (ADR-037). "Genuine" is decided by one fact:
+        // the host actually REPORTED checks. Every case with nothing to report — no provider, a host
+        // without the checks capability, a checks() that threw, a host that reported nothing — leaves
+        // `checks` empty, so none of those is ever reported. Reporting also needs a published
+        // reference (`vars.deliveryRef`, set by the `publish` step): with no pull request there is no
+        // host surface to carry the failure, and an issue about nothing is worse than no issue.
+        if (awaitResult.status === 'failed' && awaitResult.checks.length > 0) {
+          const deliveryRef = (vars['deliveryRef'] ?? '').trim();
+          const reporter = ctx.delivery;
+          if (
+            deliveryRef.length > 0 &&
+            reporter !== undefined &&
+            (reporter.openIssue !== undefined || reporter.commentOnPullRequest !== undefined)
+          ) {
+            const notGreen = renderNotGreenChecks(awaitResult.checks);
+            const reportBody = [
+              `Pipeline not green on pull request ${deliveryRef} (run ${runId}, workflow ${workflow.name}).`,
+              '',
+              'Checks that are not green:',
+              ...notGreen,
+              '',
+              awaitResult.summary,
+            ].join('\n');
+            const reportTitle = `Pipeline not green on pull request ${deliveryRef}: ${notGreen.length} check(s)`;
+            const reportNotes: string[] = [];
+            // The comment goes on the pull request FIRST: that is the surface the reviewer reads, and
+            // the failure is ABOUT this pull request. A failure to comment is loud and never changes
+            // the run's outcome.
+            if (reporter.commentOnPullRequest !== undefined) {
+              try {
+                await reporter.commentOnPullRequest({ number: deliveryRef, url: '', headSha: '', baseSha: '' }, reportBody);
+                reportNotes.push(`commented on pull request ${deliveryRef}`);
+              } catch (e) {
+                reportNotes.push(
+                  `COULD NOT comment on pull request ${deliveryRef} (${e instanceof Error ? e.message : String(e)}): the failure is still named in this summary`,
+                );
+              }
+            }
+            // Exactly ONE issue per run. A failure to open it is LOUD, and it NEVER turns an
+            // already-red run into a different kind of failure: the run was failed by the pipeline,
+            // and it stays failed by the pipeline.
+            if (reporter.openIssue !== undefined && !pipelineIssueFiled) {
+              pipelineIssueFiled = true;
+              try {
+                const issue = await reporter.openIssue({ title: reportTitle, body: reportBody });
+                reportNotes.push(`issue ${issue.number} opened (${issue.url})`);
+              } catch (e) {
+                reportNotes.push(
+                  `issue COULD NOT be opened (${e instanceof Error ? e.message : String(e)}) — the pull request exists; the failure record does not`,
+                );
+              }
+            } else if (reporter.openIssue !== undefined) {
+              reportNotes.push('issue not opened (one pipeline-failure issue per run was already filed)');
+            }
+            awaitSummary = [awaitSummary, '', 'host report:', ...reportNotes.map((n) => `- ${n}`)].join('\n');
+            ctx.onEvent?.(stepId, `pipeline failure reported: ${reportNotes.join('; ')}`);
+          }
+        }
+        stepResults.push({ stepId, status: awaitResult.status, summary: awaitSummary, artifacts: [], tests: [] });
+        ctx.onEvent?.(stepId, awaitSummary.split('\n')[0] ?? awaitSummary);
         done.add(stepId);
         continue;
       }
@@ -1580,8 +1667,8 @@ export async function executeWorkflow(
         const git = ctx.git ?? createGitRunner();
         const branchRun = await git.run(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: worktree });
         const branch = branchRun.stdout.trim();
-        const baseBranch = step.baseBranch ?? 'main';
-        const remote = step.remote ?? 'origin';
+        const baseBranch = step.baseBranch ?? ctx.deliveryDefaults?.baseBranch ?? 'main';
+        const remote = step.remote ?? ctx.deliveryDefaults?.remote ?? 'origin';
         if (branchRun.exitCode !== 0 || branch.length === 0 || branch === 'HEAD') {
           failPublish(`the delivery worktree is not on a branch (git said "${branch}"): a detached head cannot be published`);
           done.add(stepId);
