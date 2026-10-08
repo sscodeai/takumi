@@ -1058,3 +1058,46 @@ git switch -c <task-branch>            # branched from the base, so the ancestry
 Run i10 repeats i9 with a worktree created that way. What is still missing: nothing in the tooling creates the
 worktree for you, so this is a documented procedure rather than an enforced one — a `takumi` helper (or a
 refusal at run start when the worktree's HEAD is not descended from the base) is the honest next step.
+
+## 16. The chain closes on the live host (run i11)
+
+Run i11 is the first run in which the whole chain reached a code host and came back with a verdict — and it is
+the reason the two defects above (#43, #44) were found at all: i9 refused to publish a worktree whose history
+did not descend from the base, and i10 was refused by takumi's own marker helper for minting a `wf-` run id.
+
+What i11 did, from the run log:
+
+```
+step publish: completed — published takumi/station7 -> main as pull request 9
+workflow[await_checks]: pipeline failure reported: commented on pull request 9; issue 11 opened
+workflow[await_checks]: await_checks FAILED: the pipeline was still PENDING after 300s on 9: pending checks —
+  ci / tests (pull_request) (/dev/takumi-delivery-selftest/actions/runs/2/jobs/0),
+  ci / deliverable (pull_request) (/dev/takumi-delivery-selftest/actions/runs/2/jobs/1),
+  ci / tests (push) (/dev/takumi-delivery-selftest/actions/runs/3/jobs/0),
+  ci / deliverable (push) (/dev/takumi-delivery-selftest/actions/runs/3/jobs/1)
+step delivery: skipped — skipped (dependency failed: await_checks)
+```
+
+and what an independent read of the host (curl against the API, not the run's own report) confirms:
+
+- **pull request 9** exists, titled `takumi run wf-6b4f700a: docs/requirements/intake.yaml`, head `811a36c3b64e`,
+  body carrying `Requirement: \`docs/requirements/intake.yaml\` at
+  \`sha256:73eb5e904e5247e5ac8fe9852378842e10ceba20ce85e3072734bb0a64e6e81d\`` and the run marker;
+- **issue 11** exists: "Pipeline not green on pull request 9: 4 check(s)";
+- **one comment on pull request 9**: "Pipeline not green on pull request 9 (run wf-6b4f700a, workflow
+  request-to-delivery). Checks that are not green: - ci / tests (pull_request): pending".
+
+Three things about that result are worth stating plainly.
+
+1. **The pipeline file takumi wrote was recognised by the host.** Forgejo Actions queued `ci / tests` and
+   `ci / deliverable` for both the pull request and the push — that is the `ci_config` step's output being
+   picked up, not a pipeline that already existed.
+2. **The run refused to call a pending pipeline green.** The checks stayed `pending` because no runner is
+   registered on that host, and `await_checks` waited its full 300 seconds and then failed naming all four,
+   with their URLs. A green verdict here would have been a lie.
+3. **The failure was reported where a person will see it** — one issue and one pull-request comment, both
+   carrying the check list, and neither of them changing the fact that the run failed.
+
+The delivery itself was accepted by the forged judge on the first attempt (`ACCEPT-001`, judge
+`sha256:9e8aa3c9686b`), as in i9 and i10: the black-box loop has now passed three times in a row on a real
+machine, and the defects have all been in the plumbing around it.
