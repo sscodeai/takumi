@@ -85,6 +85,197 @@ test('quality gate: gradle failure summary fails', () => {
   assert.equal(judgeGate(report, { exitOk: true, hardFail: false }).passed, false);
 });
 
+// --- Python stdlib unittest (docs/bugs-fixed.md #45) -----------------------
+//
+// A delivered project may test itself with the standard library
+// (`python3 -m unittest discover -v`), and the gate read that as nothing at all
+// — then reported the absence as `0 failing`, which misled both the human and
+// the repair agent. The shape is recognised only when the `Ran N tests in …`
+// line AND the `OK`/`FAILED` line are BOTH present: a stray `OK` in unrelated
+// output is not a test run.
+
+test('quality gate: unittest verbose with 1 failure and 2 errors counts both', () => {
+  const out = [
+    'test_alpha (tests.test_summary.Foo.test_alpha) ... ok',
+    'test_beta (tests.test_summary.Foo.test_beta) ... FAIL',
+    'test_gamma (tests.test_summary.Foo.test_gamma) ... ERROR',
+    '======================================================================',
+    'FAIL: test_beta (tests.test_summary.Foo.test_beta)',
+    '----------------------------------------------------------------------',
+    'Traceback (most recent call last):',
+    '  File "tests/test_summary.py", line 12, in test_beta',
+    '    self.assertEqual(1, 2)',
+    'AssertionError: expected 1, got 2',
+    '----------------------------------------------------------------------',
+    'ERROR: test_gamma (tests.test_summary.Foo.test_gamma)',
+    '----------------------------------------------------------------------',
+    'Traceback (most recent call last):',
+    '  File "tests/test_summary.py", line 20, in test_gamma',
+    '    raise RuntimeError("boom")',
+    'RuntimeError: boom',
+    '----------------------------------------------------------------------',
+    'Ran 12 tests in 0.003s',
+    '',
+    'FAILED (failures=1, errors=2)',
+    '',
+  ].join('\n');
+  const report = parseTestReport(out);
+  assert.deepEqual(report, { shape: 'unittest', total: 12, failed: 3, skipped: 0 });
+  const verdict = judgeGate(report, { exitOk: true, hardFail: false });
+  assert.equal(verdict.passed, false, 'a red unittest run fails the gate even on exit 0');
+  assert.match(verdict.reason, /3 failing over 12 tests/i);
+});
+
+test('quality gate: unittest `OK` is a clean green run', () => {
+  const out = [
+    'test_alpha (tests.test_summary.Foo.test_alpha) ... ok',
+    '',
+    '----------------------------------------------------------------------',
+    'Ran 12 tests in 0.003s',
+    '',
+    'OK',
+    '',
+  ].join('\n');
+  const report = parseTestReport(out);
+  assert.deepEqual(report, { shape: 'unittest', total: 12, failed: 0, skipped: 0 });
+  const verdict = judgeGate(report, { exitOk: true, hardFail: false });
+  assert.equal(verdict.passed, true, `expected PASS (got: ${verdict.reason})`);
+  assert.match(verdict.reason, /12 tests passed/i);
+});
+
+test('quality gate: unittest non-verbose output is recognised', () => {
+  // Non-verbose prints only the two summary lines.
+  const report = parseTestReport('Ran 5 tests in 0.010s\n\nFAILED (failures=2)\n');
+  assert.deepEqual(report, { shape: 'unittest', total: 5, failed: 2, skipped: 0 });
+  const verdict = judgeGate(report, { exitOk: true, hardFail: false });
+  assert.equal(verdict.passed, false);
+  assert.match(verdict.reason, /2 failing over 5 tests/i);
+});
+
+test('quality gate: unittest `FAILED` with only `errors=` counts the errors as failing', () => {
+  const report = parseTestReport('Ran 4 tests in 0.004s\n\nFAILED (errors=1)\n');
+  assert.deepEqual(report, { shape: 'unittest', total: 4, failed: 1, skipped: 0 });
+  const verdict = judgeGate(report, { exitOk: true, hardFail: false });
+  assert.equal(verdict.passed, false, 'an ERROR is a failing test, not a pass');
+  assert.match(verdict.reason, /1 failing over 4 tests/i);
+});
+
+test('quality gate: unittest `FAILED` with neither count fails closed and says what it read', () => {
+  const out = 'Ran 3 tests in 0.002s\n\nFAILED\n';
+  const report = parseTestReport(out);
+  assert.equal(report.shape, 'unrecognised', 'a FAILED line with no count is not readable as a report');
+  const verdict = judgeGate(report, { exitOk: true, hardFail: false });
+  assert.equal(verdict.passed, false, 'a run that said FAILED must never be reported as 0 failing');
+  assert.match(verdict.reason, /unittest/i, `reason says what it read (got: ${verdict.reason})`);
+  assert.match(verdict.reason, /FAILED/, 'reason names the FAILED line it read');
+  assert.match(verdict.reason, /failures=.*errors=/, 'reason names the counts it looked for');
+  assert.match(verdict.reason, /Ran 3 tests in 0\.002s/, 'reason quotes the line it did read');
+  assert.doesNotMatch(verdict.reason, /0 failing/);
+});
+
+test('quality gate: a stray `OK` with no `Ran N tests` line is not a unittest run', () => {
+  for (const out of ['OK\n', 'build finished\nOK\n', 'all checks done\nOK\n']) {
+    const report = parseTestReport(out);
+    assert.equal(report.shape, 'unrecognised', `a stray OK must not be read as a green run: ${JSON.stringify(out)}`);
+    const verdict = judgeGate(report, { exitOk: true, hardFail: false });
+    assert.equal(verdict.passed, false, `must fail closed for: ${JSON.stringify(out)}`);
+  }
+  // The same guard applies to a stray `FAILED`.
+  assert.equal(parseTestReport('FAILED\n').shape, 'unrecognised');
+});
+
+test('quality gate: a real pytest run stays pytest, and a unittest run is not read as pytest', () => {
+  // pytest's matcher reads any `N passed` / `N failed` token, and a unittest
+  // traceback can contain exactly that text — so the unittest shape is tried
+  // before pytest, and neither may be read as the other.
+  const pytestOut = [
+    '=========================== short test summary info ============================',
+    'FAILED tests/test_a.py::test_x - AssertionError: assert 1 == 2',
+    '========================= 1 failed, 2 passed in 0.42s =========================',
+    '',
+  ].join('\n');
+  assert.deepEqual(parseTestReport(pytestOut), { shape: 'pytest', total: 3, failed: 1, skipped: 0 });
+
+  const unittestOut = [
+    'test_alpha (tests.test_x.Foo.test_alpha) ... FAIL',
+    '======================================================================',
+    'FAIL: test_alpha (tests.test_x.Foo.test_alpha)',
+    '----------------------------------------------------------------------',
+    'Traceback (most recent call last):',
+    'AssertionError: \'2 passed\' != \'1 failed\'',
+    '----------------------------------------------------------------------',
+    'Ran 4 tests in 0.005s',
+    '',
+    'FAILED (failures=1)',
+    '',
+  ].join('\n');
+  assert.deepEqual(
+    parseTestReport(unittestOut),
+    { shape: 'unittest', total: 4, failed: 1, skipped: 0 },
+    'a unittest run is read by its own counts, not by pytest reading its traceback',
+  );
+});
+
+test('quality gate: an unreadable report names what was tried and never says `0 failing`', () => {
+  const report = parseTestReport('PASS src/a.test.ts\nTest Suites: 1 passed, 1 total\ngate saw nothing it could read\n');
+  assert.equal(report.shape, 'unrecognised');
+  const verdict = judgeGate(report, { exitOk: true, hardFail: false });
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.reason, report.shape === 'unrecognised' ? report.reason : '');
+  assert.match(verdict.reason, /could not be read as any known report/i, 'the message says what actually happened');
+  assert.match(verdict.reason, /tried: TAP, jest\/vitest, unittest, pytest, Maven, gradle\/JUnit, CTRF/i, 'and names the shapes that were tried');
+  assert.doesNotMatch(verdict.reason, /0 failing/, 'the misleading phrase is gone');
+});
+
+test('quality gate step: a stdlib unittest delivery is accepted, not refused as `0 failing`', async () => {
+  // The live defect (run i12): `run-tests.sh` ran `python3 -m unittest discover -v`,
+  // the gate read no report at all, and a COMPLETE delivery was refused twice with
+  // `quality gate FAILED (0 failing)` — a message that says the tests failed when
+  // they had not.
+  const dir = mkdtempSync(join(tmpdir(), 'qg-unittest-'));
+  try {
+    writeFileSync(
+      join(dir, 'run-tests.sh'),
+      [
+        '#!/bin/sh',
+        'echo "test_alpha (tests.test_summary.Foo.test_alpha) ... ok"',
+        'echo "test_beta (tests.test_summary.Foo.test_beta) ... ok"',
+        'echo "----------------------------------------------------------------------"',
+        'echo "Ran 12 tests in 0.003s"',
+        'echo ""',
+        'echo "OK"',
+        'exit 0',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(join(dir, 'run-tests.sh'), 0o755);
+    const rt = new TestRuntime(() => 'ok', undefined, 'qg-unittest');
+    const wf: WorkflowDefinition = {
+      name: 'qg-unittest',
+      version: '0.1.0',
+      description: '',
+      steps: [{ id: 'gate', type: 'quality_gate', prompt: 'sh run-tests.sh' }],
+    };
+    const res = await executeWorkflow(wf, {
+      cwd: dir,
+      runtime: rt,
+      artifacts: new ArtifactStore(join(dir, '.takumi/a')),
+      onApproval: () => true,
+    });
+    const gate = res.steps.find((s) => s.stepId === 'gate');
+    assert.equal(
+      gate?.status,
+      'completed',
+      `a green stdlib unittest delivery must pass (got: ${gate?.summary?.slice(0, 200)})`,
+    );
+    assert.equal(res.status, 'completed');
+    assert.match(gate.summary, /shape: unittest/, 'the gate names the shape it read');
+    assert.match(gate.summary, /0 failing over 12 tests/, 'the REAL total, not 0');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- TAP (regression guard: keep the existing strength) --------------------
 
 test('quality gate: node --test TAP green still passes with the real total', () => {

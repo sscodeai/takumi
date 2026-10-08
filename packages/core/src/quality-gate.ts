@@ -6,7 +6,7 @@
 // which turned "unrecognised output" into "1 passing test" — is deliberately
 // gone, because it let jest/vitest/pytest/gradle runs pass vacuously.
 
-export type TestShape = 'tap' | 'jest' | 'pytest' | 'maven' | 'gradle' | 'ctrf';
+export type TestShape = 'tap' | 'jest' | 'pytest' | 'maven' | 'gradle' | 'ctrf' | 'unittest';
 
 export type TestReport =
   | { shape: TestShape; total: number; failed: number; skipped: number }
@@ -90,11 +90,13 @@ export function detectHardFailure(out: string): boolean {
  * Parse the test outcome out of raw runner output.
  *
  * Recognised shapes: TAP (`# tests N` / `# fail N` / `# skip N` / `not ok`),
- * jest and vitest (`Tests: ... total` / `Tests  N passed (N)`), pytest
- * (`= 1 failed, 2 passed in 0.4s` and the bare `N passed` form), Maven
- * (`Tests run: N, Failures: N, Errors: N, Skipped: N`), gradle/JUnit
- * (`N tests completed, M failed`) and CTRF (Common Test Report Format, the
- * JSON test-result interchange standard). Everything else is `unrecognised`.
+ * jest and vitest (`Tests: ... total` / `Tests  N passed (N)`), Python's
+ * standard library `unittest` (`Ran N tests in 0.4s` + `OK` / `FAILED
+ * (failures=N, errors=N)`), pytest (`= 1 failed, 2 passed in 0.4s` and the bare
+ * `N passed` form), Maven (`Tests run: N, Failures: N, Errors: N, Skipped: N`),
+ * gradle/JUnit (`N tests completed, M failed`) and CTRF (Common Test Report
+ * Format, the JSON test-result interchange standard). Everything else is
+ * `unrecognised`.
  *
  * Every summary block in the output is counted, not just the first one: a
  * monorepo prints one block per package, and reporting only the first block
@@ -110,6 +112,21 @@ export function parseTestReport(out: string): TestReport {
   const jest = parseJest(out);
   if (jest) return { shape: 'jest', ...jest };
 
+  // `unittest` is tried here, after jest and BEFORE pytest: pytest's matcher is
+  // the loosest in this file, and a unittest traceback can carry exactly the
+  // text pytest reads (`AssertionError: '2 passed' != '1 failed'`), so pytest
+  // first would claim a unittest run and report its counts. No real pytest run
+  // carries the `Ran N tests in …` line, so the stricter shape is tried first
+  // and cannot steal one.
+  const unittest = parseUnittest(out);
+  if (unittest === 'failed-without-counts') {
+    return {
+      shape: 'unrecognised',
+      reason: `${UNITTEST_UNREADABLE_FAILURE} (${unittestLine(out)})`,
+    };
+  }
+  if (unittest) return { shape: 'unittest', ...unittest };
+
   const pytest = parsePytest(out);
   if (pytest) return { shape: 'pytest', ...pytest };
 
@@ -122,7 +139,7 @@ export function parseTestReport(out: string): TestReport {
   return {
     shape: 'unrecognised',
     reason:
-      'no known test summary was found in the output (recognised: TAP, jest/vitest, pytest, Maven, gradle/JUnit, CTRF)',
+      'the test output could not be read as any known report: no known test summary was found in the output (tried: TAP, jest/vitest, unittest, pytest, Maven, gradle/JUnit, CTRF)',
   };
 }
 
@@ -217,6 +234,58 @@ function parseJest(out: string): Counts | undefined {
   }
   if (total === 0) total = failed + skipped + passed;
   return counts(total, failed, skipped);
+}
+
+/**
+ * Python's standard library `unittest` (`python3 -m unittest discover -v`, the
+ * runner a delivered project's own `run-tests.sh` may use): one line per test in
+ * verbose mode, then `Ran N tests in 0.003s`, then either a bare `OK` (clean
+ * run) or `FAILED (failures=1, errors=2)`.
+ *
+ * The `Ran N tests in …` line is the ANCHOR, and it is MANDATORY: `OK` is an
+ * ordinary English word that unrelated output can carry on a line of its own,
+ * and reading a stray `OK` as a green test run is exactly the vacuous pass this
+ * gate exists to stop. Both lines must be present, so a real TAP/jest/pytest/
+ * Maven/gradle/CTRF run — none of which prints `Ran N tests in …` — can never be
+ * re-read as unittest.
+ *
+ * `failing` is `failures=` PLUS `errors=`: an ERROR is a failing test, not a
+ * pass. The parenthetical may hold only one of the two, in either order.
+ *
+ * A `FAILED` line with NEITHER count says the run failed but not how many tests
+ * failed. That is `failed-without-counts`: the caller reports it as unreadable so
+ * the gate fails closed and says what it read, rather than inventing `0` failing
+ * tests out of a line that says the opposite.
+ */
+function parseUnittest(out: string): Counts | 'failed-without-counts' | undefined {
+  const ran = /^Ran\s+(\d+)\s+tests?\s+in\s+[\d.]+s\b/m.exec(out);
+  if (!ran) return undefined;
+  const failedLine = /^FAILED\b[^\n]*/m.exec(out);
+  const okLine = /^OK\b[^\n]*/m.exec(out);
+  if (!failedLine && !okLine) return undefined;
+
+  const total = parseInt(ran[1] ?? '0', 10);
+  if (failedLine) {
+    const body = failedLine[0];
+    const failures = /failures\s*=\s*(\d+)/.exec(body);
+    const errors = /errors\s*=\s*(\d+)/.exec(body);
+    if (!failures && !errors) return 'failed-without-counts';
+    return counts(total, parseInt(failures?.[1] ?? '0', 10) + parseInt(errors?.[1] ?? '0', 10), 0);
+  }
+  // A clean run: `OK`, optionally `OK (skipped=N)`. The skips are read so an
+  // all-skipped unittest run is not reported as a green one (judgeGate already
+  // refuses a run where `skipped === total`).
+  const skipped = /skipped\s*=\s*(\d+)/.exec(okLine?.[0] ?? '');
+  return counts(total, 0, parseInt(skipped?.[1] ?? '0', 10));
+}
+
+/** Why a unittest run that reported `FAILED` without a count is unreadable — it says what it read. */
+const UNITTEST_UNREADABLE_FAILURE =
+  'the output is a Python unittest report whose FAILED line named neither failures= nor errors=, so the number of failing tests could not be read';
+
+/** The `Ran N tests in …` line of a unittest run, verbatim, for the message above. */
+function unittestLine(out: string): string {
+  return /^Ran\s+\d+\s+tests?\s+in\s+[\d.]+s\b[^\n]*/m.exec(out)?.[0] ?? 'no Ran line';
 }
 
 /**
