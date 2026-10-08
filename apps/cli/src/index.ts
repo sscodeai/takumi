@@ -205,7 +205,14 @@ Usage:
                                        A workflow with a 'publish' step publishes through the
                                        'delivery:' section of takumi.yaml
                                        (e.g. delivery: { provider: forgejo, repo: owner/name });
-                                       with no such section the run is refused BEFORE it starts
+                                       with no such section the run is refused BEFORE it starts.
+                                       With one, the run creates its OWN worktree by cloning
+                                       that repo and branching from its base
+  takumi run "<prompt>" --worktree <path>
+                                       Run in an EXISTING checkout instead (advanced). takumi
+                                       refuses BEFORE the run unless it is a git repository, on
+                                       a branch (not a detached HEAD), clean, and descended
+                                       from <remote>/<baseBranch>
   takumi runtime list                  List available runtimes
   takumi board [--provider github --repo owner/name]
                                        Read-only view of a task board (ADR-006)

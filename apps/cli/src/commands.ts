@@ -17,6 +17,7 @@ import { FakeRuntime } from '@takumi/runtime-fake';
 import { CliRuntimeAdapter } from '@takumi/runtime-cli';
 import { createDeliveryFromSection } from './delivery-command.js';
 import type { DeliveryProviderWithReporting, DeliverySection } from './delivery-command.js';
+import { assertWorktreeQualifies, createDeliveryWorktree } from './worktree-command.js';
 
 /**
  * Interactive approval gate. Prompts the user with [a] approve / [r] reject /
@@ -318,8 +319,9 @@ export async function runTask(opts: RunOptions): Promise<{
     // refuses here too, naming what is wrong.
     const publishSteps = wf.steps.filter((s) => s.type === 'publish').map((s) => s.id);
     let delivery: DeliveryProviderWithReporting | undefined;
-    if (opts.config.delivery !== undefined) {
-      delivery = await createDeliveryFromSection(opts.config.delivery);
+    const deliverySection = opts.config.delivery;
+    if (deliverySection !== undefined) {
+      delivery = await createDeliveryFromSection(deliverySection);
     } else if (publishSteps.length > 0) {
       throw new Error(
         `workflow "${wf.name}" declares a publish step [${publishSteps.join(', ')}] but takumi.yaml has no ` +
@@ -327,6 +329,30 @@ export async function runTask(opts: RunOptions): Promise<{
           'spending its work. Add a `delivery:` section naming the provider and its options ' +
           '(e.g. `delivery: { provider: forgejo, repo: owner/name }`).',
       );
+    }
+
+    // (B)/(C) THE WORKTREE. `--worktree` is an EXPLICIT OVERRIDE for an existing checkout
+    // (continuing an existing branch, an advanced case); with a configured `delivery:` and no
+    // `--worktree`, the run CREATES its own worktree from the target repository, so the ancestry
+    // the publish step checks holds by construction and the implementer sees the real repository
+    // (docs/bugs-fixed.md #43). Both branches of this decision happen BEFORE `executeWorkflow`: a
+    // run that spends its work and only then discovers it cannot publish is the failure both fixes
+    // exist to prevent.
+    const deliveryRemote = deliverySection?.remote ?? 'origin';
+    const deliveryBaseBranch = deliverySection?.baseBranch ?? 'main';
+    let worktreePath = opts.worktree;
+    if (worktreePath !== undefined) {
+      // Only a run that will use the delivery boundary needs a qualifying worktree; a workflow
+      // that declares no publish step with no `delivery:` section is unchanged from before.
+      if (delivery !== undefined || publishSteps.length > 0) {
+        await assertWorktreeQualifies({ worktree: worktreePath, remote: deliveryRemote, baseBranch: deliveryBaseBranch });
+      }
+    } else if (deliverySection !== undefined && publishSteps.length > 0) {
+      const created = await createDeliveryWorktree({ cwd: opts.cwd, section: deliverySection });
+      worktreePath = created.path;
+      const line = `worktree: created ${created.path} (branch ${created.branch}, cloned from ${created.cloneUrl})`;
+      events.push(line);
+      if (opts.verbose) console.log(`  ${line}`);
     }
     // Durable resume: rebuild completed steps from the newest audit record.
     let resumeCtx: { completed: Map<string, WorkflowStepResult> } | undefined;
@@ -381,7 +407,7 @@ export async function runTask(opts: RunOptions): Promise<{
               },
             }),
         ...(opts.confirmedRequirement === undefined ? {} : { confirmedRequirement: opts.confirmedRequirement }),
-        ...(opts.worktree === undefined ? {} : { worktree: opts.worktree }),
+        ...(worktreePath === undefined ? {} : { worktree: worktreePath }),
         onApproval: async (req) => {
           const line = `approval required [${req.stepId}]: ${req.prompt}`;
           events.push(line);

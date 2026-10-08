@@ -201,3 +201,35 @@ export async function createDeliveryFromSection(section: DeliverySection): Promi
   }
   return createDeliveryProvider(deliveryOptionsFromSection(section));
 }
+
+/**
+ * The URL a git clone of the configured repository uses.
+ *
+ * WHY IT LIVES HERE AND HOW IT REUSES THE PROVIDER: a clone URL derived a second way would be a
+ * second definition of "where this repository is", and the two would drift the day the provider's
+ * base handling changed. So the owner/name split is the SAME `splitOwnerRepo` the adapter's option
+ * mapper uses, and the apiBase is resolved by the provider's OWN exported target resolver
+ * (`resolveForgejoTarget`) — the exact call the provider makes, so the trailing-slash trimming and
+ * the single-path-segment validation are shared, not re-implemented.
+ *
+ * Forgejo serves git over HTTP at the WEB base: the API base with its `/api/v1` suffix removed.
+ * That is the URL the live self-test clones (`<host>/<owner>/<repo>.git`), and it is the only part
+ * of the derivation the provider itself never needs — it talks to the API, not to git.
+ *
+ * The URL never carries a credential: authentication is the operator's git credential helper, the
+ * same way the live self-test clones (the token stays environment-only).
+ */
+export async function forgejoCloneUrl(section: DeliverySection): Promise<string> {
+  if (section.provider !== 'forgejo') {
+    throw new Error(`a clone URL is only defined for provider "forgejo", not ${JSON.stringify(section.provider)}`);
+  }
+  if (section.repo === undefined) {
+    throw new Error('provider forgejo needs repo owner/name');
+  }
+  const { owner, repo } = splitOwnerRepo(section.repo);
+  // The provider's own resolution: same apiBase normalisation, same owner/repo validation.
+  const { resolveForgejoTarget } = await import('@takumi/delivery-forgejo');
+  const target = resolveForgejoTarget({ owner, repo, ...(section.apiBase === undefined ? {} : { apiBase: section.apiBase }) });
+  const webBase = target.apiBase.replace(/\/api\/v1$/, '');
+  return `${webBase}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git`;
+}
