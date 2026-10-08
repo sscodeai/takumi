@@ -74,11 +74,20 @@ deliverable:
       relation: duplicate-resolution
       decides: AMB-002
       description: "A repeated station id resolves the way AMB-002 decided."
+    - id: REL-003
+      relation: mutation-detection
+      description: "The delivered tests fail when the delivered behaviour is mutated."
   differential:
     - id: DIFF-001
       anchor: independent-aggregation
       decides: AMB-003
       description: "An independent recomputation of the summary matches the tool's output."
+  mutation:                             # how the mutation-detection relation runs its tool (see rule 16)
+    run: "npx stryker run --reporters json"       # required: how the judge runs the tool, in the worktree
+    report_path: "reports/mutation/mutation.json" # required: where the tool writes its verdict
+    format: survivors-json              # required: only survivors-json is implemented for now
+    max_survivors: 0                    # required: how many uncaught mutants are tolerated (usually 0)
+    timeoutMs: 900000                   # optional: a mutation run is many test runs (default 900000)
 ```
 
 ## Rules
@@ -140,6 +149,9 @@ from your text alone.
       - `independent-aggregation`   recompute the answer independently and compare (differential)
       - `browser-scenario`       run a declared end-to-end scenario of the surface and judge it by the
                                  command's exit code and the report it writes (see rule 13)
+      - `mutation-detection`     the delivered TESTS fail when the delivered behaviour is mutated — the
+                                 judge runs the mutation tool the document declares and reads its report
+                                 (see rule 16)
     A relation outside this list will be REFUSED at acceptance time (after the implementation has been
     paid for), so use only these. Every BLOCKING decision must be settled by one of them, through
     `decides: <AMB-nnn>` — a blocking decision that no relation exercises is refused as well. A decision
@@ -176,3 +188,21 @@ from your text alone.
     acceptance criteria on their requirements and are NEVER claimed by a relation: the judge reports them
     as not mechanised, and a criterion reported as checked when it is not is the worst thing you can
     emit here.
+16. `mutation-detection` is the one relation that asks whether the delivered TESTS can fail. It is the
+    check the vacuous-green guard cannot make: the deliverable ran, its tests passed, and they would have
+    passed for a wrong implementation too. The judge injects nothing itself — it runs the mutation tool
+    the document declares, reads the report that tool writes, and requires the delivered tests to fail on
+    the mutants. One `mutation:` block inside `deliverable` configures it (one block per document):
+      - `run`: how the judge runs the mutation tool, in the delivery worktree (required);
+      - `report_path`: where the tool writes its verdict, relative to the worktree (required);
+      - `format`: the report format — `survivors-json` only, for now (required);
+      - `max_survivors`: how many uncaught mutants are tolerated, a non-negative integer, usually 0 (required);
+      - `timeoutMs`: the bound for the whole run, at least 5000 (optional; default 900000).
+    `survivors-json` is a tool-agnostic report, `{"total": <int>, "survivors": [{"file": "...", "line":
+    <int>, "description": "..."}, ...]}` — wrap any tool into it. The judge fails closed when the tool did
+    not run, the report is missing or unreadable, its shape is not the declared format, or it measured
+    zero mutants: a mutation check that could not run is NEVER a pass. It is the most expensive check in
+    the vocabulary (a suite run once per mutant), so declare it only when the request is worth it.
+    REFUSED before a human confirms: a `mutation-detection` relation with no `mutation:` block, a
+    `mutation:` block with no relation using it, an unknown `format`, a `max_survivors` that is not a
+    non-negative integer, and a `timeoutMs` below the floor.

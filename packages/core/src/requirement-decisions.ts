@@ -21,10 +21,28 @@ export const JUDGE_RELATION_VOCABULARY = [
   'malformed-row-accounting',
   'independent-aggregation',
   'browser-scenario',
+  'mutation-detection',
 ] as const;
 
 /** The report formats a `browser-scenario` may name as its evidence, beyond the command's exit code. */
 export const JUDGE_SCENARIO_REPORTS = ['ctrf', 'junit', 'tap'] as const;
+
+/**
+ * The mutation report formats a judge implements (ADR-039). `survivors-json` is the design's first choice
+ * and deliberately boring: a tool-agnostic report every mutation tool can be wrapped into, which lets the
+ * relation be proven end to end before any specific tool's schema is wired in. The tool-specific readers
+ * (stryker, mutmut, cargo-mutants) come after, and a format the judge does not implement is refused, not
+ * guessed — a report the judge cannot read is never a pass.
+ */
+export const JUDGE_MUTATION_FORMATS = ['survivors-json'] as const;
+
+/**
+ * The smallest honest bound for a mutation run (ADR-039). A mutation tool executes the delivered suite
+ * once per mutant, so a bound below five seconds cannot contain even a two-mutant pass; scenarios get one
+ * second because they run one command once. This is a FLOOR, not a recommendation — a real suite should
+ * declare far more (the design's example is 900000).
+ */
+export const MIN_MUTATION_TIMEOUT_MS = 5000;
 
 /**
  * The MEANING of a decision's answer, per relation kind (ADR-031). Prose is for humans; a judge needs to
@@ -114,12 +132,33 @@ export interface DeliverableBlock {
   run?: string;
   /** The declared scenarios, in document order (ADR-035). */
   scenarios: Scenario[];
+  /** The mutation tool configuration a `mutation-detection` relation runs (ADR-039), when declared. */
+  mutation?: MutationBlock;
   /** The declared output shape a judge may parse, as written. */
   outputFormat?: unknown;
   /** The typed input world, and the shapes a judge may parse, when the document declares them. */
   input?: InputFormat;
   outputLines: OutputLineFormat[];
   bindings: DecisionBinding[];
+}
+
+/**
+ * The `mutation:` block inside `deliverable` (ADR-039): how a `mutation-detection` relation runs a mutation
+ * tool and reads its verdict. Unlike a scenario, this block is not itself a check — it CONFIGURES the
+ * relation, which the document declares in `relations:` like any other. Flat keys, because the forge reads
+ * the document line-wise and a nested structure it cannot read would just move the guesswork.
+ */
+export interface MutationBlock {
+  /** The command the judge runs in the delivery worktree; it writes `reportPath`. */
+  run: string;
+  /** Where the tool writes its verdict, relative to the worktree. */
+  reportPath: string;
+  /** The declared report format; only `JUDGE_MUTATION_FORMATS` may be named. */
+  format: string;
+  /** How many uncaught mutants are tolerated (usually 0), when it is a non-negative integer. */
+  maxSurvivors?: number;
+  /** The bound for the whole run, when it is a finite number. */
+  timeoutMs?: number;
 }
 
 export interface Decision {
@@ -162,6 +201,26 @@ export function parseScenarios(text: string): Scenario[] {
     });
   }
   return scenarios;
+}
+
+/**
+ * The `mutation:` block inside `deliverable`, as written (ADR-039). Absent when the document declares no
+ * mutation tool. The fields are returned as written (empty strings for a missing `run`/`report_path`/
+ * `format`) so the validator can name the missing one rather than silently dropping it.
+ */
+export function parseMutation(text: string): MutationBlock | undefined {
+  const raw = deliverableOf(text)?.['mutation'];
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const entry = raw as Record<string, unknown>;
+  const max = entry['max_survivors'];
+  const timeout = entry['timeoutMs'];
+  return {
+    run: stringOf(entry['run']) ?? '',
+    reportPath: stringOf(entry['report_path']) ?? '',
+    format: stringOf(entry['format']) ?? '',
+    ...(typeof max === 'number' && Number.isInteger(max) && max >= 0 ? { maxSurvivors: max } : {}),
+    ...(typeof timeout === 'number' && Number.isFinite(timeout) ? { timeoutMs: timeout } : {}),
+  };
 }
 
 export interface DecisionBinding {
@@ -344,10 +403,12 @@ export function parseDeliverableBlock(text: string): DeliverableBlock | undefine
   if (block === undefined) return undefined;
   const run = stringOf(block['run']);
   const input = parseInputFormat(text);
+  const mutation = parseMutation(text);
   return {
     ...(run === undefined ? {} : { run }),
     ...(block['output_format'] === undefined ? {} : { outputFormat: block['output_format'] }),
     ...(input === undefined ? {} : { input }),
+    ...(mutation === undefined ? {} : { mutation }),
     outputLines: parseOutputLines(text),
     scenarios: parseScenarios(text),
     bindings: parseDecisionBindings(text),
@@ -551,6 +612,74 @@ export function validateRequirementDocument(text: string): string[] {
       }
       if (scenario.decides !== undefined && !decisionById.has(scenario.decides)) {
         issues.push(`${scenario.id} settles ${scenario.decides}, which is not a decision in this document`);
+      }
+    }
+
+    // ADR-039: a `mutation-detection` relation needs a `mutation:` block to run, and a `mutation:` block
+    // with no relation using it is cost with no check. The front door refuses both, before a human confirms
+    // and long before an expensive tool is run — a mutation check that cannot run is never a pass.
+    const mutationRelations = block.bindings.filter((b) => b.relation === 'mutation-detection');
+    const hasMutationBlock = objectHasKey(text, 'mutation');
+    const mutation = block.mutation;
+    if (mutationRelations.length > 1) {
+      issues.push(
+        `the document declares ${mutationRelations.length} mutation-detection relations (${mutationRelations.map((b) => b.checkId).join(', ')}): one mutation block configures one check, and running the tool once per relation is the same run paid for twice`,
+      );
+    }
+    if (mutationRelations.length > 0 && mutation === undefined) {
+      issues.push(
+        `the relation ${mutationRelations[0]?.checkId} is a mutation-detection relation with no mutation: block: a check with nothing to run is not a check`,
+      );
+    }
+    if (hasMutationBlock && mutationRelations.length === 0) {
+      issues.push(
+        'the deliverable block declares a mutation: block, but no relation uses it: a tool nobody checks with is cost with no check',
+      );
+    }
+    if (hasMutationBlock) {
+      const rawMutation = deliverableOf(text)?.['mutation'];
+      const entry =
+        rawMutation !== null && typeof rawMutation === 'object' && !Array.isArray(rawMutation)
+          ? (rawMutation as Record<string, unknown>)
+          : {};
+      if (mutation === undefined) {
+        issues.push('the mutation block is not a mapping: it has to declare run, report_path, format and max_survivors');
+      } else {
+        if (mutation.run.trim().length === 0) {
+          issues.push('the mutation block declares no run: a mutation check with no command to run is not a check');
+        }
+        const format = stringOf(entry['format']);
+        const reportPath = stringOf(entry['report_path']);
+        if (format === undefined && reportPath === undefined) {
+          issues.push('the mutation block declares neither format nor report_path: the judge would have nothing to read');
+        } else if (format !== undefined && reportPath === undefined) {
+          issues.push(
+            `the mutation block declares format "${format}" but no report_path: a report the judge cannot find is not evidence`,
+          );
+        } else if (format === undefined && reportPath !== undefined) {
+          issues.push('the mutation block declares report_path but no format: the judge would read a file without being told what wrote it');
+        }
+        if (format !== undefined && !(JUDGE_MUTATION_FORMATS as readonly string[]).includes(format)) {
+          issues.push(
+            `the mutation block declares the format "${format}", which no judge can read (implemented: ${JUDGE_MUTATION_FORMATS.join(', ')})`,
+          );
+        }
+        const max = entry['max_survivors'];
+        if (!Object.prototype.hasOwnProperty.call(entry, 'max_survivors')) {
+          issues.push('the mutation block declares no max_survivors: a mutation check with no budget tolerates every survivor, which is not a check');
+        } else if (typeof max !== 'number' || !Number.isInteger(max) || max < 0) {
+          issues.push(
+            `the mutation block declares max_survivors ${JSON.stringify(max)}, which is not a non-negative integer: the budget is how many uncaught mutants are tolerated, and a budget nobody can count is not a budget`,
+          );
+        }
+        if (Object.prototype.hasOwnProperty.call(entry, 'timeoutMs')) {
+          const timeout = entry['timeoutMs'];
+          if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout < MIN_MUTATION_TIMEOUT_MS) {
+            issues.push(
+              `the mutation block declares timeoutMs ${JSON.stringify(timeout)}: a mutation run executes the delivered suite once per mutant, so a bound below ${MIN_MUTATION_TIMEOUT_MS}ms cannot honestly contain one`,
+            );
+          }
+        }
       }
     }
 

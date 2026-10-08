@@ -178,6 +178,73 @@ done <<EOF
 $SCENARIO_IDS
 EOF
 
+# --- the declared mutation block (ADR-039) ------------------------------------------------------
+# The mutation relation's tool configuration, flat and line-wise: `run|report_path|format|max_survivors|
+# timeoutMs` in one TAB-separated record, so a command containing spaces survives. This block is not a
+# check itself: it configures the `mutation-detection` relation the document declares in `relations:`,
+# which the dispatch loop already walks like any other relation. The section ends at the next key INDENTED
+# NO FURTHER than the mutation key, the same rule the scenarios parser learned the hard way.
+MUTATION=$(awk '
+  function ind(s) { match(s, /^[ ]*/); return RLENGTH }
+  function unmark(s) { sub(/^[[:space:]]*-[[:space:]]*/, "", s); return s }
+  function val(s, k) { s = unmark(s); sub("^[[:space:]]*" k ":[[:space:]]*", "", s); gsub(/^"|"$/, "", s); return s }
+  /^[[:space:]]*mutation:[[:space:]]*$/ { inm = 1; mi = ind($0); next }
+  inm && ind($0) <= mi && $0 ~ /^[[:space:]]*[a-zA-Z_]+:[[:space:]]*$/ { inm = 0; next }
+  inm && /^[[:space:]]*run:[[:space:]]*/ { mrun = val($0, "run"); next }
+  inm && /^[[:space:]]*report_path:[[:space:]]*/ { mrpath = val($0, "report_path"); next }
+  inm && /^[[:space:]]*format:[[:space:]]*/ { mfmt = val($0, "format"); next }
+  inm && /^[[:space:]]*max_survivors:[[:space:]]*/ { mmax = val($0, "max_survivors"); next }
+  inm && /^[[:space:]]*timeoutMs:[[:space:]]*/ { mtmo = val($0, "timeoutMs"); next }
+  END { if (mrun != "" || mrpath != "" || mfmt != "" || mmax != "" || mtmo != "") print mrun "\t" mrpath "\t" mfmt "\t" mmax "\t" mtmo }
+' "$DOC")
+
+MUTATION_FORMATS="survivors-json"
+MUTATION_MIN_TIMEOUT_MS=5000
+MUT_RUN=""; MUT_REPORT_PATH=""; MUT_FORMAT=""; MUT_MAX_SURVIVORS=""; MUT_TIMEOUT_MS=""
+if [ -n "$MUTATION" ]; then
+  MUT_RUN=$(printf '%s\n' "$MUTATION" | awk -F'\t' '{ print $1 }')
+  MUT_REPORT_PATH=$(printf '%s\n' "$MUTATION" | awk -F'\t' '{ print $2 }')
+  MUT_FORMAT=$(printf '%s\n' "$MUTATION" | awk -F'\t' '{ print $3 }')
+  MUT_MAX_SURVIVORS=$(printf '%s\n' "$MUTATION" | awk -F'\t' '{ print $4 }')
+  MUT_TIMEOUT_MS=$(printf '%s\n' "$MUTATION" | awk -F'\t' '{ print $5 }')
+fi
+
+# How many relations the mutation block configures: one block, one check. A mutation run is the most
+# expensive check in the vocabulary, so a second relation re-running it is a cost with no second check.
+MUT_REL_COUNT=$(printf '%s\n' "$RELATIONS" | awk '$2 == "mutation-detection" { n++ } END { print n + 0 }')
+MUT_REL_IDS="$(printf '%s\n' "$RELATIONS" | awk '$2 == "mutation-detection" { printf "%s ", $1 }')"
+
+if [ "$MUT_REL_COUNT" -gt 1 ]; then
+  refuse "the document declares $MUT_REL_COUNT mutation-detection relations ($MUT_REL_IDS): one mutation block configures one check, and running the tool once per relation is the same run paid for twice"
+fi
+if [ "$MUT_REL_COUNT" -ge 1 ] && [ -z "$MUTATION" ]; then
+  refuse "a mutation-detection relation is declared with no mutation block: a check with nothing to run is not a check"
+fi
+if [ -n "$MUTATION" ] && [ "$MUT_REL_COUNT" -eq 0 ]; then
+  refuse "the document declares a mutation block, but no relation uses it: a tool nobody checks with is cost with no check"
+fi
+if [ -n "$MUTATION" ]; then
+  [ -n "$MUT_RUN" ] || refuse "the mutation block declares no run: a mutation check with no command to run is not a check"
+  [ -n "$MUT_REPORT_PATH" ] || refuse "the mutation block declares no report_path: a report the judge cannot find is not evidence"
+  [ -n "$MUT_FORMAT" ] || refuse "the mutation block declares no format: the judge would read a file without being told what wrote it (implemented: $MUTATION_FORMATS)"
+  case " $MUTATION_FORMATS " in
+    *" $MUT_FORMAT "*) ;;
+    *) refuse "the mutation block declares the format \"$MUT_FORMAT\", which no judge can read (implemented: $MUTATION_FORMATS)" ;;
+  esac
+  case "$MUT_MAX_SURVIVORS" in
+    ''|*[!0-9]*) refuse "the mutation block declares max_survivors \"$MUT_MAX_SURVIVORS\", which is not a non-negative integer: the budget is how many uncaught mutants are tolerated" ;;
+  esac
+  if [ -n "$MUT_TIMEOUT_MS" ]; then
+    case "$MUT_TIMEOUT_MS" in
+      ''|*[!0-9]*) refuse "the mutation block declares timeoutMs \"$MUT_TIMEOUT_MS\", which is not a whole number of milliseconds" ;;
+    esac
+    [ "$MUT_TIMEOUT_MS" -ge "$MUTATION_MIN_TIMEOUT_MS" ] || refuse "the mutation block declares timeoutMs $MUT_TIMEOUT_MS, below the honest floor of ${MUTATION_MIN_TIMEOUT_MS}ms for a tool that runs the delivered suite once per mutant"
+  fi
+fi
+# A mutation run is many test runs: the bound is declared, not assumed, and the default is generous.
+[ -n "$MUT_TIMEOUT_MS" ] || MUT_TIMEOUT_MS=900000
+MUT_TIMEOUT_S=$((MUT_TIMEOUT_MS / 1000))
+[ -n "$MUT_MAX_SURVIVORS" ] || MUT_MAX_SURVIVORS=0
 
 # The ambiguities: id|blocking|chosen|checkedAs|options (options joined by ';').
 AMBIGUITIES=$(awk '
@@ -206,7 +273,7 @@ decides_of() { # $1 relation/anchor id -> the decision it exercises, or empty
 has_rel() { printf '%s\n' "$RELATIONS" | awk -v r="$1" '$2 == r { f = 1 } END { print f ? "yes" : "no" }'; }
 
 # Every declared relation must be one this forge implements: refusing beats a silent gap.
-IMPLEMENTED=" row-order-invariance additivity duplicate-resolution malformed-row-accounting independent-aggregation browser-scenario "
+IMPLEMENTED=" row-order-invariance additivity duplicate-resolution malformed-row-accounting independent-aggregation browser-scenario mutation-detection "
 MISSING=""
 while read -r id relation; do
   [ -z "${relation:-}" ] && continue
@@ -746,6 +813,124 @@ scenario_report_failures() { # $1 format, $2 path -> prints a reason, or nothing
     *) printf 'the judge does not implement the report format "%s"' "$fmt" ;;
   esac
 }
+
+# --- the mutation report (ADR-039) --------------------------------------------------------------
+# `survivors-json` is the tool-agnostic report the design chose first: `{"total": <int>, "survivors":
+# [{"file": "...", "line": <int>, "description": "..."}, ...]}`. It is read by a small strict JSON reader,
+# not by a general parser: it accepts EXACTLY the declared shape (keys `total` and `survivors`, and each
+# survivor carrying `file`, `line` and `description`) and refuses anything else — a report the judge cannot
+# read is never a pass. It is deliberately dependency-free (awk only), so the judge stays a shell script.
+mutation_report_failures() { # $1 format, $2 path, $3 max_survivors -> a reason, or nothing when clean
+  local fmt="$1" path="$2" budget="$3" res first total count names
+  case "$fmt" in
+    survivors-json)
+      res=$(awk '
+        function skip_ws(   c) { while (I <= L) { c = substr(S, I, 1); if (c == " " || c == "\t" || c == "\n" || c == "\r") I++; else break } }
+        function read_str(   c, out) {
+          if (substr(S, I, 1) != "\"") { BAD = "a value that is not a string"; return "" }
+          I++; out = ""
+          while (I <= L) {
+            c = substr(S, I, 1)
+            if (c == "\\") { out = out substr(S, I, 2); I += 2; continue }
+            if (c == "\"") { I++; return out }
+            out = out c; I++
+          }
+          BAD = "an unterminated string"; return ""
+        }
+        function read_int(   v, c) {
+          if (match(substr(S, I), /^-?[0-9]+/)) {
+            v = substr(S, I, RLENGTH); I += RLENGTH; c = substr(S, I, 1)
+            if (c == "." || c == "e" || c == "E") { BAD = "a number that is not an integer"; return "" }
+            return v
+          }
+          BAD = "a value that is not an integer"; return ""
+        }
+        function read_survivor(   c, k, f, l, d) {
+          skip_ws()
+          if (substr(S, I, 1) != "{") { BAD = "a survivor that is not an object"; return "" }
+          I++; f = ""; l = ""; d = ""
+          skip_ws()
+          if (substr(S, I, 1) == "}") { I++ }
+          else while (1) {
+            skip_ws(); k = read_str(); if (BAD != "") return ""
+            skip_ws(); if (substr(S, I, 1) != ":") { BAD = "a survivor field without a value"; return "" }
+            I++; skip_ws()
+            if (k == "file") { f = read_str(); if (BAD != "") return "" }
+            else if (k == "line") { l = read_int(); if (BAD != "") return "" }
+            else if (k == "description") { d = read_str(); if (BAD != "") return "" }
+            else { BAD = "a survivor declaring the key \"" k "\""; return "" }
+            skip_ws(); c = substr(S, I, 1)
+            if (c == ",") { I++; continue }
+            if (c == "}") { I++; break }
+            BAD = "a survivor that is not valid JSON"; return ""
+          }
+          if (f == "" || l == "" || d == "") { BAD = "a survivor without file, line and description"; return "" }
+          return f "\t" l "\t" d
+        }
+        function read_survivors(   c, one) {
+          if (substr(S, I, 1) != "[") { BAD = "a survivors value that is not an array"; return -1 }
+          I++; n = 0; LIST = ""
+          skip_ws()
+          if (substr(S, I, 1) == "]") { I++; return 0 }
+          while (1) {
+            skip_ws(); one = read_survivor(); if (BAD != "") return -1
+            n++; LIST = LIST one "\n"
+            skip_ws(); c = substr(S, I, 1)
+            if (c == ",") { I++; continue }
+            if (c == "]") { I++; break }
+            BAD = "a survivors array that is not valid JSON"; return -1
+          }
+          return n
+        }
+        { S = S $0 "\n" }
+        END {
+          I = 1; L = length(S); BAD = ""; LIST = ""; TOTAL = -1; COUNT = -1
+          skip_ws()
+          if (substr(S, I, 1) != "{") { print "ERROR the report is not a JSON object"; exit }
+          I++; skip_ws()
+          if (substr(S, I, 1) == "}") { I++ }
+          else while (1) {
+            skip_ws(); k = read_str(); if (BAD != "") { print "ERROR " BAD; exit }
+            skip_ws(); if (substr(S, I, 1) != ":") { print "ERROR the report is not valid JSON"; exit }
+            I++; skip_ws()
+            if (k == "total") { v = read_int(); if (BAD != "") { print "ERROR " BAD; exit }; TOTAL = v + 0 }
+            else if (k == "survivors") { COUNT = read_survivors(); if (BAD != "") { print "ERROR " BAD; exit } }
+            else { print "ERROR the report declares the key \"" k "\" where the declared shape has only total and survivors"; exit }
+            skip_ws(); c = substr(S, I, 1)
+            if (c == ",") { I++; continue }
+            if (c == "}") { I++; break }
+            print "ERROR the report is not valid JSON"; exit
+          }
+          skip_ws()
+          if (I <= L) { print "ERROR the report has content after the JSON object"; exit }
+          if (TOTAL < 0) { print "ERROR the report declares no total"; exit }
+          if (COUNT < 0) { print "ERROR the report declares no survivors array"; exit }
+          print "OK " TOTAL " " COUNT
+          if (LIST != "") printf "%s", LIST
+        }
+      ' "$path" 2>/dev/null)
+      first=$(printf '%s\n' "$res" | head -n 1)
+      case "$first" in
+        OK\ *) ;;
+        ERROR\ *) printf 'the report %s is not the declared survivors-json shape: %s' "$path" "${first#ERROR }"; return 0 ;;
+        *) printf 'the report %s cannot be read as survivors-json' "$path"; return 0 ;;
+      esac
+      total=$(printf '%s' "$first" | awk '{ print $2 }')
+      count=$(printf '%s' "$first" | awk '{ print $3 }')
+      case "$count" in ''|*[!0-9]*) printf 'the report %s reports a survivors count the judge cannot read' "$path"; return 0 ;; esac
+      if [ "${total:-0}" -le 0 ]; then
+        printf 'the report %s measured %s mutant(s): a mutation run that measured nothing cannot fail a test, so it is not a pass' "$path" "${total:-0}"
+        return 0
+      fi
+      if [ "$count" -gt "$budget" ]; then
+        names=$(printf '%s\n' "$res" | tail -n +2 | head -n 3 | awk -F'\t' '{ printf "%s:%s (%s); ", $1, $2, $3 }')
+        printf '%s survivor(s) over the budget of %s (of %s mutant(s) measured): %s' "$count" "$budget" "$total" "$names"
+        return 0
+      fi
+      ;;
+    *) printf 'the judge does not implement the mutation report format "%s"' "$fmt" ;;
+  esac
+}
 HEADER
 
   printf '\nRUN_TEMPLATE=%s\n' "'$(sq "$RUN_TEMPLATE")'"
@@ -775,6 +960,16 @@ HEADER
   printf 'scenario_field() { # $1 id, $2 field number\n'
   printf '  printf "%%s\\n" "$SCENARIOS" | awk -F"\t" -v id="$1" -v n="$2" '"'"'$1 == id { print $n; exit }'"'"'\n'
   printf '}\n'
+
+  # The mutation tool configuration (ADR-039). The relation is dispatched like any other; these are the
+  # fields its branch reads. The report path is relative to the worktree, so the judge never holds an
+  # absolute path built from the implementation.
+  printf '\nMUT_RUN=%s\n' "'$(sq "$MUT_RUN")'"
+  printf 'MUT_REPORT_PATH=%s\n' "'$(sq "$MUT_REPORT_PATH")'"
+  printf 'MUT_FORMAT=%s\n' "'$(sq "$MUT_FORMAT")'"
+  printf 'MUT_MAX_SURVIVORS=%s\n' "${MUT_MAX_SURVIVORS:-0}"
+  printf 'MUT_TIMEOUT_MS=%s\n' "${MUT_TIMEOUT_MS:-900000}"
+  printf 'MUT_TIMEOUT_S=%s\n' "$(( ${MUT_TIMEOUT_MS:-900000} / 1000 ))"
 
   emit_fixture() { # $1 filename, $2 content
     printf 'cat > "$FIX/%s" <<%sTAKUMI_FIXTURE%s\n%s\nTAKUMI_FIXTURE\n' "$1" "'" "'" "$2"
@@ -1190,6 +1385,35 @@ else
   fi
 fi
 SCN
+        ;;
+      mutation-detection)
+        cat <<'MUT' | sed "s/@RID@/$rid/g"
+# ADR-039: the delivered TESTS must be able to fail. The judge runs the mutation tool the document
+# declares, reads the report it writes, and compares the survivors to the declared budget. Every path
+# where the tool did not actually run fails CLOSED: not-run is not a pass.
+if [ -z "$MUT_RUN" ]; then
+  relation not_ok @RID@ "mutation-detection: the delivered tests fail when the delivered behaviour is mutated" "the forged judge has no mutation run for this relation"
+else
+  mut_out=$( ( cd "$WORKTREE" && timeout "$MUT_TIMEOUT_S" sh -c "$MUT_RUN" ) 2>&1 )
+  mut_status=$?
+  mpath="$WORKTREE/$MUT_REPORT_PATH"
+  mut_reason=""
+  if [ "$mut_status" = 124 ]; then
+    mut_reason="the mutation command timed out after ${MUT_TIMEOUT_MS}ms, so the tests were never exercised: $MUT_RUN"
+  elif [ "$mut_status" = 127 ]; then
+    mut_reason="the mutation command could not run (exit 127), so the tests were never exercised: $MUT_RUN"
+  elif [ ! -f "$mpath" ]; then
+    mut_reason="the report $mpath does not exist (the command exited $mut_status): a mutation run whose report the judge cannot read is not a pass"
+  else
+    mut_reason=$(mutation_report_failures "$MUT_FORMAT" "$mpath" "$MUT_MAX_SURVIVORS")
+  fi
+  if [ -z "$mut_reason" ]; then
+    relation ok @RID@ "mutation-detection: the delivered tests fail when the delivered behaviour is mutated ($(printf '%s' "$MUT_MAX_SURVIVORS") survivor(s) tolerated)"
+  else
+    relation not_ok @RID@ "mutation-detection: the delivered tests fail when the delivered behaviour is mutated" "$mut_reason"
+  fi
+fi
+MUT
         ;;
     esac
   done <<EOF

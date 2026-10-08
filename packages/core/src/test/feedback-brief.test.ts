@@ -366,3 +366,89 @@ test('validate: a check claiming to settle a decision that is not there is refus
     ),
   );
 });
+
+test('validate: the mutation block is checked before a human confirms it (ADR-039)', () => {
+  // A `mutation:` block CONFIGURES the `mutation-detection` relation declared in `relations:`; it is not a
+  // check by itself. The front door refuses a relation with no block, a block with no relation using it,
+  // and every field a judge could not read — before a human confirms, and long before an expensive tool runs.
+  const mutationDoc = (block: string | null, relations: string): string =>
+    `${DOC.split('\n  relations:')[0] ?? ''}\n${block === null ? '' : `${block}\n`}  relations:\n${relations}`;
+
+  const block = (
+    over: Partial<Record<'run' | 'report_path' | 'format' | 'max_survivors' | 'timeoutMs', string | null>> = {},
+  ): string => {
+    const fields: Record<string, string> = {
+      run: '"bash e2e/mutate.sh"',
+      report_path: '"e2e/mutation.json"',
+      format: 'survivors-json',
+      max_survivors: '0',
+    };
+    for (const [key, value] of Object.entries(over)) {
+      if (value === null) delete fields[key];
+      else fields[key] = value;
+    }
+    return ['  mutation:', ...Object.entries(fields).map(([k, v]) => `    ${k}: ${v}`)].join('\n');
+  };
+
+  const mutationRelation = (id = 'REL-001'): string =>
+    `    - id: ${id}\n      relation: mutation-detection\n      description: The delivered tests fail when the delivered behaviour is mutated.\n`;
+
+  // A mutation-detection relation with no block: a check with nothing to run.
+  const noBlock = mutationDoc(null, mutationRelation());
+  assert.match(validateRequirementDocument(noBlock).join(' | '), /REL-001 is a mutation-detection relation with no mutation: block/);
+
+  // A block with no relation using it: a tool nobody checks with is cost with no check.
+  const orphan = mutationDoc(block(), '    - id: REL-001\n      relation: row-order-invariance\n      description: x\n');
+  assert.match(validateRequirementDocument(orphan).join(' | '), /declares a mutation: block, but no relation uses it/);
+
+  // More than one mutation relation: one block configures one check.
+  const two = mutationDoc(block(), `${mutationRelation('REL-001')}${mutationRelation('REL-002')}`);
+  assert.match(validateRequirementDocument(two).join(' | '), /declares 2 mutation-detection relations \(REL-001, REL-002\)/);
+
+  // No command: the judge would have nothing to run.
+  assert.match(validateRequirementDocument(mutationDoc(block({ run: null }), mutationRelation())).join(' | '), /the mutation block declares no run/);
+
+  // format and report_path are declared together or not at all, in both directions.
+  assert.match(
+    validateRequirementDocument(mutationDoc(block({ report_path: null }), mutationRelation())).join(' | '),
+    /declares format "survivors-json" but no report_path/,
+  );
+  assert.match(
+    validateRequirementDocument(mutationDoc(block({ format: null }), mutationRelation())).join(' | '),
+    /declares report_path but no format/,
+  );
+
+  // A format no judge implements.
+  assert.match(
+    validateRequirementDocument(mutationDoc(block({ format: 'allure' }), mutationRelation())).join(' | '),
+    /declares the format "allure", which no judge can read/,
+  );
+
+  // The budget: required, and a non-negative integer when present.
+  assert.match(
+    validateRequirementDocument(mutationDoc(block({ max_survivors: null }), mutationRelation())).join(' | '),
+    /the mutation block declares no max_survivors/,
+  );
+  assert.match(
+    validateRequirementDocument(mutationDoc(block({ max_survivors: 'many' }), mutationRelation())).join(' | '),
+    /declares max_survivors "many", which is not a non-negative integer/,
+  );
+  assert.match(
+    validateRequirementDocument(mutationDoc(block({ max_survivors: '-1' }), mutationRelation())).join(' | '),
+    /declares max_survivors -1, which is not a non-negative integer/,
+  );
+
+  // The timeout, when declared, may not be below the honest floor for a tool that runs the suite N times.
+  assert.match(
+    validateRequirementDocument(mutationDoc(block({ timeoutMs: '1000' }), mutationRelation())).join(' | '),
+    /declares timeoutMs 1000: a mutation run executes the delivered suite once per mutant, so a bound below 5000ms cannot honestly contain one/,
+  );
+
+  // A well-formed block with its relation is not refused for anything about mutation.
+  const good = mutationDoc(block({ timeoutMs: '900000' }), mutationRelation());
+  assert.deepEqual(
+    validateRequirementDocument(good).filter((i) => i.includes('mutation')),
+    [],
+    'a well-formed mutation block is not refused',
+  );
+});
