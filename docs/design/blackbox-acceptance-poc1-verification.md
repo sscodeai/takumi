@@ -1101,3 +1101,51 @@ Three things about that result are worth stating plainly.
 The delivery itself was accepted by the forged judge on the first attempt (`ACCEPT-001`, judge
 `sha256:9e8aa3c9686b`), as in i9 and i10: the black-box loop has now passed three times in a row on a real
 machine, and the defects have all been in the plumbing around it.
+
+## 17. The chain closes on a real repository (run i13)
+
+Runs i9-i11 all worked in an EMPTY worktree, which hid two things: that a worktree created by hand may not
+descend from the base (#43), and that the implementer picks its own test tooling once there is a real project to
+work in (#45). Run i13 is the first one that goes through a real repository end to end, with the run creating
+its own worktree and the gate reading tests it did not choose.
+
+From the run log:
+
+```
+workflow[quality_gate]: ... (passes — the implementer's stdlib unittest output is read, after #45)
+workflow[judge_forge]: judge forged sha256:9e8aa3c9686b
+workflow[artifact_acceptance]: acceptance PASSED (10 check(s) ok) — ACCEPT-001 written
+step delivery_attempt: completed — delivery accepted on the first attempt
+step publish: completed — published takumi/run-20261006T023105785Z-aef0d1e6 -> main as pull request 12
+workflow[await_checks]: pipeline failure reported: commented on pull request 12; issue 14 opened
+workflow[await_checks]: await_checks FAILED: the pipeline was still PENDING after 300s on 12: pending checks —
+  ci / tests (pull_request) …/runs/4/jobs/0, ci / deliverable (pull_request) …/runs/4/jobs/1,
+  ci / tests (push) …/runs/5/jobs/0, ci / deliverable (push) …/runs/5/jobs/1
+step delivery: skipped — skipped (dependency failed: await_checks)
+```
+
+and what an independent read of the host's API confirms (curl, not the run's own report):
+
+- **pull request 12**: `takumi run wf-13d2b5f3: docs/requirements/intake.yaml`, head `73ad782722e2`, from the
+  branch the RUN created itself — `takumi/run-20261006T023105785Z-aef0d1e6` — with the confirmed requirement and
+  `sha256:73eb5e904e5247e5ac8fe9852378842e10ceba20ce85e3072734bb0a64e6e81d` in the body, plus the run marker;
+- **issue 14**: "Pipeline not green on pull request 12: 4 check(s)";
+- **one comment on pull request 12** carrying the four not-green checks.
+
+What this run establishes, and what it still does not:
+
+1. The delivery worktree is now created BY the run (clone the configured repo, branch from the base), so the
+   ancestry the publish step requires holds by construction rather than by a documented procedure. i12 proved
+   the creation; i13 proved the whole chain on top of it.
+2. The gate reads a delivered project's own test tooling, and it says so plainly when it cannot (#45). Both
+   halves matter: the first is what let this run through, the second is what would have told the truth instead
+   of `0 failing`.
+3. `await_checks` still refuses to call a pending pipeline green, and now reports the failure where a person
+   will see it. The jobs stay pending because no runner is registered on that host; a green verdict here would
+   be a lie, and the run's own failure is the correct outcome.
+4. STILL OPEN, and named in the ledger: a fresh clone has no git identity, so an implementer cannot commit
+   without one (`GIT_AUTHOR_*`/`GIT_COMMITTER_*` were supplied for these runs); and the closure flow cannot
+   record "the VERIFIER was wrong" — i12's refusal was the gate's fault, and ADR-030 offers only "the
+   implementation changes" or "the answer was wrong". i12 wrote no feedback into the document (the write-back
+   needs an ACCEPTANCE failure, not a gate failure inside a repair round), so the wrong record was not created
+   this time; the next verifier-side failure may not be so lucky.
