@@ -13,6 +13,29 @@ import { parse as parseYaml } from 'yaml';
 // commented, and re-serialising the YAML would delete the comments. Everything here returns text; the
 // caller validates it before it lands.
 
+/**
+ * How a human closed a failure (ADR-038). An explicit field, not a sentence to be re-parsed: a reader
+ * must be able to tell "the implementation was at fault" from "the answer was wrong" from "the CHECK
+ * was at fault", because those are three different claims, made by different parties, with different
+ * consequences. `addressed` is the legacy undifferentiated closure (ADR-029) for a failure that maps to
+ * no decision at all; it is recorded rather than implied so it cannot be mistaken for one of the three.
+ */
+export type FeedbackClosureKind = 'implementation-changes' | 'answer-wrong' | 'check-at-fault' | 'addressed';
+
+/** The closure kinds a document may record, in the order the confirmation offers them. */
+export const FEEDBACK_CLOSURE_KINDS: readonly FeedbackClosureKind[] = [
+  'implementation-changes',
+  'answer-wrong',
+  'check-at-fault',
+  'addressed',
+];
+
+function closureKindOf(value: unknown): FeedbackClosureKind | undefined {
+  return typeof value === 'string' && (FEEDBACK_CLOSURE_KINDS as readonly string[]).includes(value)
+    ? (value as FeedbackClosureKind)
+    : undefined;
+}
+
 export interface FeedbackEntry {
   id: string;
   /** When the machine recorded it. */
@@ -31,6 +54,8 @@ export interface FeedbackEntry {
   resolvedNote?: string;
   /** The decision that answered this failure, when the resolution was "the answer was wrong" (ADR-030). */
   resolvedByDecision?: string;
+  /** How the human closed this failure (ADR-038): an explicit field, not a sentence to be re-parsed. */
+  resolvedKind?: FeedbackClosureKind;
 }
 
 export interface FeedbackAppendInput {
@@ -83,6 +108,7 @@ export function parseFeedback(text: string): FeedbackEntry[] {
       ...(stringOf(entry['resolvedBy']) === undefined ? {} : { resolvedBy: stringOf(entry['resolvedBy']) }),
       ...(stringOf(entry['resolvedNote']) === undefined ? {} : { resolvedNote: stringOf(entry['resolvedNote']) }),
       ...(stringOf(entry['resolvedByDecision']) === undefined ? {} : { resolvedByDecision: stringOf(entry['resolvedByDecision']) }),
+      ...(closureKindOf(entry['resolvedKind']) === undefined ? {} : { resolvedKind: closureKindOf(entry['resolvedKind']) }),
     });
   }
   return entries;
@@ -111,6 +137,7 @@ export function renderFeedbackEntry(entry: FeedbackEntry): string {
           `    resolvedAt: ${quoted(entry.resolvedAt ?? '')}`,
           `    resolvedBy: ${quoted(entry.resolvedBy ?? '')}`,
           `    resolvedNote: ${quoted(entry.resolvedNote ?? '')}`,
+          ...(entry.resolvedKind === undefined ? [] : [`    resolvedKind: ${quoted(entry.resolvedKind)}`]),
           ...(entry.resolvedByDecision === undefined ? [] : [`    resolvedByDecision: ${quoted(entry.resolvedByDecision)}`]),
         ]
       : []),
@@ -165,9 +192,20 @@ export interface FeedbackResolveResult {
   error?: string;
 }
 
+export interface FeedbackResolveOptions {
+  /** The decision that answered the failure, when the closure was "the answer was wrong" (ADR-030). */
+  byDecision?: string;
+  /** How the failure was closed (ADR-038). Omitted on the legacy scriptable path, which records no kind. */
+  kind?: FeedbackClosureKind;
+}
+
 /**
  * Mark an entry resolved. The note is required: a resolution without a sentence about what addresses
  * the failure is an unrecorded resolution, which is the thing this loop exists to prevent.
+ *
+ * The closure kind (ADR-038) is recorded as an explicit field so a later reader can tell which claim the
+ * human made — and the note is where that claim's BASIS is stated, which is why it is still refused when
+ * empty whatever the kind.
  */
 export function resolveFeedback(
   text: string,
@@ -175,7 +213,7 @@ export function resolveFeedback(
   by: string,
   note: string,
   at: string,
-  byDecision?: string,
+  options: FeedbackResolveOptions = {},
 ): FeedbackResolveResult {
   const entries = parseFeedback(text);
   const entry = entries.find((e) => e.id === id);
@@ -210,7 +248,8 @@ export function resolveFeedback(
         `${indent}resolvedAt: ${quoted(at)}`,
         `${indent}resolvedBy: ${quoted(by)}`,
         `${indent}resolvedNote: ${quoted(note)}`,
-        ...(byDecision === undefined ? [] : [`${indent}resolvedByDecision: ${quoted(byDecision)}`]),
+        ...(options.kind === undefined ? [] : [`${indent}resolvedKind: ${quoted(options.kind)}`]),
+        ...(options.byDecision === undefined ? [] : [`${indent}resolvedByDecision: ${quoted(options.byDecision)}`]),
       );
       return {
         text: lines.join('\n'),
@@ -220,7 +259,8 @@ export function resolveFeedback(
           resolvedAt: at,
           resolvedBy: by,
           resolvedNote: note,
-          ...(byDecision === undefined ? {} : { resolvedByDecision: byDecision }),
+          ...(options.kind === undefined ? {} : { resolvedKind: options.kind }),
+          ...(options.byDecision === undefined ? {} : { resolvedByDecision: options.byDecision }),
         },
       };
     }

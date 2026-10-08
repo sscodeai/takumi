@@ -396,3 +396,172 @@ test('requirement confirm --dry-run: an open failure is reported and refuses', a
     rmSync(f.dir, { recursive: true, force: true });
   }
 });
+
+// --- ADR-038: the third closure — the CHECK itself was at fault ---------------------------------
+
+test('requirement confirm: a failure that maps to a decision offers the third closure, worded unmistakably', async () => {
+  const f = bound();
+  try {
+    // Abort at the failure question after reading the options: they are printed before the prompt.
+    const { code, lines } = await walk(f.dir, f.ref, ['q']);
+    assert.equal(code, 2, lines.join('\n'));
+    const text = lines.join('\n');
+    assert.match(text, /\[1\] the recorded answer stands and the IMPLEMENTATION changes/);
+    assert.match(text, /\[2\] the answer was wrong — decide that decision again below/);
+    assert.match(text, /\[3\] the CHECK was at fault — the implementation and the recorded answer were right/);
+    assert.match(text, /\[4\] leave it open/);
+    assert.match(text, /or the check that failed is itself at fault/);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement confirm: the check-at-fault closure records its kind and note, and does NOT re-ask the decision', async () => {
+  const f = bound();
+  try {
+    // [3] = the check was at fault; then the required basis; then [enter] keeps AMB-001. Round 1 asks every
+    // decision anyway, and because this closure claims the decisions were RIGHT, keeping the answer is
+    // accepted — there is no "answer was wrong" re-ask and no mustChange refusal.
+    const { code, lines } = await walk(f.dir, f.ref, [
+      '3',
+      'the gate could not read the deliverer test output and refused a complete delivery',
+      '',
+    ]);
+    const text = lines.join('\n');
+    assert.equal(code, 0, text);
+    assert.match(text, /\[3\] the CHECK was at fault/);
+    assert.match(text, /what did the failing check get wrong\?/);
+
+    const written = readFileSync(f.path, 'utf8');
+    assert.match(written, /^    status: resolved$/m);
+    assert.match(written, /^    resolvedKind: "check-at-fault"$/m, 'the closure kind is an explicit field');
+    assert.match(written, /^    resolvedBy: "/m, 'who resolved it is recorded');
+    assert.match(written, /^    resolvedAt: "/m, 'when it was resolved is recorded');
+    assert.match(written, /^    resolvedNote: "the check itself was at fault: the gate could not read/m, 'the note carries the human basis');
+    // The decisions were right: the recorded answer stands, nothing was re-decided, nothing was marked.
+    assert.match(written, /- id: AMB-001[\s\S]*?chosen: "The row with the latest start_date wins"/, 'the answer is unchanged');
+    assert.ok(!written.includes('resolvedByDecision'), 'no decision answered the failure');
+    assert.ok(!text.includes('you answered that the answer was wrong'), 'the decision was not re-asked as a claim to change');
+    assert.equal(openFeedback(written).length, 0);
+
+    const printed = lines.filter((l) => l.startsWith('sha256:')).pop() ?? '';
+    assert.equal(printed, `sha256:${requirementDigest(written)}`, 'the token covers the closure');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement confirm: the new closure refuses an empty note and re-asks for the basis', async () => {
+  const f = bound();
+  try {
+    // [3], then an empty note (refused), then the real basis, then [enter] keeps AMB-001.
+    const { code, lines } = await walk(f.dir, f.ref, ['3', '', 'the gate misread a complete delivery', '']);
+    const text = lines.join('\n');
+    assert.equal(code, 0, text);
+    assert.match(text, /a note is required: say what the check got wrong/, 'an empty note is refused, not recorded');
+    const written = readFileSync(f.path, 'utf8');
+    assert.match(written, /^    resolvedKind: "check-at-fault"$/m);
+    assert.match(written, /^    resolvedNote: "the check itself was at fault: the gate misread a complete delivery/m);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement confirm: the implementation-changes and answer-wrong closures record their own kinds', async () => {
+  // implementation-changes: [1], then [enter] keeps AMB-001 — nothing to re-decide.
+  const impl = bound();
+  try {
+    const { code, lines } = await walk(impl.dir, impl.ref, ['1', '']);
+    assert.equal(code, 0, lines.join('\n'));
+    const written = readFileSync(impl.path, 'utf8');
+    assert.match(written, /^    resolvedKind: "implementation-changes"$/m);
+    assert.match(written, /^    resolvedNote: "the recorded answer stands; the implementation changes/m);
+    assert.equal(openFeedback(written).length, 0);
+  } finally {
+    rmSync(impl.dir, { recursive: true, force: true });
+  }
+
+  // answer-wrong: [2] then option 1 — the decision IS re-asked and has to change.
+  const wrong = bound();
+  try {
+    const { code, lines } = await walk(wrong.dir, wrong.ref, ['2', '1']);
+    assert.equal(code, 0, lines.join('\n'));
+    const written = readFileSync(wrong.path, 'utf8');
+    assert.match(written, /^    resolvedKind: "answer-wrong"$/m);
+    assert.match(written, /^    resolvedByDecision: "AMB-001"$/m);
+    assert.match(written, /- id: AMB-001[\s\S]*?chosen: "First row wins"/, 'the answer was re-decided');
+    assert.equal(openFeedback(written).length, 0);
+  } finally {
+    rmSync(wrong.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement confirm: a failure that maps to no decision records the legacy "addressed" kind', async () => {
+  const f = project(WITH_FAILURE);
+  try {
+    const { code, lines } = await walk(f.dir, f.ref, ['1', '']);
+    assert.equal(code, 0, lines.join('\n'));
+    const written = readFileSync(f.path, 'utf8');
+    assert.match(written, /^    resolvedKind: "addressed"$/m);
+    assert.equal(openFeedback(written).length, 0);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement brief: all three closures are distinguishable from the brief', async () => {
+  const resolvedEntry = (id: string, kind: string): string =>
+    [
+      `  - id: ${id}`,
+      '    at: "2026-10-01T03:00:00.000Z"',
+      `    run: "wf-${id}"`,
+      '    requirementDigest: "sha256:aaa"',
+      '    judgeDigest: "sha256:bbb"',
+      '    status: resolved',
+      '    resolvedAt: "2026-10-01T04:00:00.000Z"',
+      '    resolvedBy: "SS"',
+      `    resolvedNote: "closed as ${kind}"`,
+      `    resolvedKind: "${kind}"`,
+      '    checks:',
+      '      - "REL-003 duplicate-resolution: the chosen option does not hold"',
+      '',
+    ].join('\n');
+  const base = `${BOUND.split('\nfeedback:')[0] ?? ''}\n`;
+  const three = `${base}\nfeedback:\n${resolvedEntry('FB-001', 'implementation-changes')}\n${resolvedEntry('FB-002', 'answer-wrong')}\n${resolvedEntry('FB-003', 'check-at-fault')}\n`;
+  const f = bound(three);
+  try {
+    const lines: string[] = [];
+    const code = await runRequirementCommand(f.dir, ['brief', f.ref], { out: (l) => lines.push(l) });
+    assert.equal(code, 0, lines.join('\n'));
+    const text = lines.join('\n');
+    assert.match(text, /choice between three different repairs/);
+    assert.match(text, /the CHECK itself was at fault/);
+    assert.match(text, /Resolved by SS \[implementation-changes\]/);
+    assert.match(text, /Resolved by SS \[answer-wrong\]/);
+    assert.match(text, /Resolved by SS \[check-at-fault\]/);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('requirement resolve: the scriptable path may name the closure kind, and refuses an unknown one', async () => {
+  const f = project(WITH_FAILURE);
+  try {
+    const lines: string[] = [];
+    const bad = await runRequirementCommand(f.dir, ['resolve', f.ref, '--id', 'FB-001', '--note', 'a note', '--kind', 'made-up'], { out: (l) => lines.push(l) });
+    assert.equal(bad, 1);
+    assert.match(lines.join('\n'), /is not a closure kind/);
+    assert.equal(readFileSync(f.path, 'utf8'), WITH_FAILURE, 'nothing is written on a refusal');
+
+    const ok = await runRequirementCommand(
+      f.dir,
+      ['resolve', f.ref, '--id', 'FB-001', '--note', 'the gate misread the report', '--kind', 'check-at-fault'],
+      { out: (l) => lines.push(l) },
+    );
+    assert.equal(ok, 0, lines.join('\n'));
+    const written = readFileSync(f.path, 'utf8');
+    assert.match(written, /^    resolvedKind: "check-at-fault"$/m);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});

@@ -105,3 +105,34 @@ test('feedback: a document with no feedback block reports no entries rather than
   assert.deepEqual(parseFeedback('not: [valid'), []);
   assert.deepEqual(parseFeedback(''), []);
 });
+
+// --- ADR-038: the closure kind is an explicit field, not a sentence to be re-parsed ------------------
+
+test('feedback: a resolution records its closure kind as an explicit field (ADR-038)', () => {
+  const appended = appendFeedback(DOC, input);
+  const resolved = resolveFeedback(appended.text, 'FB-001', 'SS', 'the gate could not read the deliverer test output', '2026-10-01T04:00:00.000Z', {
+    kind: 'check-at-fault',
+  });
+  assert.equal(resolved.error, undefined);
+  assert.match(resolved.text, /^    resolvedKind: "check-at-fault"$/m);
+  // It reads back as a FIELD, not as prose: nothing re-parses the note to learn what was claimed.
+  assert.equal(parseFeedback(resolved.text)[0]?.resolvedKind, 'check-at-fault');
+  assert.equal(openFeedback(resolved.text).length, 0);
+});
+
+test('feedback: an empty note is refused whatever the closure kind', () => {
+  const appended = appendFeedback(DOC, input);
+  for (const kind of ['check-at-fault', 'answer-wrong', 'implementation-changes', 'addressed'] as const) {
+    const empty = resolveFeedback(appended.text, 'FB-001', 'SS', '   ', 'now', { kind });
+    assert.match(empty.error ?? '', /needs a note/, `the note is required for ${kind} too`);
+    assert.equal(empty.text, appended.text, 'nothing changes on a refusal');
+  }
+});
+
+test('feedback: only the known closure kinds read back as a kind', () => {
+  const appended = appendFeedback(DOC, input);
+  const resolved = resolveFeedback(appended.text, 'FB-001', 'SS', 'a note', 'now', { kind: 'something-else' as never });
+  // The writer trusts its typed parameter; the PARSER is the guard, so a value outside the vocabulary is
+  // not read back as a closure kind (it stays an unknown field, which the document does not claim to mean).
+  assert.equal(parseFeedback(resolved.text)[0]?.resolvedKind, undefined);
+});

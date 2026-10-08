@@ -65,12 +65,20 @@ export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
 export {
   appendFeedback,
+  FEEDBACK_CLOSURE_KINDS,
   openFeedback,
   parseFeedback,
   renderFeedbackEntry,
   resolveFeedback,
 } from './requirement-feedback.js';
-export type { FeedbackAppendInput, FeedbackAppendResult, FeedbackEntry, FeedbackResolveResult } from './requirement-feedback.js';
+export type {
+  FeedbackAppendInput,
+  FeedbackAppendResult,
+  FeedbackClosureKind,
+  FeedbackEntry,
+  FeedbackResolveOptions,
+  FeedbackResolveResult,
+} from './requirement-feedback.js';
 export {
   checkIdOf,
   decisionCheckIds,

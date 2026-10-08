@@ -5,10 +5,12 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   analyseFeedback,
+  FEEDBACK_CLOSURE_KINDS,
   parseFeedback,
   renderFeedbackBrief,
   resolveFeedback,
   validateRequirementDocument,
+  type FeedbackClosureKind,
   type FeedbackEntry,
 } from '@takumi/core';
 import { requirementConfirmation } from './commands.js';
@@ -171,6 +173,10 @@ const MAX_ROUNDS = 3;
 const RESOLVE_OPTION = 'the failure is addressed — mark it resolved';
 const IMPL_CHANGES_OPTION = 'the recorded answer stands and the IMPLEMENTATION changes — mark it resolved';
 const ANSWER_WRONG_OPTION = 'the answer was wrong — decide that decision again below';
+// ADR-038: the third possibility, the one ADR-030 could not express — the failing CHECK is what is
+// wrong, and neither the implementation nor the recorded answer is. It is worded to deny both of the
+// other claims explicitly, and it is a CLAIM by the human, not a machine verdict.
+const CHECK_AT_FAULT_OPTION = 'the CHECK was at fault — the implementation and the recorded answer were right — mark it resolved';
 const LEAVE_OPEN_OPTION = 'leave it open';
 
 async function ask(question: string, options: string[], fallback: string | undefined, io: ConfirmIO): Promise<string | null> {
@@ -232,6 +238,41 @@ async function ask(question: string, options: string[], fallback: string | undef
       }
       out(`    enter a number between 1 and ${options.length}${fallback === undefined ? ', [s] to leave undecided,' : ''} or [q] to abort`);
       rl.prompt();
+    });
+  });
+}
+
+/**
+ * A required free-text note (ADR-038). The bounded choice names WHICH claim the human is making; the note
+ * is where they state the BASIS for it. For "the check was at fault" that basis is the whole point — the
+ * claim blames the verifier, so the record has to say why — and an empty note is refused here exactly as
+ * `resolveFeedback` refuses it, so the new closure cannot become a way to wave a real failure through.
+ */
+async function askNote(question: string, io: ConfirmIO): Promise<string | null> {
+  const out = io.out ?? ((line: string) => console.log(line));
+  const input = io.input ?? process.stdin;
+  return new Promise<string | null>((resolve) => {
+    const rl = createInterface({ input: input as NodeJS.ReadableStream, output: process.stdout });
+    out('');
+    out(`  ${question}`);
+    out('    Say what the check got wrong. A note is required: it is the basis for the claim, not decoration.');
+    out('    [q] abort');
+    rl.setPrompt('    > ');
+    rl.prompt();
+    rl.on('line', (line) => {
+      const answer = line.trim();
+      if (answer === 'q' || answer === 'quit') {
+        rl.close();
+        resolve(null);
+        return;
+      }
+      if (answer.length === 0) {
+        out('    a note is required: say what the check got wrong, or [q] to abort');
+        rl.prompt();
+        return;
+      }
+      rl.close();
+      resolve(answer);
     });
   });
 }
@@ -310,7 +351,10 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
       out(`    run: ${entry.run}`);
       out(`    judged: requirement ${entry.requirementDigest} by ${entry.judgeDigest}`);
       for (const check of entry.checks) out(`    failing: ${check}`);
-      if (entry.status === 'resolved') out(`    resolved by ${entry.resolvedBy ?? 'unknown'} at ${entry.resolvedAt ?? '?'}: ${entry.resolvedNote ?? ''}`);
+      if (entry.status === 'resolved') {
+        // ADR-038: name the closure kind too, so a reader can tell the three claims apart here as well.
+        out(`    resolved by ${entry.resolvedBy ?? 'unknown'} at ${entry.resolvedAt ?? '?'} [${entry.resolvedKind ?? 'kind unrecorded'}]: ${entry.resolvedNote ?? ''}`);
+      }
     }
     if (open.length > 0) {
       out(`refused: ${open.length} acceptance failure(s) are still open. Address them, then either re-confirm`);
@@ -330,10 +374,17 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
     }
     const id = flagValue(rest, '--id');
     const note = flagValue(rest, '--note');
+    const kindFlag = flagValue(rest, '--kind');
     if (id === undefined || note === undefined) {
-      out('usage: takumi requirement resolve <ref> --id FB-001 --note "what addresses it"');
+      out('usage: takumi requirement resolve <ref> --id FB-001 --note "what addresses it" [--kind implementation-changes|answer-wrong|check-at-fault|addressed]');
       return 1;
     }
+    // ADR-038: the scriptable path may name the closure kind too; an unknown one is refused by name.
+    if (kindFlag !== undefined && !(FEEDBACK_CLOSURE_KINDS as readonly string[]).includes(kindFlag)) {
+      out(`refused: --kind "${kindFlag}" is not a closure kind (implemented: ${FEEDBACK_CLOSURE_KINDS.join(', ')})`);
+      return 1;
+    }
+    const kind = kindFlag as FeedbackClosureKind | undefined;
     let doc: RequirementDocument;
     try {
       doc = readRequirementDocument(cwd, ref);
@@ -341,7 +392,7 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
       out(e instanceof Error ? e.message : String(e));
       return 1;
     }
-    const resolved = resolveFeedback(doc.text, id, confirmer(cwd), note, new Date().toISOString());
+    const resolved = resolveFeedback(doc.text, id, confirmer(cwd), note, new Date().toISOString(), kind === undefined ? {} : { kind });
     if (resolved.error !== undefined) {
       out(`refused: ${resolved.error}`);
       return 1;
@@ -354,7 +405,7 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
     }
     writeFileSync(doc.path, resolved.text, 'utf8');
     const token = requirementConfirmation(cwd, ref);
-    out(`resolved: ${id} — ${note}`);
+    out(`resolved: ${id} [${kind ?? 'kind unrecorded'}] — ${note}`);
     out('The document changed, so the confirmation token moved. Re-confirm it before the next run:');
     out(`  takumi requirement confirm ${ref}`);
     out(token.ref);
@@ -365,7 +416,7 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
   if (sub !== 'confirm') {
     out('usage: takumi requirement confirm <ref> [--dry-run]   |   takumi requirement digest <ref>    |');
     out('       takumi requirement feedback <ref>              |   takumi requirement brief <ref>     |');
-    out('       takumi requirement resolve <ref> --id FB-001 --note "…"');
+    out('       takumi requirement resolve <ref> --id FB-001 --note "…" [--kind check-at-fault]');
     return 1;
   }
   if (ref.length === 0) {
@@ -439,11 +490,12 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
   // re-confirmed, and the human's number is what closes it (ADR-029).
   //
   // ADR-030 makes that number a CHOICE ABOUT WHICH SIDE IS WRONG. When the failing check exercises a
-  // decision, there are two different repairs — the implementation ignored the recorded answer, or the
-  // answer itself was wrong — and the machine cannot tell them apart (it has no semantics, only the
-  // check). Naming the choice is what turns "addressed" into a statement a reviewer can read later.
+  // decision, the implementation may have ignored the recorded answer, or the answer itself may have been
+  // wrong — and the machine cannot tell them apart (it has no semantics, only the check). ADR-038 adds the
+  // third side: the CHECK itself may be at fault, which blames neither the implementation nor the human's
+  // earlier answer. Naming the choice is what turns "addressed" into a statement a reviewer can read later.
   const analysis = analyseFeedback(doc.text);
-  const resolvedOpen: { entry: FeedbackEntry; byDecision?: string }[] = [];
+  const resolvedOpen: { entry: FeedbackEntry; kind: FeedbackClosureKind; byDecision?: string; basis?: string }[] = [];
   const mustChange = new Map<string, string>();
   for (const entry of openFeedback) {
     // Several failing checks can exercise the SAME decision (REL-003 and the DEC-002 line that reports
@@ -462,13 +514,13 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
     if (mapped.length === 0) {
       options = [RESOLVE_OPTION, LEAVE_OPEN_OPTION];
     } else {
-      options = [IMPL_CHANGES_OPTION, ANSWER_WRONG_OPTION, LEAVE_OPEN_OPTION];
+      options = [IMPL_CHANGES_OPTION, ANSWER_WRONG_OPTION, CHECK_AT_FAULT_OPTION, LEAVE_OPEN_OPTION];
       out('');
       const named = mapped
         .map((f) => `${f.decision?.id}, currently answered \"${f.decision?.chosen ?? f.decision?.default ?? '(undecided)'}\"`)
         .join('; ');
       out(`  This failure is about ${named}.`);
-      out('  Either the implementation ignored that answer, or the answer itself was wrong.');
+      out('  Either the implementation ignored that answer, or the answer itself was wrong, or the check that failed is itself at fault.');
     }
     let answer = await ask(`${entry.id}: what settles this failure?`, options, LEAVE_OPEN_OPTION, io);
     while (answer === DONE) {
@@ -488,7 +540,20 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
         if (decision === undefined) continue;
         mustChange.set(decision.id, decision.chosen ?? decision.default ?? '');
       }
-      resolvedOpen.push({ entry, byDecision: mapped[0]?.decision?.id });
+      resolvedOpen.push({ entry, kind: 'answer-wrong', byDecision: mapped[0]?.decision?.id });
+      continue;
+    }
+    if (answer === CHECK_AT_FAULT_OPTION) {
+      // ADR-038: the check is at fault, so the recorded answers stand and there is NOTHING to re-decide —
+      // this branch deliberately does not touch `mustChange`, which is what makes the decision re-asked.
+      // The claim is a human's, so it needs a stated basis: the note. An empty one is refused here, and
+      // `resolveFeedback` refuses it again for the scriptable path, so this cannot wave a failure through.
+      const basis = await askNote(`${entry.id}: what did the failing check get wrong?`, io);
+      if (basis === null) {
+        out('\naborted: nothing was written and no token was produced.');
+        return 2;
+      }
+      resolvedOpen.push({ entry, kind: 'check-at-fault', basis });
       continue;
     }
     if (answer !== IMPL_CHANGES_OPTION && answer !== RESOLVE_OPTION) {
@@ -497,7 +562,7 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
       out(`  takumi requirement resolve ${ref} --id ${entry.id} --note "what addresses it"`);
       return 1;
     }
-    resolvedOpen.push({ entry });
+    resolvedOpen.push({ entry, kind: answer === IMPL_CHANGES_OPTION ? 'implementation-changes' : 'addressed' });
   }
 
   const answers = new Map<string, string>();
@@ -566,12 +631,19 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
 
   let text = doc.text;
   const resolvedAt = new Date().toISOString();
-  for (const { entry, byDecision } of resolvedOpen) {
+  for (const { entry, kind, byDecision, basis } of resolvedOpen) {
     const note =
-      byDecision === undefined
-        ? `the recorded answer stands; the implementation changes (bounded choice at re-confirmation, ${resolvedAt})`
-        : `the answer was wrong: ${byDecision} was re-decided at this confirmation (${resolvedAt})`;
-    const resolved = resolveFeedback(text, entry.id, confirmer(cwd), note, resolvedAt, byDecision);
+      kind === 'answer-wrong'
+        ? `the answer was wrong: ${byDecision} was re-decided at this confirmation (${resolvedAt})`
+        : kind === 'check-at-fault'
+          ? `the check itself was at fault: ${basis} — a human's claim at re-confirmation, not a machine verdict (${resolvedAt})`
+          : kind === 'addressed'
+            ? `the failure is addressed (bounded choice at re-confirmation, ${resolvedAt})`
+            : `the recorded answer stands; the implementation changes (bounded choice at re-confirmation, ${resolvedAt})`;
+    const resolved = resolveFeedback(text, entry.id, confirmer(cwd), note, resolvedAt, {
+      kind,
+      ...(byDecision === undefined ? {} : { byDecision }),
+    });
     if (resolved.error !== undefined) {
       out(`refused: ${resolved.error}`);
       return 1;

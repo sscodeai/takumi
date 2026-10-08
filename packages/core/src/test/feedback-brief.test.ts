@@ -191,6 +191,32 @@ test('brief: a document with no failure says so instead of asking for a revision
   assert.match(text, /Nothing is being asked of the intake/);
 });
 
+test('brief: the brief states three repairs and names a resolved failure’s closure kind (ADR-038)', () => {
+  const resolved = [
+    'feedback:',
+    '  - id: FB-001',
+    '    at: "2026-10-01T05:00:00.000Z"',
+    '    run: "wf-1"',
+    '    requirementDigest: "sha256:aaa"',
+    '    judgeDigest: "sha256:bbb"',
+    '    status: resolved',
+    '    resolvedAt: "2026-10-01T06:00:00.000Z"',
+    '    resolvedBy: "SS"',
+    '    resolvedNote: "the gate misread a complete delivery"',
+    '    resolvedKind: "check-at-fault"',
+    '    checks:',
+    '      - "REL-003 duplicate-resolution: the chosen option does not hold"',
+    '',
+  ].join('\n');
+  const text = renderFeedbackBrief('docs/requirements/doc.yaml', `${DOC}\n${resolved}`);
+  assert.match(text, /choice between three different repairs/);
+  assert.match(text, /the CHECK itself was at fault/);
+  assert.match(text, /a CLAIM by a human/);
+  // The closure kind is named, so "the implementation was at fault" and "the check was at fault" are
+  // distinguishable after the fact — the whole point of recording it as a field.
+  assert.match(text, /Resolved by SS \[check-at-fault\]: the gate misread a complete delivery/);
+});
+
 test('brief: only OPEN failures with no decision behind them reach the intake as work', () => {
   const open = withFeedback(['REL-003 duplicate-resolution: mapped', 'REL-002 additivity: unmapped']);
   assert.deepEqual(

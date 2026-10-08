@@ -157,11 +157,15 @@ export function renderFeedbackBrief(ref: string, text: string): string {
   lines.push('Each failing check below is traced to the decision it belongs to, if any, with the answer that');
   lines.push('was recorded and the alternatives that answer could take.');
   lines.push('');
-  lines.push('**Answering a failure is a choice between two different repairs, and only a human can make it:**');
+  lines.push('**Answering a failure is a choice between three different repairs, and only a human can make it:**');
   lines.push('');
   lines.push('- the recorded answer stands and the IMPLEMENTATION changes; or');
   lines.push('- the answer was wrong and the DECISION changes — the alternatives are listed, and the');
-  lines.push('  confirmation will ask for one of them.');
+  lines.push('  confirmation will ask for one of them; or');
+  lines.push('- the CHECK itself was at fault — the implementation and the recorded answer were both right,');
+  lines.push('  and the failing check is what has to be repaired. This one is a CLAIM by a human, with the');
+  lines.push('  basis stated in the resolution note: it is not a machine verdict, and closing a failure this');
+  lines.push('  way repairs nothing — the next acceptance still runs the same check.');
   lines.push('');
   lines.push('A failure that traces to NO decision is not a hint to invent one: it says the implementation');
   lines.push('(or a part of the requirement no decision covers) is where the problem is. Only the intake can');
@@ -174,7 +178,10 @@ export function renderFeedbackBrief(ref: string, text: string): string {
     lines.push('');
     lines.push(`Judged at requirement digest \`${entry.requirementDigest}\` by judge \`${entry.judgeDigest}\`.`);
     if (entry.status === 'resolved') {
-      lines.push(`Resolved by ${entry.resolvedBy ?? 'unknown'}${entry.resolvedNote === undefined ? '' : `: ${entry.resolvedNote}`}`);
+      // ADR-038: which claim closed the failure, machine-readable in the document and named here, so a
+      // reader can tell "the implementation was at fault" from "the check was at fault" after the fact.
+      const kind = entry.resolvedKind === undefined ? '' : ` [${entry.resolvedKind}]`;
+      lines.push(`Resolved by ${entry.resolvedBy ?? 'unknown'}${kind}${entry.resolvedNote === undefined ? '' : `: ${entry.resolvedNote}`}`);
     }
     if (cited.has(entry.id)) {
       lines.push(`Decision(s) proposed for this failure: ${(cited.get(entry.id) ?? []).join(', ')}`);
