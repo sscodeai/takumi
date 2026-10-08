@@ -1027,3 +1027,34 @@ Three things in the evidence do not match the summary that was handed to this re
 
 
 
+
+## 15. The delivery worktree must descend from the base (found by run i9)
+
+The first live end-to-end run through the publish step (i9) passed the whole black-box loop — quality gate,
+deterministic rule review, a judge forged outside the worktree, acceptance 10/10, delivery accepted on the
+first attempt — and then failed at `publish` with:
+
+```
+HEAD (264fdd3465ad…) is not descended from the frozen base ea7dc1d3b3f5…: either the base branch moved past
+this branch's fork point, or the branch was rewritten (takumi never rewrites a branch; a human must decide
+which happened)
+```
+
+The reason is the setup, not the port: the delivery worktree had been created as a fresh `git init` repository,
+so its history carries its own root commit and cannot be a descendant of the target repository's `main`. The
+port refuses to publish a history that is not descended from the frozen base, and that rule is what stops a
+rewritten branch (or an unrelated tree) from being delivered — so the refusal was correct and the setup was
+wrong.
+
+The pilot line never meets this because the agent works inside a checkout of the real repository, where the
+ancestry is structural. A black-box worktree has to be created the same way:
+
+```
+git clone <host>/<owner>/<repo>.git .takumi/worktree-<name>
+cd .takumi/worktree-<name>
+git switch -c <task-branch>            # branched from the base, so the ancestry holds
+```
+
+Run i10 repeats i9 with a worktree created that way. What is still missing: nothing in the tooling creates the
+worktree for you, so this is a documented procedure rather than an enforced one — a `takumi` helper (or a
+refusal at run start when the worktree's HEAD is not descended from the base) is the honest next step.
