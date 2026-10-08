@@ -12,8 +12,21 @@ test('renderRunMarker: the exact documented shape, hidden in every markdown surf
   assert.ok(marker.startsWith('<!--') && marker.endsWith('-->'));
 });
 
-test('renderRunMarker: refuses an id that is not 8 lowercase hex characters', () => {
-  for (const bad of ['', 'C0FFEE01', 'c0ffee0', 'c0ffee011', 'zzzzzzzz', 'abcdefg ']) {
+test('renderRunMarker: an engine run id is a run id too (it used to be refused)', () => {
+  // The workflow engine mints `wf-<hex>`; the marker used to demand exactly eight lowercase hex characters,
+  // so a live run failed at publish with `invalid run id: "wf-f6a900ef"` (docs/bugs-fixed.md #44). The id
+  // shape is now the constraint the marker actually needs, and it round-trips.
+  const marker = renderRunMarker('wf-f6a900ef');
+  assert.equal(marker, '<!-- takumi:run=wf-f6a900ef -->');
+  assert.deepEqual(parseRunMarkers(`body\n${marker}\nmore`), ['wf-f6a900ef']);
+  assert.ok(hasRunMarker(marker, 'wf-f6a900ef'));
+  // A dot, an underscore and a dash are all fine; the pilot's shape stays valid.
+  assert.equal(renderRunMarker('c0ffee01'), '<!-- takumi:run=c0ffee01 -->');
+  assert.equal(renderRunMarker('run_1.2'), '<!-- takumi:run=run_1.2 -->');
+});
+
+test('renderRunMarker: refuses an id that would break the marker or the comment', () => {
+  for (const bad of ['', 'has space', 'new\nline', 'closes-->it', 'a'.repeat(65), 'tab\there']) {
     // Classified on purpose: a marker rendered from a non-canonical id would be
     // invisible to every reader, so this fails in the shared error taxonomy
     // instead of producing an unattributable comment.
