@@ -1149,3 +1149,39 @@ What this run establishes, and what it still does not:
    implementation changes" or "the answer was wrong". i12 wrote no feedback into the document (the write-back
    needs an ACCEPTANCE failure, not a gate failure inside a repair round), so the wrong record was not created
    this time; the next verifier-side failure may not be so lucky.
+
+## 18. The last mile closes (run i14)
+
+Run i14 is the first run whose delivery was LANDED. It used `request-to-delivery-no-pipeline` — the same chain
+with the pipeline WAIT removed, and the difference is in the workflow's name rather than hidden, because this
+host has no runner and a run that used this variant did NOT see a green pipeline.
+
+```
+step publish: completed — published takumi/run-20261006T152132461Z-3b972db2 -> main as pull request 15
+step merge: completed — merged pull request 15: method merge, head ba70548f075b6388dfeb01dacf69eebe2e0ea7af
+  reviewed head: ba70548f075b6388dfeb01dacf69eebe2e0ea7af (the commit the acceptance judged)
+  host head before merge: ba70548f075b6388dfeb01dacf69eebe2e0ea7af (open)
+step delivery: completed — delivery bundle ready (6 artifacts)
+RUN_EXIT=0
+```
+
+and what an independent read of the host confirms (curl, not the run's report):
+
+- **pull request 15**: `state: closed`, **`merged: true`**, head `ba70548f075b6388dfeb01dacf69eebe2e0ea7af`,
+  merge commit `b1162cf9923dab130bee13a9f02962dbe5e74c6c`, with the confirmed requirement and
+  `sha256:73eb5e904e5247e5ac8fe9852378842e10ceba20ce85e3072734bb0a64e6e81d` in its body;
+- **`main`'s tip IS that merge commit** — the delivered work is on the base branch, which is what "delivered"
+  means and what no earlier run had achieved;
+- the run's own merge artifact records `reviewedHead` equal to the merged `head`, which is the evidence that the
+  two guards agreed: the host was handed the reviewed head as `expectedHeadSha`, and the pull request's current
+  head was compared to it before any merge was attempted.
+
+What i14 proves and what it does not:
+
+1. PROVEN: the chain runs to completion — requirement to landed commit — with `RUN_EXIT=0`, and the only commit
+   merged is the one the forged judge accepted.
+2. NOT proven here: the pipeline WAIT. This variant has no `await_checks`, so no green pipeline was seen (there
+   is no runner on that host to produce one). The main workflow still requires it, and a red or pending pipeline
+   still skips the merge structurally.
+3. STILL OPEN, unchanged by this run: a fresh clone gets no git identity (`GIT_AUTHOR_*` supplied for these
+   runs); the mutation relation is forge-proven but has not been in a full run; concurrency is still unguarded.
