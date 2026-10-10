@@ -11,6 +11,7 @@ import {
   createDeliveryProvider,
   deliveryOptionsFromSection,
   forgejoDeliveryOptions,
+  gitlabDeliveryOptions,
   splitOwnerRepo,
 } from '../delivery-command.js';
 
@@ -134,7 +135,7 @@ test('createDeliveryProvider: a provider without its required option fails fast,
 });
 
 test('createDeliveryProvider: an unknown provider lists the known ones', async () => {
-  await assert.rejects(() => createDeliveryProvider({ providerId: 'trello', providerOptions: { repo: 'a/b' } }), /unknown delivery provider: trello \(forgejo\)/);
+  await assert.rejects(() => createDeliveryProvider({ providerId: 'trello', providerOptions: { repo: 'a/b' } }), /unknown delivery provider: trello \(forgejo, gitlab\)/);
 });
 
 test('delivery options: a credential in configuration is refused, with the reason', async () => {
@@ -162,6 +163,73 @@ test('delivery options: a key the adapter does not read is refused, and the read
 
 test('createDeliveryFromSection: a section with no provider says so', async () => {
   await assert.rejects(() => createDeliveryFromSection({ provider: '' }), /needs a `provider`/);
+});
+
+// --- gitlab: the same wiring as forgejo, onto the GitLab adapter (ADR-007 / ADR-037) -----------
+
+test('delivery options: gitlab maps repo owner/name to the adapter project and keeps baseBranch a run default', () => {
+  // The operator writes `owner/name`; the GitLab adapter names the repository `project`.
+  const opts = gitlabDeliveryOptions({
+    providerId: 'gitlab',
+    providerOptions: { repo: 'aicodesh/takumi-e2e', apiBase: 'https://gitlab.com/api/v4', remote: 'upstream' },
+  });
+  assert.deepEqual(opts, {
+    project: 'aicodesh/takumi-e2e',
+    apiBase: 'https://gitlab.com/api/v4',
+    remote: 'upstream',
+  });
+
+  // A malformed repo is refused with the SAME sentence the Forgejo mapper gives.
+  assert.throws(() => gitlabDeliveryOptions({ providerId: 'gitlab', providerOptions: { repo: 'aicodesh' } }), /repo must be owner\/name/);
+  assert.throws(() => gitlabDeliveryOptions({ providerId: 'gitlab', providerOptions: { repo: 'host/aicodesh/takumi-e2e' } }), /repo must be owner\/name/);
+
+  // baseBranch stays OUT of the provider options, exactly as it does for forgejo.
+  const section = {
+    provider: 'gitlab',
+    repo: 'aicodesh/takumi-e2e',
+    apiBase: 'https://gitlab.com/api/v4',
+    baseBranch: 'main',
+    remote: 'origin',
+  };
+  const options = deliveryOptionsFromSection(section);
+  assert.deepEqual(options.providerOptions, { repo: 'aicodesh/takumi-e2e', apiBase: 'https://gitlab.com/api/v4', remote: 'origin' });
+  assert.ok(!('baseBranch' in options.providerOptions), 'baseBranch is a run default, not a provider option');
+});
+
+test('createDeliveryProvider: the gitlab adapter is built, with its real capabilities', async () => {
+  const provider = await createDeliveryProvider({ providerId: 'gitlab', providerOptions: { repo: 'aicodesh/takumi-e2e' } });
+  assert.equal(provider.metadata().id, 'gitlab');
+  assert.deepEqual(provider.capabilities(), { canPushBranch: true, canOpenPullRequest: true, canRunChecks: true, canMerge: true });
+});
+
+test('createDeliveryProvider: gitlab without its required option fails fast, naming it', async () => {
+  await assert.rejects(
+    () => createDeliveryProvider({ providerId: 'gitlab', providerOptions: {} }),
+    /provider gitlab needs repo owner\/name/,
+  );
+});
+
+test('delivery options: a credential in configuration is refused for gitlab too, with the reason', async () => {
+  await assert.rejects(
+    () => createDeliveryProvider({ providerId: 'gitlab', providerOptions: { repo: 'aicodesh/takumi-e2e', token: 'secret' } }),
+    /token comes from the ENVIRONMENT/,
+  );
+});
+
+test('delivery options: a key the gitlab adapter does not read is refused, and the readable ones are listed', async () => {
+  await assert.rejects(
+    () => createDeliveryProvider({ providerId: 'gitlab', providerOptions: { repo: 'aicodesh/takumi-e2e', project: 'aicodesh/takumi-e2e' } }),
+    (e: unknown) => {
+      assert.ok(e instanceof Error);
+      assert.match(e.message, /unknown option "project"/);
+      assert.match(e.message, /repo, apiBase, remote/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => createDeliveryProvider({ providerId: 'gitlab', providerOptions: { repo: 'aicodesh/takumi-e2e', git: 'x' } }),
+    /set in code/,
+  );
 });
 
 // --- the front door: refuse BEFORE the run starts ---------------------------------------------
@@ -246,6 +314,41 @@ test('run: a configured delivery reaches ctx.delivery — the publish step drive
   } finally {
     if (previousForgejo !== undefined) process.env['FORGEJO_TOKEN'] = previousForgejo;
     if (previousGitea !== undefined) process.env['GITEA_TOKEN'] = previousGitea;
+    p.cleanup();
+  }
+});
+
+test('run: a configured gitlab delivery reaches ctx.delivery — the publish step drives the REAL GitLab provider', async () => {
+  const previousGitlab = process.env['GITLAB_TOKEN'];
+  // No token: the provider is built with its fail-closed unconfigured transport, so the delivery
+  // attempt is provable without any network and without a credential.
+  delete process.env['GITLAB_TOKEN'];
+  const p = project([
+    '  provider: gitlab',
+    '  repo: aicodesh/takumi-e2e',
+    '  apiBase: http://127.0.0.1:1/api/v4',
+    '  baseBranch: main',
+    '  remote: origin',
+  ]);
+  try {
+    const worktree = gitWorktree(p.dir);
+    const config = loadConfig(p.dir) as ProjectConfig;
+    const result = await runTask({
+      cwd: p.dir,
+      prompt: 'do the work',
+      runtimeId: 'fake',
+      workflow: 'publish-wf',
+      config,
+      worktree,
+    });
+    // The run reached the publish step (so it was NOT refused) and the failure is the GitLab
+    // provider's own — which is how we know `ctx.delivery` is the provider the config selected.
+    assert.equal(result.status, 'failed', result.events.join('\n'));
+    const log = result.events.join('\n');
+    assert.match(log, /gitlab-delivery: no request transport configured/);
+    assert.ok(!log.includes('no delivery provider (ctx.delivery)'), 'the provider WAS constructed into ctx.delivery');
+  } finally {
+    if (previousGitlab !== undefined) process.env['GITLAB_TOKEN'] = previousGitlab;
     p.cleanup();
   }
 });

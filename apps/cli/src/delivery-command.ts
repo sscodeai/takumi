@@ -38,7 +38,7 @@ export type DeliveryProviderWithReporting = DeliveryProvider & {
  * option mapper below rather than in the operator's file.
  */
 export interface DeliverySection {
-  /** Which delivery adapter to build (currently `forgejo`). */
+  /** Which delivery adapter to build (currently `forgejo` or `gitlab`). */
   provider: string;
   /** The repository, as `owner/name`. */
   repo?: string;
@@ -86,16 +86,19 @@ export function deliveryOptionsFromSection(section: DeliverySection): DeliveryCo
  */
 const CONFIGURABLE_OPTIONS: Record<string, readonly string[]> = {
   forgejo: ['repo', 'apiBase', 'remote'],
+  gitlab: ['repo', 'apiBase', 'remote'],
 };
 
 /** Credentials: read from the environment, never accepted from a config file. */
 const ENVIRONMENT_OPTIONS: Record<string, readonly string[]> = {
   forgejo: ['token'],
+  gitlab: ['token'],
 };
 
 /** Options that only mean something in code (an injected transport, a git runner, capabilities). */
 const PROGRAMMATIC_OPTIONS: Record<string, readonly string[]> = {
   forgejo: ['request', 'git', 'capabilities'],
+  gitlab: ['request', 'git', 'capabilities'],
 };
 
 /**
@@ -172,6 +175,24 @@ export function forgejoDeliveryOptions(
 }
 
 /**
+ * `gitlab`'s options, as the adapter documents them (the token and the transport are excluded).
+ *
+ * GitLab names the repository `project` (a URL-encoded `group/project` path), but the operator writes
+ * `owner/name` exactly as they do for Forgejo: the same `splitOwnerRepo` validates it, and the join
+ * into the one `project` value happens here rather than in the operator's file.
+ */
+export function gitlabDeliveryOptions(
+  options: DeliveryCommandOptions,
+): Omit<import('@takumi/delivery-gitlab').GitLabDeliveryOptions, 'token' | 'request' | 'git' | 'capabilities'> {
+  const { owner, repo } = splitOwnerRepo(required(options, 'repo', 'repo owner/name'));
+  return {
+    project: `${owner}/${repo}`,
+    ...optional(options, 'apiBase'),
+    ...optional(options, 'remote'),
+  };
+}
+
+/**
  * Build the provider named by a `delivery:` section.
  *
  * Each adapter is imported lazily so a host the operator never uses cannot break the CLI, and so a
@@ -189,8 +210,16 @@ export async function createDeliveryProvider(options: DeliveryCommandOptions): P
       // configured" error. The CLI is a real caller, so it injects the real spawn-based runner.
       return createForgejoDeliveryProvider({ ...forgejoDeliveryOptions(options), git: createGitRunner() });
     }
+    case 'gitlab': {
+      const { createGitLabDeliveryProvider } = await import('@takumi/delivery-gitlab');
+      // The git runner is a PROGRAMMATIC option (never read from config). The GitLab adapter's default is
+      // already the real spawn-based runner, but the CLI injects it explicitly so the two adapters are
+      // wired identically and a future default change cannot silently leave git unconfigured. The token
+      // is not passed here: the provider reads `GITLAB_TOKEN` itself and fails closed without one.
+      return createGitLabDeliveryProvider({ ...gitlabDeliveryOptions(options), git: createGitRunner() });
+    }
     default:
-      throw new Error(`unknown delivery provider: ${options.providerId} (forgejo)`);
+      throw new Error(`unknown delivery provider: ${options.providerId} (forgejo, gitlab)`);
   }
 }
 

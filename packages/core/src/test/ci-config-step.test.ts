@@ -175,6 +175,104 @@ test('ci_config: the forgejo dialect writes .forgejo/workflows/ci.yml', async ()
   }
 });
 
+test('ci_config: the gitlab dialect writes .gitlab-ci.yml as GitLab CI YAML, derived the same way', async () => {
+  const p = fixture();
+  try {
+    const step: StepWithRef = {
+      id: 'ci_config',
+      type: 'ci_config',
+      testCommand: 'node --test',
+      dialect: 'gitlab',
+      requirementRef: p.docRef,
+    };
+    const r = await runStep(p, step);
+    assert.equal(r.status, 'completed', r.step?.summary);
+
+    // The file is the delivery's own pipeline, at GitLab's single root path.
+    const file = join(p.worktree, '.gitlab-ci.yml');
+    assert.ok(existsSync(file), `the gitlab dialect writes .gitlab-ci.yml (${file})`);
+    const content = readFileSync(file, 'utf8');
+    // It is GitLab CI YAML — a DIFFERENT language from the GitHub-Actions dialects.
+    assert.match(content, /^stages:/m, 'GitLab CI declares stages');
+    assert.match(content, /^tests:/m, 'the tests job exists');
+    assert.match(content, /^  stage: test$/m);
+    assert.doesNotMatch(content, /runs-on:/, 'a GitLab pipeline has no GitHub Actions runner key');
+    // Derived the same way: the DELIVERED project's own test command and the document's run.
+    assert.match(content, /node --test/, "the pipeline runs the DELIVERED project's own test command");
+    assert.match(content, /bash summary\.sh takumi-sample\.csv/, 'the deliverable run from the document is in the pipeline');
+    assert.match(content, /2024-01-01,ALPHA,10\.4/, 'the sample the document declares is embedded for the smoke run');
+    assert.ok(!content.includes('{csv}'), 'the {csv} placeholder is resolved, never left in the pipeline');
+    // It is a REAL GitLab CI file: the stages list and the tests job are there.
+    assert.match(content, /^stages:\n  - test\n  - deliverable$/m, 'the stages are GitLab CI stages');
+    assert.match(content, /^    - \|$/m, 'the script is a YAML block scalar');
+
+    // The dialect is recorded in the summary, and the protected-path consequence holds by default.
+    assert.match(r.step?.summary ?? '', /wrote \.gitlab-ci\.yml \(gitlab dialect\)/);
+    assert.match(r.step?.summary ?? '', /protected path: CI configuration is a protected path/);
+
+    // The gitlab dialect touches NEITHER of the GitHub-Actions paths.
+    assert.ok(!existsSync(join(p.worktree, '.github', 'workflows', 'ci.yml')));
+    assert.ok(!existsSync(join(p.worktree, '.forgejo', 'workflows', 'ci.yml')));
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('ci_config: the existing forgejo/github dialects are untouched by the gitlab addition', async () => {
+  const p = fixture();
+  try {
+    // forgejo → .forgejo/workflows/ci.yml, and NOT .gitlab-ci.yml.
+    const forgejo = await runStep(p, { id: 'ci_config', type: 'ci_config', testCommand: 'pnpm test', dialect: 'forgejo' });
+    assert.equal(forgejo.status, 'completed', forgejo.step?.summary);
+    assert.ok(existsSync(join(p.worktree, '.forgejo', 'workflows', 'ci.yml')));
+    assert.ok(!existsSync(join(p.worktree, '.gitlab-ci.yml')), 'forgejo must not write the gitlab path');
+    // The GitHub-Actions content is unchanged: `name: ci`, `on:`, `jobs:`.
+    const forgejoText = readFileSync(join(p.worktree, '.forgejo', 'workflows', 'ci.yml'), 'utf8');
+    assert.match(forgejoText, /^name: ci$/m);
+    assert.match(forgejoText, /^on:$/m);
+    assert.match(forgejoText, /runs-on: ubuntu-latest/);
+
+    // github → .github/workflows/ci.yml, and NOT .gitlab-ci.yml.
+    const github = await runStep(p, { id: 'ci_config', type: 'ci_config', testCommand: 'npm test', dialect: 'github' });
+    assert.equal(github.status, 'completed', github.step?.summary);
+    assert.ok(existsSync(join(p.worktree, '.github', 'workflows', 'ci.yml')));
+    assert.ok(!existsSync(join(p.worktree, '.gitlab-ci.yml')), 'github must not write the gitlab path');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('ci_config: the gitlab dialect is REFUSED with no test command, and writes nothing', async () => {
+  const p = fixture();
+  try {
+    const r = await runStep(p, { id: 'ci_config', type: 'ci_config', dialect: 'gitlab', requirementRef: p.docRef });
+    assert.equal(r.status, 'failed');
+    assert.match(r.step?.summary ?? '', /declares no testCommand/);
+    assert.ok(!existsSync(join(p.worktree, '.gitlab-ci.yml')), 'a refusal writes no file');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('ci_config: the deterministic reviewer reports a CREATED .gitlab-ci.yml as a NOTE (ADR-032)', () => {
+  const sha = (c: string): string => c.repeat(40);
+  // `.gitlab-ci.yml` is a DEFAULT protected path (packages/core/src/review-rules.ts), so a created
+  // one is a note; a CHANGE to one is still a human's call.
+  const findings = runReviewRules({
+    baseSha: sha('a'),
+    headSha: sha('b'),
+    changes: [{ path: '.gitlab-ci.yml', status: 'added', baseContent: null, headContent: 'stages: [test]' }],
+  });
+  assert.equal(findings.find((f) => f.rule === 'protected-path' && f.path === '.gitlab-ci.yml')?.severity, 'note');
+
+  const modified = runReviewRules({
+    baseSha: sha('a'),
+    headSha: sha('b'),
+    changes: [{ path: '.gitlab-ci.yml', status: 'modified', baseContent: 'stages: [test]', headContent: 'stages: [lint]' }],
+  });
+  assert.equal(modified.find((f) => f.rule === 'protected-path')?.severity, 'human');
+});
+
 test('ci_config: REFUSES when the workflow declares no test command — a pipeline that runs no tests is decoration', async () => {
   const p = fixture();
   try {

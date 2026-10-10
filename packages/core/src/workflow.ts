@@ -121,7 +121,10 @@ export interface WorkflowStep {
    * Required: a pipeline that does not run the delivery's tests is decoration.
    */
   testCommand?: string;
-  /** `ci_config`: which dialect to write — `forgejo` (also Gitea) or `github`. Defaults to `forgejo`. */
+  /**
+   * `ci_config`: which dialect to write — `forgejo` (also Gitea), `github`, or `gitlab` (GitLab CI
+   * YAML, a different language from the GitHub-Actions dialects). Defaults to `forgejo`.
+   */
   dialect?: string;
   /** `await_checks`: how long to wait for the host's pipeline, in seconds (default 300, ceiling 1800). */
   waitSeconds?: number;
@@ -226,10 +229,10 @@ export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManif
         });
       }
       const dialect = step.dialect ?? 'forgejo';
-      if (dialect !== 'forgejo' && dialect !== 'github') {
+      if (dialect !== 'forgejo' && dialect !== 'github' && dialect !== 'gitlab') {
         issues.push({
           stepId,
-          message: `step ${stepId} declares dialect "${dialect}": implemented are forgejo (also Gitea) and github`,
+          message: `step ${stepId} declares dialect "${dialect}": implemented are forgejo (also Gitea), github and gitlab`,
         });
       }
     }
