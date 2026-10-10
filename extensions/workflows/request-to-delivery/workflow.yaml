@@ -1,5 +1,5 @@
 name: request-to-delivery
-version: 0.3.0
+version: 0.4.0
 description: >
   The black-box flow, end to end: a CONFIRMED requirement document becomes a delivered product with no
   human reading the design or the code. The delivery is ATTEMPTED (request-to-delivery-attempt) and, when
@@ -7,7 +7,9 @@ description: >
   attempts (ADR-034). Only a run that spends every attempt writes its failure back into the requirement
   document — a run that repairs itself leaves the human's document untouched. A run that is accepted is
   PUBLISHED to the host and then WAITS for the host's own pipeline on the published head: a red or
-  still-pending pipeline fails the run closed, naming the checks (ADR-037).
+  still-pending pipeline fails the run closed, naming the checks (ADR-037). Only then is the delivery
+  LANDED: `merge` merges exactly the head the acceptance judged, refusing a moved head before it calls the
+  host (ADR-040).
 runtime: pi
 steps:
   - id: delivery_attempt
@@ -34,7 +36,18 @@ steps:
     type: await_checks
     waitSeconds: 300
     dependsOn: [publish]
+  - id: merge
+    # The LAST MILE (ADR-040): land the delivery, but ONLY the head the acceptance judged. The pull request
+    # is the one `publish` opened and the commit is the one the judge accepted; both come from the run, and
+    # neither is a field of this step. Two guards, both required: the reviewed head is handed to the host as
+    # `expectedHeadSha` (the host refuses a moved head), and the pull request's CURRENT head is read and
+    # compared to it BEFORE any merge is attempted — a merge of a different head is exactly the failure this
+    # layer exists to prevent. Because it `dependsOn: [await_checks]`, a red or still-pending pipeline skips
+    # this step structurally: nothing is landed on a pipeline that did not go green.
+    type: merge
+    mergeMethod: merge
+    dependsOn: [await_checks]
   - id: delivery
     type: delivery
     prompt: Package the run's artifacts into a delivery manifest.
-    dependsOn: [await_checks]
+    dependsOn: [merge]

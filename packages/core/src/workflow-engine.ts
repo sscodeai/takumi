@@ -16,7 +16,7 @@ import { groupByLevel } from './workflow.js';
 import { detectHardFailure, judgeGate, parseTestReport } from './quality-gate.js';
 import { createGitRunner, type GitRunner } from './git-runner.js';
 import { ProviderError } from './provider-error.js';
-import type { CheckSummary, DeliveryProvider, PullRequestRef } from './delivery.js';
+import type { CheckSummary, DeliveryMergeMethod, DeliveryProvider, MergeOutcome, PullRequestRef, PullRequestStatus } from './delivery.js';
 import { executeCiConfigStep, executeAwaitChecksStep } from './ci-pipeline.js';
 import { collectReviewInput, verdictFromFindings } from './review.js';
 import {
@@ -168,6 +168,14 @@ export interface WorkflowRunResult {
   run: WorkflowRun;
   steps: WorkflowStepResult[];
   status: 'completed' | 'failed' | 'cancelled';
+  /**
+   * The run's final variable table. A step that learns a fact later steps need writes it here (a
+   * `publish` sets `deliveryRef`, an `acceptance` sets `acceptedHead`, a `merge` sets `deliveryMerged`),
+   * and a caller that runs a workflow WITHIN a workflow — the `repair` step — reads it back so a fact the
+   * sub-run established (which commit the judge accepted) reaches the run that invoked it. Without this a
+   * `merge` after a `repair` could not say which commit it was landing.
+   */
+  vars: Record<string, string>;
 }
 
 const RUNNING = new Set<string>();
@@ -603,7 +611,7 @@ export async function executeWorkflow(
           run.stepStatus[stepId] = 'failed';
           run.status = 'cancelled';
           stepResults.push({ stepId, status: 'failed', summary: 'rejected by approver', artifacts: [], tests: [] });
-          return { run, steps: stepResults, status: 'cancelled' };
+          return { run, steps: stepResults, status: 'cancelled', vars };
         }
         run.stepStatus[stepId] = 'completed';
         stepResults.push({ stepId, status: 'completed', summary: 'approved', artifacts: [], tests: [] });
@@ -783,6 +791,11 @@ export async function executeWorkflow(
           );
           if (passed) {
             accepted = true;
+            // The head the sub-run's acceptance JUDGED is carried up into this run's vars (ADR-040): a
+            // `merge` in the workflow that invoked this repair must land that commit, and it can only name
+            // it if the fact crosses the sub-run boundary. The repair loop is the one place a sub-workflow's
+            // facts reach the run that started it.
+            if (res.vars['acceptedHead'] !== undefined) vars['acceptedHead'] = res.vars['acceptedHead'];
             break;
           }
           failures = failureLinesOf(acceptance?.summary ?? '');
@@ -1317,6 +1330,7 @@ export async function executeWorkflow(
           `judge: ${forgedJudgePath === undefined ? '(none forged; a literal harness)' : `${forgedJudgePath} sha256:${shortDigest(forgedJudgeDigest)}`}`,
           `harness cwd: ${harnessCwd}`,
           `worktree: ${worktreePath}`,
+          `accepted head: ${head ?? '(unknown — the judged repository had no resolvable HEAD)'}`,
           `requirement: ${requirementRef} sha256:${shortDigest(digest)}`,
           `confirmed: ${ctx.confirmedRequirement.ref} sha256:${shortDigest(ctx.confirmedRequirement.digest)}`,
           `verdict: ${verdict.verdict ?? '(none)'}`,
@@ -1326,6 +1340,12 @@ export async function executeWorkflow(
         ].join('\n');
 
         if (accepted) {
+          // The head the judge ACCEPTED is the only head a later `merge` may land (ADR-040). It travels in
+          // the run's vars, exactly as `publish` records `deliveryRef`: the acceptance result is where "what
+          // was reviewed" is decided, and a merge that cannot name this commit is not a merge this project
+          // performs. Absent means the judged repository had no resolvable HEAD, and a later merge then
+          // refuses rather than merging a head it cannot name.
+          if (head !== undefined && head.length > 0) vars['acceptedHead'] = head;
           const artifact = [
             `# ${id}`,
             '',
@@ -1770,6 +1790,137 @@ export async function executeWorkflow(
         continue;
       }
 
+      // Merge step (ADR-040): the LAST MILE. Everything up to here produced an OPEN pull request; this is the
+      // one step that LANDS it, and it lands EXACTLY the commit the acceptance judged. Two independent
+      // guards, both required:
+      //
+      //   1. the reviewed head is passed to the port as `expectedHeadSha`, so the HOST refuses a moved head
+      //      (the port's own rule, proven live against a real Forgejo: a stale head got `409 head out of
+      //      date` — a guard a client bug cannot bypass);
+      //   2. the pull request's CURRENT head is read from `status(ref)` and compared to the reviewed head
+      //      BEFORE any merge is attempted, naming both SHAs when they differ — because a green pipeline on
+      //      one commit says nothing about another, and a merge of a different head is exactly the failure
+      //      this whole layer exists to prevent.
+      //
+      // The reference and the head are NOT manifest fields (ADR-040): the pull request is the one this run
+      // published (`vars.deliveryRef`) and the commit is the one the acceptance judged (`vars.acceptedHead`).
+      if (step.type === 'merge') {
+        run.stepStatus[stepId] = 'running';
+        const failMerge = (summary: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `merge FAILED: ${summary.split('\n')[0] ?? summary}`);
+        };
+        const provider = ctx.delivery;
+        if (provider === undefined) {
+          failMerge('this run has no delivery provider (ctx.delivery), so there is no host to merge on: an open pull request is not a landed delivery');
+          done.add(stepId);
+          continue;
+        }
+        // The reference is the run's OWN published pull request, never a manifest-named one: landing a pull
+        // request this run did not publish is not this run's delivery.
+        const deliveryRef = (vars['deliveryRef'] ?? '').trim();
+        if (deliveryRef.length === 0) {
+          failMerge('the run has no published reference (vars.deliveryRef, set by a publish step), so there is no pull request to land');
+          done.add(stepId);
+          continue;
+        }
+        // The REVIEWED head — the commit the acceptance judged — is the only head this step may merge.
+        const reviewedHead = (vars['acceptedHead'] ?? '').trim();
+        if (reviewedHead.length === 0) {
+          failMerge('the reviewed head could not be determined (no acceptance recorded the head it judged, vars.acceptedHead), so this merge cannot say which commit it is landing: refusing');
+          done.add(stepId);
+          continue;
+        }
+        const ref: PullRequestRef = {
+          number: deliveryRef,
+          url: /^https?:/i.test(deliveryRef) ? deliveryRef : '',
+          headSha: '',
+          baseSha: '',
+        };
+        // Guard 2: read the CURRENT head and refuse BEFORE calling merge when it differs from the reviewed
+        // head. Naming both SHAs is the point: a reader must be able to see which commit was judged and which
+        // one the pull request now points at.
+        let current: PullRequestStatus;
+        try {
+          current = await provider.status(ref);
+        } catch (e) {
+          failMerge(`the host could not report the state of pull request ${deliveryRef} (${e instanceof Error ? e.message : String(e)}), so the head that would be merged could not be read`);
+          done.add(stepId);
+          continue;
+        }
+        const currentHead = (current.headSha ?? '').trim();
+        if (currentHead !== reviewedHead) {
+          failMerge(`pull request ${deliveryRef} now points at ${currentHead.length > 0 ? currentHead : '(unknown)'}, but the reviewed and accepted head is ${reviewedHead}: refusing to merge a head that was not the one judged (a green pipeline on one commit says nothing about another)`);
+          done.add(stepId);
+          continue;
+        }
+        const method: DeliveryMergeMethod = step.mergeMethod ?? 'merge';
+        // Guard 1: hand the reviewed head to the port. The HOST refuses a moved head.
+        let outcome: MergeOutcome;
+        try {
+          outcome = await provider.merge(ref, { expectedHeadSha: reviewedHead, method });
+        } catch (e) {
+          failMerge(`the host refused the merge of ${reviewedHead} on pull request ${deliveryRef}: ${e instanceof Error ? e.message : String(e)}`);
+          done.add(stepId);
+          continue;
+        }
+        // `merged: false` is a FAILURE, never a note: a merge that did not happen is not a landed delivery.
+        if (outcome.merged !== true) {
+          failMerge(`the host reported merged=${String(outcome.merged)} for pull request ${deliveryRef} (head ${reviewedHead}): a merge that did not happen is not a landed delivery`);
+          done.add(stepId);
+          continue;
+        }
+        // The port requires the merged commit to BE the reviewed head; a provider that reports another one
+        // has broken the boundary this layer keeps.
+        if (outcome.headSha !== reviewedHead) {
+          failMerge(`the host reported it merged ${outcome.headSha}, but the reviewed and accepted head is ${reviewedHead}: the port requires the merged commit to be the reviewed head`);
+          done.add(stepId);
+          continue;
+        }
+        const summaryLines = [
+          `merged pull request ${deliveryRef}: method ${outcome.method}, head ${outcome.headSha}, url ${outcome.url}`,
+          `  reviewed head: ${reviewedHead} (the commit the acceptance judged)`,
+          `  host head before merge: ${currentHead} (${current.state})`,
+        ];
+        const artifactPaths: string[] = [];
+        try {
+          const art = await ctx.artifacts.write({
+            taskId: `${runId}:${stepId}`,
+            kind: 'merge',
+            fileName: `${stepId}.md`,
+            content: [
+              `# ${stepId} (merge)`,
+              '',
+              'merged: true',
+              `pull request: ${deliveryRef}`,
+              `method: ${outcome.method}`,
+              `head: ${outcome.headSha}`,
+              `url: ${outcome.url}`,
+              `reviewedHead: ${reviewedHead}`,
+              '',
+            ].join('\n'),
+            contentType: 'text/markdown',
+            trace: taskTraceFor(step, vars),
+          });
+          artifactPaths.push(art.path);
+        } catch (e) {
+          summaryLines.push(`  note: the merge artifact could not be persisted (${e instanceof Error ? e.message : String(e)}) — the merge happened and is named here`);
+        }
+        run.stepStatus[stepId] = 'completed';
+        stepResults.push({ stepId, status: 'completed', summary: summaryLines.join('\n'), artifacts: artifactPaths, tests: [] });
+        // What a later step needs to know the delivery LANDED: the flag, the commit that landed and the
+        // reference it landed on. A step after this one must not have to infer a merge from prose.
+        vars['deliveryMerged'] = 'true';
+        vars['mergedHead'] = outcome.headSha;
+        vars['mergedRef'] = deliveryRef;
+        ctx.onEvent?.(stepId, `merge: pull request ${deliveryRef} merged (method ${outcome.method}, head ${outcome.headSha})`);
+        done.add(stepId);
+        continue;
+      }
+
       if (step.type === 'delivery') {
         run.stepStatus[stepId] = 'running';
         const fsx3 = await import('node:fs/promises');
@@ -1916,7 +2067,7 @@ export async function executeWorkflow(
 
     run.status = failedIds.size > 0 ? 'failed' : 'completed';
     run.finishedAt = Date.now();
-    return { run, steps: stepResults, status: run.status };
+    return { run, steps: stepResults, status: run.status, vars };
   } catch (e) {
     run.status = 'failed';
     run.finishedAt = Date.now();

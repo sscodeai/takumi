@@ -1,5 +1,6 @@
 import type { RuntimeCapability } from './types.js';
 import type { ReviewRules } from './review-rules.js';
+import type { DeliveryMergeMethod } from './delivery.js';
 
 /**
  * Workflow model (ADR-003): declarative YAML/JSON workflows.
@@ -27,10 +28,18 @@ export const WORKFLOW_STEP_TYPES = [
   'ci_config',
   'await_checks',
   'publish',
+  'merge',
   'delivery',
 ] as const;
 
 export type StepType = (typeof WORKFLOW_STEP_TYPES)[number];
+
+/**
+ * The merge methods the delivery port implements (ADR-007). Repeated here as a runtime list so a
+ * manifest that names a method no host implements is refused at load, rather than reaching a provider
+ * that would have to guess.
+ */
+const MERGE_METHODS: readonly DeliveryMergeMethod[] = ['merge', 'squash', 'rebase'];
 
 /** Is `value` one of the step types the engine can execute? */
 export function isWorkflowStepType(value: unknown): value is StepType {
@@ -129,6 +138,17 @@ export interface WorkflowStep {
   prTitle?: string;
   /** `publish`: the issue title; defaults to the confirmed requirement ref and the branch. */
   issueTitle?: string;
+  /**
+   * `merge`: the merge method the host should use (ADR-040). One of `merge`, `squash`, `rebase`;
+   * defaults to `merge`. This is the ONLY thing a `merge` step declares.
+   *
+   * There is deliberately NO field for the reference or the head: the pull request merged is the one
+   * this RUN published (`vars.deliveryRef`, set by `publish`), and the commit merged is the head the
+   * acceptance JUDGED (`vars.acceptedHead`, set by `acceptance`). A manifest that could name either
+   * would be a manifest that could land a commit nobody reviewed — the failure this whole layer exists
+   * to prevent.
+   */
+  mergeMethod?: DeliveryMergeMethod;
 }
 
 export interface WorkflowManifestIssue {
@@ -226,6 +246,19 @@ export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManif
       // Publishing needs a base branch to target: a pull request against nothing is not a pull request.
       if (typeof step.baseBranch === 'string' && step.baseBranch.trim().length === 0) {
         issues.push({ stepId, message: `step ${stepId} declares an empty baseBranch: a pull request needs a branch to target` });
+      }
+    }
+    if (step?.type === 'merge') {
+      // The only thing a merge step declares is its method; a method no host implements is refused here
+      // rather than handed to a provider that would have to guess. The reference and the head are NOT
+      // fields on purpose (ADR-040): both come from the run — the published pull request and the head the
+      // acceptance judged — so a manifest cannot land a commit nobody reviewed.
+      const method = step.mergeMethod;
+      if (method !== undefined && !(MERGE_METHODS as readonly string[]).includes(method)) {
+        issues.push({
+          stepId,
+          message: `step ${stepId} is a merge whose mergeMethod is "${String(method)}": implemented are ${MERGE_METHODS.join(', ')}`,
+        });
       }
     }
     if (step?.type === 'repair') {
