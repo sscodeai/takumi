@@ -1306,9 +1306,13 @@ export async function executeWorkflow(
           continue;
         }
         const reqDigest = requirementDigest(requirementText);
-        // The judge directory is run-scoped and recreated, so a judge from an earlier run can never be
-        // reused as this run's evidence.
-        const judgeDir = path.join(ctx.cwd, '.takumi', 'acceptance', stepId);
+        // The judge directory is RUN-scoped and recreated, so a judge from an earlier run can never be
+        // reused as this run's evidence — and two runs on one project can never overwrite each other's
+        // judge (ADR-052). `<project>/.takumi/acceptance/<runId>/<stepId>/` keeps the judge outside the
+        // implementation worktree (ADR-026) while giving every run its own copy of it: with a fixed
+        // `<stepId>` path, the second run's `rm -rf` destroyed the judge the first run was being judged
+        // by, which is why the run directory had to be cleaned by hand between runs.
+        const judgeDir = path.join(ctx.cwd, '.takumi', 'acceptance', runId, stepId);
         try {
           await fsPromises.rm(judgeDir, { recursive: true, force: true });
           await fsPromises.mkdir(judgeDir, { recursive: true });
