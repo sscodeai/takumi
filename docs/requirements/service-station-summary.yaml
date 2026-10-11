@@ -197,13 +197,20 @@ ambiguities:
 # starts the surface, waits for the URL, ASSERTS what the document declares about the response
 # (`expect_status`/`expect_body`, ADR-046) and runs a command against it.
 deliverable:
-  # HOW IT RUNS. A service is started, not invoked once per file — so this is the start command, and the
-  # path the service should summarise is passed through the `{csv}` placeholder the judge resolves (in
-  # `run` AND in a scenario's `start`, ADR-046).
-  run: "bash serve.sh {csv}"
-  # THE BOUND ON ONE INVOCATION (ADR-046). `bash serve.sh {csv}` starts the service and never exits, so
-  # without a bound the judge waits for ever and the generated CI job waits out the host's own six-hour
-  # limit. 120000 is the default; it is declared here so this document says the number out loud.
+  # HOW IT RUNS. A service is started, not invoked once per file — so this is the start command. `{csv}`
+  # is the fixture and `{port}` is a port the JUDGE allocated for this invocation (ADR-047), so no run can
+  # answer for another; the judge resolves both in `run`, `read` and a scenario's `start`/`url`/`run`.
+  run: "bash serve.sh {csv} {port}"
+  # HOW A JUDGE READS THE REPORT (ADR-047). `run` STARTS the service and prints nothing, so a judge that
+  # reads stdout finds no report at all and every relation reports "the judge did not exercise the
+  # deliverable" — the first live service run produced exactly that (1/11 checks). `read` fetches the
+  # report for the fixture `run` was started with, and `url` is the surface the judge waits for first.
+  read: "curl -fsS {url}"
+  url: "http://127.0.0.1:{port}/summary"
+  # THE BOUND ON ONE INVOCATION (ADR-046). `bash serve.sh {csv} {port}` starts the service and never
+  # exits, so without a bound the judge waits for ever and the generated CI job waits out the host's own
+  # six-hour limit. 120000 is the default; it is declared here so this document says the number out loud.
+  # It bounds the `read` too: a fetch that never returns is the same hang one step later.
   timeoutMs: 120000
   # The world a judge builds its fixtures in (ADR-033).
   input_format:
@@ -254,10 +261,12 @@ deliverable:
   # passes whatever the surface said.
   scenarios:
     - id: SCN-001
-      # `{csv}` resolves to the fixture the judge generated from `input_format.sample`.
-      start: "bash serve.sh {csv}"
-      url: "http://127.0.0.1:8787/summary"
-      run: "curl -fsS http://127.0.0.1:8787/summary"
+      # `{csv}` resolves to the fixture the judge generated from `input_format.sample`, and `{port}` to a
+      # port the judge allocated for THIS surface — a hard-coded port let a leftover process from an
+      # earlier run answer this scenario's HTTP request (ADR-047).
+      start: "bash serve.sh {csv} {port}"
+      url: "http://127.0.0.1:{port}/summary"
+      run: "curl -fsS {url}"
       expect_status: 200
       expect_body: '"total"'
       expect: "the service starts, answers 200 on the declared URL, and returns a JSON summary of the sample CSV"

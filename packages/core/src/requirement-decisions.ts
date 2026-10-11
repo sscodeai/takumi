@@ -164,6 +164,20 @@ export interface DeliverableBlock {
    * document declares none, because a start-and-serve `run` never exits on its own.
    */
   timeoutMs?: number;
+  /**
+   * How a JUDGE reads the report of ONE fixture (ADR-047). A script prints its report on stdout, so this
+   * is absent and `run` is the whole story. A SERVICE starts and serves: `run` prints NOTHING, so a judge
+   * that reads stdout finds no report at all and every output-shape relation reports "the judge did not
+   * exercise the deliverable". `read` is the command that FETCHES the report for the fixture `run` was
+   * started with; `{csv}`, `{port}` and `{url}` are resolved by the judge.
+   */
+  read?: string;
+  /**
+   * The surface a judge waits for before it runs `read` (ADR-047), with `{port}` for a port the judge
+   * ALLOCATES. `read` and `url` go together: a service whose report no judge can fetch is a delivery
+   * judged on nothing, and both are refused when declared alone.
+   */
+  url?: string;
   /** The declared scenarios, in document order (ADR-035). */
   scenarios: Scenario[];
   /** The mutation tool configuration a `mutation-detection` relation runs (ADR-039), when declared. */
@@ -450,9 +464,13 @@ export function parseDeliverableBlock(text: string): DeliverableBlock | undefine
   const input = parseInputFormat(text);
   const mutation = parseMutation(text);
   const timeout = block['timeoutMs'];
+  const read = stringOf(block['read']);
+  const url = stringOf(block['url']);
   return {
     ...(run === undefined ? {} : { run }),
     ...(typeof timeout === 'number' && Number.isFinite(timeout) ? { timeoutMs: timeout } : {}),
+    ...(read === undefined ? {} : { read }),
+    ...(url === undefined ? {} : { url }),
     ...(block['output_format'] === undefined ? {} : { outputFormat: block['output_format'] }),
     ...(input === undefined ? {} : { input }),
     ...(mutation === undefined ? {} : { mutation }),
@@ -523,6 +541,25 @@ export function validateRequirementDocument(text: string): string[] {
       issues.push(
         `the deliverable block declares ${deadKey}, which nothing in the chain reads or runs: a declaration that is never executed reads as compliance, which is worse than a refusal — either wire it as a real step or remove it (the delivered project's own tests are run from the workflow's testCommand, not from deliverable.tests)`,
       );
+    }
+    // ADR-047: `read` and `url` go together. A service's `run` starts and serves, so the judge needs a
+    // command that FETCHES the report (`read`) and a surface to wait for first (`url`); declaring one
+    // without the other is a delivery a judge cannot read, which is worse than a refusal.
+    const declRead = deliverableOf(text)?.['read'];
+    const declUrl = deliverableOf(text)?.['url'];
+    const hasRead = typeof declRead === 'string' && declRead.trim().length > 0;
+    const hasUrl = typeof declUrl === 'string' && declUrl.trim().length > 0;
+    if (declRead !== undefined && !hasRead) {
+      issues.push('the deliverable block declares an empty read: a judge told to fetch the report with nothing is told nothing');
+    }
+    if (declUrl !== undefined && !hasUrl) {
+      issues.push('the deliverable block declares an empty url: a judge told to wait for nothing waits for ever');
+    }
+    if (hasRead && !hasUrl) {
+      issues.push('the deliverable block declares read but no url: a judge that has to fetch the report must know which surface to wait for before it fetches');
+    }
+    if (hasUrl && !hasRead) {
+      issues.push('the deliverable block declares url but no read: a service whose report the judge cannot fetch is judged on nothing — declare how one fixture\'s report is read (read: "curl -fsS {url}")');
     }
     // ADR-046: the bound on ONE invocation of the deliverable. Optional in the document (the forge and the
     // generated CI job apply DEFAULT_RUN_TIMEOUT_MS), but a declared one has to be a bound a judge can
