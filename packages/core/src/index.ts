@@ -313,3 +313,15 @@ export type {
   CheckConclusion,
   MergeOutcome,
 } from './delivery.js';
+
+// The board-projection port (ADR-044): a black-box run's progress written where a human reads it.
+// Write-only on purpose — a port with no read cannot be used to make a decision (ADR-017 rule 1).
+export type {
+  DeliveryBoardPort,
+  DeliveryBoardMetadata,
+  DeliveryBoardProjection,
+  DeliveryBoardRef,
+  DeliveryBoardState,
+} from './delivery-board.js';
+// The label + state vocabulary the engine and any adapter share, so neither invents its own.
+export { DELIVERY_BOARD_LABELS, DELIVERY_BOARD_STEP_STATES } from './delivery-board.js';

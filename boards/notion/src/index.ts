@@ -1110,3 +1110,9 @@ export function createNotionTransport(
     ...curl,
   });
 }
+
+/**
+ * The delivery board (ADR-044) lives beside the task board but is a DIFFERENT port: write-only, one row
+ * per delivery run. Re-exported here so a consumer of this package gets both surfaces from one import.
+ */
+export { NotionDeliveryBoard, createNotionDeliveryBoard, type NotionDeliveryBoardOptions } from './delivery-board.js';
