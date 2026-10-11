@@ -8,8 +8,8 @@
  * work. Two fixes live here:
  *
  *   (C) With a `delivery:` section configured, `takumi run` CREATES the worktree itself: it clones
- *       the configured repository (the clone URL comes from the provider's OWN target resolution —
- *       see `forgejoCloneUrl`) and creates the task branch FROM THE BASE, so the ancestry the
+ *       the configured repository (the clone URL comes from the provider-generic derivation — see
+ *       `deliveryCloneUrl`) and creates the task branch FROM THE BASE, so the ancestry the
  *       publish step checks holds by construction, and the implementer sees the target repository's
  *       real content rather than an empty one. `--worktree` stays an explicit override.
  *
@@ -29,7 +29,7 @@ import { dirname, join } from 'node:path';
 
 import { createGitRunner, gitFailure, type GitRunner } from '@takumi/core';
 
-import { forgejoCloneUrl, type DeliverySection } from './delivery-command.js';
+import { deliveryCloneUrl, type DeliverySection } from './delivery-command.js';
 
 /** One-line, length-bounded description of a failed git command, for an error message. */
 function firstLine(text: string): string {
@@ -100,7 +100,7 @@ export async function createDeliveryWorktree(
 ): Promise<DeliveryWorktree> {
   const git = request.git ?? createGitRunner();
   // The clone URL comes from the provider's own target resolution — not a second derivation.
-  const cloneUrl = await forgejoCloneUrl(request.section);
+  const cloneUrl = await deliveryCloneUrl(request.section);
   const branch = request.branch ?? deliveryBranchName();
   const baseBranch = request.section.baseBranch ?? 'main';
   const remote = request.section.remote ?? 'origin';
