@@ -23,12 +23,32 @@ import { EventEmitter } from 'node:events';
  * Phase 3 acceptance: switching fake → pi must require config only
  * (same Core, same workflow, same task).
  */
+/**
+ * Why a turn that produced NO text must not be reported as a finished turn.
+ *
+ * On 2026-10-11 17:56Z a real intake run (wf-5beb034f) was recorded as a success while the agent had
+ * produced nothing. The pi transcript for it holds ONE assistant message whose content is a single
+ * `thinking` part, with `stopReason: "length"` and usage output 8192 / reasoning 8192: the model spent
+ * its ENTIRE output budget reasoning and never emitted an answer. The adapter turned that into
+ * "agent turn finished", the engine recorded the step as `completed`, and the workflow's shape gate
+ * then passed 4/4 on a document a previous session had written six hours earlier.
+ *
+ * A truncated turn is a FAILED turn, not a finished one. This returns the failure to report, or null
+ * when the stop reason does not say the turn was cut off — an agent that simply answered with nothing
+ * is left alone, because silence is only a failure when the evidence says it was truncation.
+ */
+export function unfinishedTurnFailure(stopReason: string | undefined): string | null {
+  if (stopReason !== 'length') return null;
+  return 'the turn hit the model\'s output limit before answering (stopReason "length"): the model spent its whole output budget on reasoning and produced no answer, so this step produced nothing. Raise the model\'s output limit (maxTokens) or use a model that answers within it — a turn cut off at the limit is a failure, not a finished turn';
+}
 export class PiRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly sessions = new Map<TaskId, { session: Awaited<ReturnType<typeof createAgentSession>>['session']; abort: () => void }>();
   private readonly statuses = new Map<TaskId, TaskStatus>();
   private readonly usages = new Map<TaskId, Usage>();
   private readonly artifacts = new Map<TaskId, Artifact[]>();
   private readonly lastMessages = new Map<TaskId, string>();
+  /** The last assistant message's stop reason per task: 'length' means the turn was cut off. */
+  private readonly lastStopReasons = new Map<TaskId, string>();
   private readonly eventsCount = new Map<TaskId, number>();
   // Session pool keyed by cwd: holds ONE session at a time for a single task
   // id, reused only by a retry of the SAME task (keeps retry context). A new
@@ -206,8 +226,15 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
         stats = null;
       }
 
-      this.statuses.set(id, 'completed');
-      emitEvent({ id: `${id}-ev-end`, taskId: id, type: 'task.completed', timestamp: Date.now() });
+      // A turn that produced no answer because it was cut off is NOT a completed task: the status must
+      // agree with the failure event `mapPiEvent` emitted for it (see unfinishedTurnFailure).
+      const unfinished = this.lastMessages.has(id) ? null : unfinishedTurnFailure(this.lastStopReasons.get(id));
+      if (unfinished) {
+        this.statuses.set(id, 'failed');
+      } else {
+        this.statuses.set(id, 'completed');
+        emitEvent({ id: `${id}-ev-end`, taskId: id, type: 'task.completed', timestamp: Date.now() });
+      }
 
       this.usages.set(id, {
         runtimeId: 'pi',
@@ -259,6 +286,9 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
     // Real assistant text arrives via message_update / message_end events.
     if (t === 'message_update' || t === 'message_end') {
       const m = msg.message;
+      // The stop reason is the difference between "the model answered" and "the model was cut off".
+      const stop = (m as { stopReason?: string } | undefined)?.stopReason;
+      if (typeof stop === 'string' && stop.length > 0) this.lastStopReasons.set(taskId, stop);
       let text = '';
       if (m && typeof m.content === 'string') {
         text = m.content;
@@ -300,13 +330,19 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
         };
       case 'bash_execution_update':
         return { id: `${taskId}-ev${seq}`, type: 'command.completed', ...base };
-      case 'agent_end':
-        return {
-          id: `${taskId}-ev${seq}`,
-          type: 'agent.message',
-          message: this.lastMessages.get(taskId) ?? 'agent turn finished',
-          ...base,
-        };
+      case 'agent_end': {
+        const answered = this.lastMessages.get(taskId);
+        if (answered) {
+          return { id: `${taskId}-ev${seq}`, type: 'agent.message', message: answered, ...base };
+        }
+        // No text: either the model chose to say nothing, or it was cut off before it could. A cut-off
+        // turn is reported as a FAILURE, because that is what the engine must act on.
+        const unfinished = unfinishedTurnFailure(this.lastStopReasons.get(taskId));
+        if (unfinished) {
+          return { id: `${taskId}-ev${seq}`, type: 'task.failed', message: unfinished, ...base };
+        }
+        return { id: `${taskId}-ev${seq}`, type: 'agent.message', message: 'agent turn finished', ...base };
+      }
       case 'agent_settled':
         // No text payload — the real assistant text already arrived via
         // message_update/message_end. Emitting "agent settled" here would

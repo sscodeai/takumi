@@ -81,6 +81,19 @@ export interface WorkflowStep {
   skillAction?: string;
   /** Tool ids required by this step. */
   tools?: string[];
+  /**
+   * The paths this step MUST write, relative to the project. Only an AGENT step may declare them, and
+   * the engine checks every one after the step runs: a declared output that was not written DURING the
+   * step fails the step.
+   *
+   * Why this exists: on 2026-10-11 17:56Z (run wf-5beb034f) `request-intake` completed in 74 seconds
+   * with `intake_shape` PASSED 4/4 and `ambiguity_confirmation` approved, while the agent had produced
+   * NOTHING — the document the shape gate read was a committed file from six hours earlier. The gate
+   * checked the document's SHAPE and never its PROVENANCE, so a run that produced nothing was
+   * indistinguishable from a run that produced the document. A file that was already there is not this
+   * step's output, and a step that declares what it must produce can be held to it.
+   */
+  produces?: string[];
   /** Runtime capability requirements (validated before run). */
   requires?: RuntimeCapability[];
   /** Steps that must finish before this one. Empty = only previous sequential step (or none). */
@@ -226,6 +239,29 @@ export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManif
         stepId,
         message: `step ${stepId} has unknown type "${String(step?.type)}" (allowed: ${WORKFLOW_STEP_TYPES.join(', ')})`,
       });
+    }
+    // A declared output is the engine's contract on an AGENT step and on nothing else: the check is
+    // implemented where an agent step's result is read. On any other type the declaration would read
+    // as a check nobody runs — the same defect class as `requiresApproval` above (ADR-048) — so it is
+    // refused BY NAME before the run, rather than trusted.
+    if (step?.produces !== undefined) {
+      if (step.type !== 'agent') {
+        issues.push({
+          stepId,
+          message: `step ${stepId} declares produces, but a declared output is only an agent step's contract (it is checked where an agent step's result is read), so on a ${String(step.type)} step it is a declaration nothing executes`,
+        });
+      } else if (
+        !Array.isArray(step.produces) ||
+        step.produces.length === 0 ||
+        step.produces.some(
+          (p) => typeof p !== 'string' || p.trim().length === 0 || p.startsWith('/') || p.split(/[\\/]/).includes('..'),
+        )
+      ) {
+        issues.push({
+          stepId,
+          message: `step ${stepId} declares produces with no usable path: every entry must be a non-empty path INSIDE the project (relative, no "..", no absolute path) — a declared output is checked by having been written, and a path outside the project is not this step's to write`,
+        });
+      }
     }
     if (step?.type === 'rule_review' && (typeof step.baseRef !== 'string' || step.baseRef.trim().length === 0)) {
       issues.push({ stepId, message: `step ${stepId} is a rule_review and requires a non-empty baseRef` });

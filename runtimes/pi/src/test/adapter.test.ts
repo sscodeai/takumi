@@ -73,3 +73,29 @@ test('PiRuntimeAdapter: shared runtime contract suite (real Pi, gated on key)', 
     runtime.close();
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// A TRUNCATED TURN IS A FAILURE, NOT A FINISHED TURN
+//
+// The other half of run wf-5beb034f: the model spent its entire 8192-token output budget on reasoning
+// and never answered (one assistant message, content = a single `thinking` part, stopReason "length"),
+// and the adapter reported that as a finished turn — so a workflow step that produced nothing was
+// recorded as completed. The stop reason is the difference between "the model answered" and "the model
+// was cut off", and only the second one is a failure.
+// ---------------------------------------------------------------------------------------------
+
+test('unfinishedTurnFailure: a turn cut off at the output limit is a failure, a normal stop is not', async () => {
+  const { unfinishedTurnFailure } = await import('../index.js');
+
+  const cut = unfinishedTurnFailure('length');
+  assert.ok(cut, 'a turn that hit the output limit produced no answer and must be reported as a failure');
+  assert.match(cut ?? '', /stopReason "length"/, 'the refusal names the stop reason it read');
+  assert.match(cut ?? '', /maxTokens/, 'the refusal names the fix');
+
+  assert.equal(unfinishedTurnFailure('stop'), null, 'a turn that stopped normally is not a failure');
+  assert.equal(
+    unfinishedTurnFailure(undefined),
+    null,
+    'an unreported stop reason is not evidence of truncation — silence alone is not a failure',
+  );
+});
