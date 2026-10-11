@@ -134,7 +134,7 @@ test('a change outside the tests alongside a test change is not "test only"', ()
 });
 
 test('a protected path needs a HUMAN, and is never handed back to the agent to "fix"', () => {
-  for (const path of ['package.json', '.github/workflows/ci.yml', 'Dockerfile', 'go.mod', 'pnpm-lock.yaml', 'takumi.yaml', '.takumi/workflows/x.yaml']) {
+  for (const path of ['package.json', '.github/workflows/ci.yml', 'Dockerfile', 'go.mod', 'pnpm-lock.yaml', 'takumi.yaml', '.takumi/workflows/x.yaml', 'docs/authorizations/SA-001.yaml']) {
     const findings = runReviewRules(input(change(path, 'a', 'b')));
     const finding = findings.find((f) => f.rule === 'protected-path');
     assert.ok(finding, `${path} must be protected`);
@@ -175,6 +175,20 @@ test('a protected path the delivery CREATES is a note; changing one that existed
 test('an ordinary source file is not protected and raises nothing', () => {
   const findings = runReviewRules(input(change('src/calc.ts', 'a', 'b'), change('docs/README.md', 'a', 'b')));
   assert.deepEqual(findings, []);
+});
+
+test('a delivery may not edit or revoke the authorization that let it run (ADR-045)', () => {
+  // `docs/authorizations/` joins the protected paths: a run may never author, edit or revoke its own
+  // authorization, and a standing authorization never lowers a protected path's severity — the rule is
+  // stated as a rule, so an authorization cannot widen its own reach by adding a field.
+  for (const path of ['docs/authorizations/SA-001.yaml', 'docs/authorizations/new.yaml']) {
+    const findings = runReviewRules(input(change(path, 'id: SA-001\n', 'id: SA-001\nrevoked: true\n')));
+    const finding = findings.find((f) => f.rule === 'protected-path');
+    assert.ok(finding, `${path} must be protected`);
+    assert.equal(finding.severity, 'human', `${path}: only a human may touch an authorization`);
+    assert.equal(hasHumanFinding(findings), true);
+    assert.equal(hasBlockingFinding(findings), false, 'and the agent is never told to revert it');
+  }
 });
 
 test('protected paths and test patterns are configurable', () => {

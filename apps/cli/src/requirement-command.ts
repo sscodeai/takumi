@@ -5,11 +5,15 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   analyseFeedback,
+  authorizationDigest,
   FEEDBACK_CLOSURE_KINDS,
+  licenseStandingConfirmation,
   parseFeedback,
+  parseStandingAuthorization,
   renderFeedbackBrief,
   resolveFeedback,
   validateRequirementDocument,
+  type DefaultedDecision,
   type FeedbackClosureKind,
   type FeedbackEntry,
 } from '@takumi/core';
@@ -147,6 +151,189 @@ function confirmer(cwd: string): string {
   } catch {
     return process.env['USER'] ?? 'unknown';
   }
+}
+
+/**
+ * The confirmation block a STANDING AUTHORIZATION writes (ADR-045 §4).
+ *
+ * It is the block ADR-027 already writes — who, when, by what method — plus the authorization it was
+ * checked against and the `defaulted:` list of answers nobody read. One structural difference: it is
+ * written as FRONT-MATTER, at the top of the document, rather than appended. `defaulted:` is the
+ * checklist a reviewer reads (the answers a machine chose from the document's own defaults), and the
+ * point of keeping it is that it is met BEFORE the decisions it describes rather than after them.
+ */
+export interface StandingConfirmation {
+  /** The SIGNER of the authorization, not the process that ran the command (ADR-045 §4). */
+  by: string;
+  at: string;
+  authorizationRef: string;
+  authorizationDigest: string;
+  signedBy: string;
+  signedAt: string;
+  expiresAt: string;
+  defaulted: DefaultedDecision[];
+}
+
+/** A YAML double-quoted scalar, with the two characters that need escaping escaped. */
+function yamlString(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/** Drop one top-level `key:` block from a hand-written document, textually — nothing else is touched. */
+function withoutTopLevelBlock(text: string, key: string): string {
+  const lines = text.split('\n');
+  const start = lines.findIndex((line) => new RegExp(`^${key}:\\s*$`).test(line));
+  if (start === -1) return text;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^\S/.test(lines[i] ?? '')) {
+      end = i;
+      break;
+    }
+  }
+  return [...lines.slice(0, start), ...lines.slice(end)].join('\n');
+}
+
+export function withStandingConfirmation(text: string, spec: StandingConfirmation): string {
+  const body = [
+    'confirmation:',
+    `  by: ${yamlString(spec.by)}`,
+    `  at: ${yamlString(spec.at)}`,
+    '  method: standing-authorization',
+    '  authorization:',
+    `    ref: ${yamlString(spec.authorizationRef)}`,
+    `    digest: ${yamlString(`sha256:${spec.authorizationDigest}`)}`,
+    `    signedBy: ${yamlString(spec.signedBy)}`,
+    `    signedAt: ${yamlString(spec.signedAt)}`,
+    `    expiresAt: ${yamlString(spec.expiresAt)}`,
+    '  defaulted:',
+    ...spec.defaulted.flatMap((decision) => [
+      `    - id: ${decision.id}`,
+      `      question: ${yamlString(decision.question)}`,
+      `      chosen: ${yamlString(decision.chosen)}`,
+      `      class: ${decision.class}`,
+      `      policy: ${decision.policy}`,
+      ...(decision.checkedAs === undefined ? [] : [`      checkedAs: ${decision.checkedAs}`]),
+    ]),
+  ];
+  const stripped = withoutTopLevelBlock(text, 'confirmation').replace(/^\n+/, '');
+  return `${body.join('\n')}\n\n${stripped}`;
+}
+
+/** `ref` or `ref@sha256:<digest>` — the two spellings `--authorization` accepts (ADR-045 §1). */
+function splitDigestRef(value: string): { ref: string; digest?: string } {
+  const at = value.lastIndexOf('@sha256:');
+  if (at === -1) return { ref: value };
+  return { ref: value.slice(0, at), digest: value.slice(at + '@sha256:'.length).trim().toLowerCase() };
+}
+
+/**
+ * The confirmation path a STANDING AUTHORIZATION opens (ADR-045 §2/§5), and the one exception to the
+ * non-TTY refusal below. It is all-or-nothing: the licence check runs FIRST, nothing is written unless
+ * every open decision is covered, and a document the authorization does not cover is left byte-identical
+ * with no token printed. The token it produces is the digest of the document it just wrote — the same
+ * token an interactive confirmation would print for the same text (ADR-025's binding is untouched).
+ */
+function confirmByStandingAuthorization(
+  cwd: string,
+  ref: string,
+  doc: RequirementDocument,
+  citation: string,
+  dryRun: boolean,
+  io: ConfirmIO,
+): number {
+  const out = io.out ?? ((line: string) => console.log(line));
+  const { ref: authorizationRef, digest: pinned } = splitDigestRef(citation);
+
+  let authorizationText: string;
+  try {
+    authorizationText = readFileSync(join(cwd, authorizationRef), 'utf8');
+  } catch (e) {
+    out(`refused: the authorization "${authorizationRef}" could not be read (${e instanceof Error ? e.message : String(e)})`);
+    return 1;
+  }
+
+  // The optional pin: when the citation names a digest, a mismatch is refused by name with BOTH digests
+  // and the ref — the same "refused by name" shape as ADR-025's "is not the one that was confirmed".
+  const authorizationSha = authorizationDigest(authorizationText);
+  if (pinned !== undefined && pinned !== authorizationSha) {
+    out(
+      `refused: the authorization "${authorizationRef}" is not the one that was cited: --authorization pins sha256:${pinned} and the file now hashes to sha256:${authorizationSha} — read the file again and cite the digest you read`,
+    );
+    return 1;
+  }
+
+  const loaded = parseStandingAuthorization(authorizationText);
+  if (loaded.authorization === undefined) {
+    out(`refused: "${authorizationRef}" is not a standing authorization:`);
+    for (const issue of loaded.issues) out(`  ${issue}`);
+    return 1;
+  }
+  const authorization = loaded.authorization;
+
+  const licence = licenseStandingConfirmation({ authorization, documentRef: ref, documentText: doc.text });
+  if (licence.refusals.length > 0) {
+    // The refusal NAMES what blocked it, why, and the authorization it was checked against — and prints
+    // no token and no digest: a document out of scope produces nothing that could be mistaken for one.
+    out('refused: a requirement confirmation must be interactive (stdin is not a TTY).');
+    out(`  This document is not covered by ${authorizationRef}:`);
+    for (const refusal of licence.refusals) out(`    ${refusal}`);
+    out('  A human confirms from a terminal, or the authorization is widened in a signed commit.');
+    out('  --dry-run lists what is still undecided without confirming anything.');
+    return 1;
+  }
+
+  if (dryRun) {
+    out(`${ref}: ${licence.defaulted.length} decision(s) would be defaulted by ${authorizationRef} — --dry-run writes nothing:`);
+    for (const decision of licence.defaulted) {
+      out(`  ${decision.id} (${decision.class}): ${decision.question}`);
+      out(`    would take its own default: ${decision.chosen}`);
+    }
+    return 0;
+  }
+
+  // It FILLS BLANKS and never overwrites an answer: `licenseStandingConfirmation` returns only decisions
+  // with no `chosen:` yet, so a human's recorded answer is left exactly as it is (ADR-045 §2).
+  let text = doc.text;
+  for (const decision of licence.defaulted) {
+    try {
+      text = withChosen(text, decision.id, decision.chosen);
+    } catch (e) {
+      out(`refused: ${e instanceof Error ? e.message : String(e)}`);
+      return 1;
+    }
+  }
+  text = withStandingConfirmation(text, {
+    by: authorization.signedBy,
+    at: new Date().toISOString(),
+    authorizationRef,
+    authorizationDigest: authorizationSha,
+    signedBy: authorization.signedBy,
+    signedAt: authorization.signedAt,
+    expiresAt: authorization.expiresAt,
+    defaulted: licence.defaulted,
+  });
+
+  // Validate before writing: a confirmation that corrupts the document is worse than a refusal.
+  try {
+    parseYaml(text);
+  } catch (e) {
+    out(`refused: the confirmed document would not be valid YAML (${e instanceof Error ? e.message : String(e)}); nothing was written`);
+    return 1;
+  }
+  writeFileSync(doc.path, text, 'utf8');
+
+  out('');
+  out(
+    `Confirmed by the standing authorization ${authorizationRef}, signed by ${authorization.signedBy} — ${licence.defaulted.length} answer(s) nobody read:`,
+  );
+  for (const decision of licence.defaulted) out(`  [x] ${decision.id}: ${decision.chosen}`);
+  const token = requirementConfirmation(cwd, ref);
+  out('');
+  out('The confirmation token for this document — pass it to a run:');
+  out(token.ref);
+  out(`sha256:${token.digest}`);
+  return 0;
 }
 
 /** `--flag value` or `--flag=value`, the two spellings this CLI accepts. */
@@ -288,6 +475,9 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
   const sub = rest[0] ?? '';
   const ref = rest[1] ?? '';
   const dryRun = rest.includes('--dry-run');
+  // ADR-045: the ONE exception to the non-TTY refusal below. A signed standing authorization that covers
+  // every open decision lets a non-interactive invocation produce the document the token hashes to.
+  const authorizationCitation = flagValue(rest, '--authorization');
 
   if (sub === 'digest') {
     if (ref.length === 0) {
@@ -448,6 +638,13 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
     return 1;
   }
 
+  // ADR-045: the standing-authorization path, taken BEFORE the `--dry-run` view and BEFORE the non-TTY
+  // refusal — it is the one thing that makes a non-interactive confirmation legal. The licence check runs
+  // in there, and nothing is written unless every open decision is covered.
+  if (authorizationCitation !== undefined) {
+    return confirmByStandingAuthorization(cwd, ref, doc, authorizationCitation, dryRun, io);
+  }
+
   const undecided = doc.ambiguities.filter((a) => a.chosen === undefined && a.default === undefined);
   // ADR-029: the other thing that stops a document from being confirmable — an acceptance failure the
   // machine wrote back that nobody has dealt with.
@@ -476,9 +673,12 @@ export async function runRequirementCommand(cwd: string, rest: string[], io: Con
   const isTTY = ((io.input ?? process.stdin) as { isTTY?: boolean }).isTTY === true;
   if (!isTTY) {
     // The design's rule 2, enforced rather than documented: a confirmation that nobody read is not a
-    // confirmation, and a pipeline must not be able to produce one.
+    // confirmation, and a pipeline must not be able to produce one. ADR-045 NARROWS this refusal by
+    // exactly one exception — a signed standing authorization covering every open decision — and the
+    // refusal names it, so the one way forward is on screen.
     out('refused: a requirement confirmation must be interactive (stdin is not a TTY).');
-    out('  In CI, use --dry-run to see what is still undecided; a human confirms from a terminal.');
+    out('  In CI, use --dry-run to see what is still undecided; a human confirms from a terminal,');
+    out('  or a signed standing authorization covers every open decision: --authorization <ref>.');
     return 1;
   }
 

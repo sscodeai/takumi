@@ -29,6 +29,7 @@
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { RequirementConfirmation } from './standing-authorization.js';
 
 /** Where every run writes its record, relative to the project directory. */
 export const RUN_RECORD_DIR = '.takumi/runs';
@@ -101,8 +102,17 @@ export interface RunRecord {
   runId: string;
   /** The workflow the run executed. */
   workflow: string;
-  /** The requirement this run was confirmed against, and its digest. Null when none was on record. */
-  requirement: { ref: string; digest: string } | null;
+  /**
+   * The requirement this run was confirmed against, how it was confirmed, and its digest. Null when none
+   * was on record.
+   *
+   * The confirmation lives INSIDE this binding deliberately (ADR-045 §4): it is impossible to read which
+   * document a run was bound to without also reading whether a human confirmed it or an authorization
+   * defaulted it — and, when it was an authorization, WHICH answers nobody read. A sibling top-level
+   * field was rejected: a `null` there would be indistinguishable from "forgotten", which is the same
+   * reason ADR-025's `NO_REQUIREMENT` is a real value rather than an absent field.
+   */
+  requirement: { ref: string; digest: string; confirmation: RequirementConfirmation } | null;
   /** ISO-8601 timestamps, and the total wall-clock duration in milliseconds. */
   startedAt: string;
   finishedAt: string;

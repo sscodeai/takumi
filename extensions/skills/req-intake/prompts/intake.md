@@ -43,6 +43,24 @@ ambiguities:
     chosen: "First bounded option: skip the row and count it"
     checkedAs: skip-count        # ON THE DECISION: what the chosen answer means to a judge
     blocking: true
+  - id: AMB-002
+    question: "When the group key repeats, which occurrence wins?"
+    options:
+      - "merge: every occurrence counts as its own reading"
+      - "last-row: only the last occurrence is kept"
+    default: "merge: every occurrence counts as its own reading"
+    chosen: "merge: every occurrence counts as its own reading"
+    checkedAs: merge             # ON THE DECISION, never on the relation that settles it
+    blocking: true
+  - id: AMB-003
+    question: "How do the numbers round when the answer is recomputed independently?"
+    options:
+      - "half-up: round half away from zero"
+      - "truncate: drop the remainder"
+    default: "half-up: round half away from zero"
+    chosen: "half-up: round half away from zero"
+    checkedAs: half-up           # ON THE DECISION, never on the anchor that settles it
+    blocking: true
 deliverable:
   run: "bash summary.sh {csv}"          # how a judge invokes the thing; {csv} is the input file
   input_format:                         # the WORLD a judge builds its fixtures in: it has no other source
@@ -68,13 +86,17 @@ deliverable:
       report_path: "e2e/report.json"  # required when `report` is given
   relations:                            # what a judge must be able to CHECK, from output alone
     - id: REL-001
+      relation: malformed-row-accounting
+      decides: AMB-001
+      description: "A bad row is skipped and counted the way AMB-001 decided."
+    - id: REL-002
       relation: additivity
       description: "The per-station counts sum to the printed total count."
-    - id: REL-002
+    - id: REL-003
       relation: duplicate-resolution
       decides: AMB-002
       description: "A repeated station id resolves the way AMB-002 decided."
-    - id: REL-003
+    - id: REL-004
       relation: mutation-detection
       description: "The delivered tests fail when the delivered behaviour is mutated."
   differential:

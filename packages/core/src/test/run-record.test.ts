@@ -8,6 +8,7 @@ import {
   ArtifactStore,
   executeWorkflow,
   readRunRecords,
+  requirementDigest,
   RUN_RECORD_DIR,
   runRecordPath,
   summarizeRuns,
@@ -255,5 +256,105 @@ test('run records: a valid JSON file that is not a record is reported, not count
     assert.match(unreadable[0]?.reason ?? '', /not a run record/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The requirement binding says HOW it was confirmed (ADR-045 §4). Keeping the confirmation INSIDE the
+// requirement binding is deliberate: it is impossible to read which document a run was bound to without
+// also reading whether a human confirmed it or an authorization defaulted it — and, when it was an
+// authorization, WHICH answers nobody read.
+
+const CONFIRMED_DOC = [
+  'requirements:',
+  '  - id: REQ-001',
+  '    title: "Summarise the readings"',
+  '    description: "Print one aggregate line per station."',
+  '    acceptance_criteria:',
+  '      - "A third party can check the summary."',
+  'ambiguities:',
+  '  - id: AMB-001',
+  '    question: "How are unparseable rows handled?"',
+  '    options: ["skip-count: skipped and counted", "stop-error: abort"]',
+  '    default: "skip-count: skipped and counted"',
+  '    chosen: "skip-count: skipped and counted"',
+  '    checkedAs: skip-count',
+  '    blocking: true',
+  'confirmation:',
+  '  by: "moon"',
+  '  at: "2026-10-11T09:17:13.940Z"',
+  '  method: standing-authorization',
+  '  authorization:',
+  '    ref: "docs/authorizations/SA-001.yaml"',
+  '    digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"',
+  '    signedBy: "moon"',
+  '    signedAt: "2026-10-11T00:00:00Z"',
+  '    expiresAt: "2026-11-11T00:00:00Z"',
+  '  defaulted:',
+  '    - id: AMB-001',
+  '      question: "How are unparseable rows handled?"',
+  '      chosen: "skip-count: skipped and counted"',
+  '      class: malformed-row-accounting',
+  '      policy: document-default',
+  '      checkedAs: skip-count',
+  '',
+].join('\n');
+
+test('run record: the requirement binding carries HOW it was confirmed, and what nobody read', async () => {
+  const c = ctx();
+  const ref = 'docs/requirements/feature.yaml';
+  fs.mkdirSync(join(c.dir, 'docs/requirements'), { recursive: true });
+  writeFileSync(join(c.dir, ref), CONFIRMED_DOC, 'utf8');
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'record-confirmation',
+      version: '0.1.0',
+      description: 'one agent step',
+      steps: [{ id: 'impl', type: 'agent', prompt: 'implement it' }],
+    };
+    const res = await executeWorkflow(wf, {
+      ...c.exec,
+      confirmedRequirement: { ref, digest: requirementDigest(CONFIRMED_DOC) },
+    });
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    assert.equal(record.requirement?.ref, ref);
+    const confirmation = record.requirement?.confirmation;
+    assert.equal(confirmation?.mode, 'standing-authorization');
+    assert.equal(confirmation?.by, 'moon', 'by is the SIGNER, not the process that ran the command');
+    assert.equal(confirmation?.authorization?.signedBy, 'moon');
+    assert.equal(confirmation?.authorization?.expiresAt, '2026-11-11T00:00:00Z');
+    assert.deepEqual(confirmation?.defaulted.map((d) => [d.id, d.class, d.checkedAs]), [
+      ['AMB-001', 'malformed-row-accounting', 'skip-count'],
+    ]);
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+test('run record: a document with no confirmation block reads as digest-only, not as one of the other two', async () => {
+  const c = ctx();
+  const ref = 'docs/requirements/feature.yaml';
+  fs.mkdirSync(join(c.dir, 'docs/requirements'), { recursive: true });
+  writeFileSync(join(c.dir, ref), 'requirements:\n  - id: REQ-001\n    title: "A thing"\n    acceptance_criteria:\n      - "checkable"\n', 'utf8');
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'record-digest-only',
+      version: '0.1.0',
+      description: 'one agent step',
+      steps: [{ id: 'impl', type: 'agent', prompt: 'implement it' }],
+    };
+    const res = await executeWorkflow(wf, { ...c.exec, confirmedRequirement: { ref, digest: 'c'.repeat(64) } });
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    const confirmation = record.requirement?.confirmation;
+    assert.equal(confirmation?.mode, 'digest-only');
+    assert.equal(confirmation?.by, null);
+    assert.equal(confirmation?.method, null);
+    assert.equal(confirmation?.authorization, null);
+    assert.deepEqual(confirmation?.defaulted, []);
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
   }
 });

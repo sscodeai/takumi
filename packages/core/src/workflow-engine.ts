@@ -33,11 +33,31 @@ import { promisify } from 'node:util';
 import { requirementDigest, shortDigest } from './review-digest.js';
 import { appendFeedback, parseFeedback } from './requirement-feedback.js';
 import { writeRunRecord, type RunRecord, type RunRecordStep, type RunStepStatus } from './run-record.js';
+import { readRequirementConfirmation, type RequirementConfirmation } from './standing-authorization.js';
 import type { Usage } from './types.js';
 import { parse as parseYamlText } from 'yaml';
+import { readFileSync as readTextFileSync } from 'node:fs';
+import { join as joinPath } from 'node:path';
 const execAsync = promisify(exec);
 /** Runs a harness FILE without a shell, so a path in a manifest is never a shell string. */
 const execFileAsync = promisify(execFile);
+
+/**
+ * HOW the document this run was bound to was confirmed (ADR-045 §4).
+ *
+ * The engine reads it from the DOCUMENT, which the digest has already bound: the block it copies is the
+ * one the confirmation wrote, so the record cannot claim a confirmation the document does not carry. A
+ * document that carries no block — a digest approved out of band (ADR-025) — reads as `digest-only`,
+ * and an unreadable document does not invent one.
+ */
+function confirmationOf(cwd: string, ref: string): RequirementConfirmation {
+  try {
+    return readRequirementConfirmation(readTextFileSync(joinPath(cwd, ref), 'utf8'));
+  } catch {
+    return readRequirementConfirmation('');
+  }
+}
+
 
 /**
  * What the next delivery attempt is told (ADR-034). The judge's own `not ok` lines, verbatim, plus the
@@ -623,7 +643,13 @@ export async function executeWorkflow(
       requirement:
         ctx.confirmedRequirement === undefined
           ? null
-          : { ref: ctx.confirmedRequirement.ref, digest: ctx.confirmedRequirement.digest },
+          : {
+              ref: ctx.confirmedRequirement.ref,
+              digest: ctx.confirmedRequirement.digest,
+              // Read from the document, not from the caller: the record says HOW the document was
+              // confirmed, and the digest is what makes the block it copies the confirmation's own.
+              confirmation: confirmationOf(ctx.cwd, ctx.confirmedRequirement.ref),
+            },
       startedAt: new Date(run.startedAt).toISOString(),
       finishedAt: new Date(finishedAt).toISOString(),
       durationMs: Math.max(0, finishedAt - run.startedAt),

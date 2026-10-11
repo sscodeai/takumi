@@ -172,6 +172,13 @@ export interface Decision {
   fromFeedback?: string;
   /** What the chosen answer MEANS to a judge (ADR-031), from `decisionModesFor(relation)`. */
   checkedAs?: string;
+  /**
+   * The document's own statement that a PERSON decides this, whatever `default:` it carries (ADR-045).
+   * It exists because a decision with a defensible default could otherwise never say "this one is not a
+   * machine's to default" — a standing authorization would eat the default. A blocking decision with no
+   * default is already a human's; this is how a decision WITH one is marked too.
+   */
+  human?: boolean;
 }
 
 /**
@@ -264,6 +271,7 @@ export function parseRequirements(text: string): Decision[] {
       blocking: entry['blocking'] !== false,
       ...(stringOf(entry['fromFeedback']) === undefined ? {} : { fromFeedback: stringOf(entry['fromFeedback']) }),
       ...(stringOf(entry['checkedAs']) === undefined ? {} : { checkedAs: stringOf(entry['checkedAs']) }),
+      ...(entry['human'] === true ? { human: true } : {}),
     });
   }
   return decisions;
@@ -749,6 +757,28 @@ export function validateRequirementDocument(text: string): string[] {
     if (binding.decides === undefined) continue;
     if (!decisionIds.has(binding.decides)) {
       issues.push(`${binding.checkId} (${binding.relation}) exercises ${binding.decides}, which is not a decision in this document`);
+    }
+  }
+  // ADR-045: `human: true` is how a document says a PERSON decides this decision, whatever default it
+  // carries. Only a real boolean marks it — a truthy `human: yes` would read as "not marked" and the
+  // decision would be defaulted by a standing authorization, which is the one thing the marker exists to
+  // prevent. So it is refused by name here rather than silently ignored.
+  let rawAmbiguities: unknown;
+  try {
+    rawAmbiguities = (parseYaml(text) as { ambiguities?: unknown } | null)?.ambiguities;
+  } catch {
+    rawAmbiguities = undefined;
+  }
+  if (Array.isArray(rawAmbiguities)) {
+    for (const raw of rawAmbiguities) {
+      if (raw === null || typeof raw !== 'object') continue;
+      const entry = raw as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(entry, 'human')) continue;
+      if (typeof entry['human'] !== 'boolean') {
+        issues.push(
+          `${stringOf(entry['id']) ?? 'a decision'} declares human: ${JSON.stringify(entry['human'])}, which is not true or false: a marker a reader cannot trust is a decision that gets defaulted`,
+        );
+      }
     }
   }
   return issues;

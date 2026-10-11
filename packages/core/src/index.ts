@@ -110,6 +110,34 @@ export type {
 } from './requirement-decisions.js';
 export { FEEDBACK_BRIEF_MARKER, analyseFeedback, failuresWithoutDecision, renderFeedbackBrief } from './feedback-brief.js';
 export type { AnalysedFailure, AnalysedFeedback, FailureKind } from './feedback-brief.js';
+
+// A standing authorization (ADR-045), pin-only v1: a signed grant that lets a requirement document be
+// confirmed by its OWN defaults, non-interactively, and says so in the record. It may only NARROW the
+// licensable set (a widening field is refused at load, by name), and the confirmation it produces is the
+// same digest-bound token an interactive one produces (ADR-025).
+export {
+  AUTHORIZATION_CLASSES,
+  AUTHORIZATION_FAILURE_CLASSES,
+  AUTHORIZATION_POLICIES,
+  UNMECHANISED_CLASS,
+  authorizationDigest,
+  decisionClass,
+  licenseStandingConfirmation,
+  parseStandingAuthorization,
+  readRequirementConfirmation,
+} from './standing-authorization.js';
+export type {
+  AuthorizationFailureGrant,
+  AuthorizationGrant,
+  AuthorizationLoad,
+  AuthorizationPin,
+  ConfirmedAuthorization,
+  DefaultedDecision,
+  RequirementConfirmation,
+  StandingAuthorization,
+  StandingLicence,
+  StandingLicenceInput,
+} from './standing-authorization.js';
 export { carryStateRecordForward } from './board-state-record.js';
 export {
   NO_REQUIREMENT,

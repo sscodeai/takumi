@@ -157,18 +157,15 @@ deliverable:
       relation: duplicate-resolution
       description: "A fixture with repeated (date, station) rows is aggregated such that every occurrence counts as its own reading."
       decides: AMB-002
-      checkedAs: merge
     - id: REL-004
       relation: malformed-row-accounting
       description: "A fixture with unparseable rows completes with exit 0; the bad rows are excluded from all aggregates and reported on the SKIPPED line."
       decides: AMB-001
-      checkedAs: skip-count
   differential:
     - id: DIFF-001
       anchor: independent-aggregation
       description: "An independent re-computation of each station's count, min, max and mean from the same readings, rounding half away from zero, must equal the tool's printed values."
       decides: AMB-003
-      checkedAs: half-up
 
 confirmation:
   by: "SS"
