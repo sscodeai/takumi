@@ -83,11 +83,15 @@ export function deliveryOptionsFromSection(section: DeliverySection): DeliveryCo
  * There are three answers and no fourth — configurable here, from the environment, or set in code —
  * exactly as `board-command.ts` answers it. A key the factory does not forward is invisible, and a
  * typo in a key is invisible in the same way.
+ *
+ * `tokenEnv` is CONFIGURATION because it is a NAME: `delivery: { tokenEnv: GITHUB_TOKEN }` says where
+ * the secret lives without being one. The secret itself stays an ENVIRONMENT option (below), because a
+ * secret in a config file is one commit away from a secret in a repository.
  */
 const CONFIGURABLE_OPTIONS: Record<string, readonly string[]> = {
-  forgejo: ['repo', 'apiBase', 'remote'],
-  gitlab: ['repo', 'apiBase', 'remote'],
-  github: ['repo', 'apiBase', 'remote'],
+  forgejo: ['repo', 'apiBase', 'remote', 'tokenEnv'],
+  gitlab: ['repo', 'apiBase', 'remote', 'tokenEnv'],
+  github: ['repo', 'apiBase', 'remote', 'tokenEnv'],
 };
 
 /** Credentials: read from the environment, never accepted from a config file. */
@@ -129,6 +133,71 @@ export function assertKnownProviderOptions(options: DeliveryCommandOptions): voi
     }
     throw new Error(`${provider}: unknown option ${JSON.stringify(key)} — this adapter reads ${configurable.join(', ')}`);
   }
+}
+
+/**
+ * The environment variable each API-backed provider reads its token from, in the order the ADAPTER
+ * itself tries them. `delivery.tokenEnv` names one instead — a name, never a value.
+ */
+export const DEFAULT_TOKEN_ENV: Record<string, readonly string[]> = {
+  forgejo: ['FORGEJO_TOKEN', 'GITEA_TOKEN'],
+  gitlab: ['GITLAB_TOKEN'],
+  github: ['GITHUB_TOKEN'],
+};
+
+/**
+ * The providers that CANNOT do anything without a token: their adapter builds a fail-closed "no
+ * request transport" function and refuses every call, so a run that reaches `publish` without one has
+ * spent the whole chain for nothing.
+ *
+ * `forgejo` is deliberately NOT in this list: its transport reads the token lazily and sends the
+ * request without one, which is legitimate against a host that allows it. That difference is stated
+ * rather than left to be discovered (ADR-051).
+ */
+const TOKEN_REQUIRED: readonly string[] = ['gitlab', 'github'];
+
+/**
+ * The token a delivery provider will use, and the names it looked for — or the refusal.
+ *
+ * WHY THIS EXISTS: without it a missing token is discovered at the PUBLISH step, after the
+ * implementation, the delivered tests, the quality gate, the rule review and the acceptance have all
+ * run. Measured on 2026-10-11: a `request-to-delivery` run accepted a service 11/11 and was then
+ * refused at `publish` with `no request transport configured … — inject one (tests) or provide
+ * credentials`, because `GITHUB_TOKEN` was not in the environment. The adapter is right to fail closed
+ * — an unauthenticated request is never sent — but the operator should not pay for the chain first.
+ */
+export function deliveryToken(
+  providerId: string,
+  options: DeliveryCommandOptions,
+  env: NodeJS.ProcessEnv = process.env,
+): { token?: string; names: readonly string[] } {
+  const named = options.providerOptions['tokenEnv'];
+  const names =
+    named !== undefined && named.trim().length > 0 ? [named.trim()] : (DEFAULT_TOKEN_ENV[providerId] ?? []);
+  for (const name of names) {
+    const raw = env[name];
+    if (raw !== undefined && raw.trim().length > 0) return { token: raw.trim(), names };
+  }
+  return { names };
+}
+
+/** The resolved token, refusing BY NAME when the provider cannot run without one. */
+export function assertDeliveryToken(
+  providerId: string,
+  options: DeliveryCommandOptions,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const { token, names } = deliveryToken(providerId, options, env);
+  if (token !== undefined) return token;
+  if (!TOKEN_REQUIRED.includes(providerId)) return undefined;
+  const named = options.providerOptions['tokenEnv'];
+  throw new Error(
+    `${providerId}: the delivery section names this provider but no token is configured — set the ` +
+      `environment variable ${names.join(' or ')}` +
+      (named === undefined ? ' (or name another one with delivery.tokenEnv)' : '') +
+      ', because the publish step is refused without one AFTER the implementation, the delivered tests ' +
+      'and the acceptance have all run, and an unauthenticated request is never sent',
+  );
 }
 
 function required(options: DeliveryCommandOptions, key: string, what: string): string {
@@ -226,26 +295,37 @@ export async function createDeliveryProvider(options: DeliveryCommandOptions): P
   switch (options.providerId) {
     case 'forgejo': {
       const { createForgejoDeliveryProvider } = await import('@takumi/delivery-forgejo');
+      // The option mapper runs FIRST, so a section that is malformed (no `repo`) says so before the
+      // token question is asked. Then the token (ADR-051): `forgejo` may legitimately have none, so an
+      // unresolvable one is passed as absent and the adapter's own lazy read decides.
+      const mapped = forgejoDeliveryOptions(options);
+      const token = assertDeliveryToken(options.providerId, options);
       // The git runner is a PROGRAMMATIC option (never read from config), and it is REQUIRED for the
       // provider to do anything: without it every git call is the fail-closed "no git runner
       // configured" error. The CLI is a real caller, so it injects the real spawn-based runner.
-      return createForgejoDeliveryProvider({ ...forgejoDeliveryOptions(options), git: createGitRunner() });
+      return createForgejoDeliveryProvider({
+        ...mapped,
+        ...(token === undefined ? {} : { token }),
+        git: createGitRunner(),
+      });
     }
     case 'gitlab': {
       const { createGitLabDeliveryProvider } = await import('@takumi/delivery-gitlab');
+      const mapped = gitlabDeliveryOptions(options);
+      const token = assertDeliveryToken(options.providerId, options);
       // The git runner is a PROGRAMMATIC option (never read from config). The GitLab adapter's default is
       // already the real spawn-based runner, but the CLI injects it explicitly so the two adapters are
       // wired identically and a future default change cannot silently leave git unconfigured. The token
-      // is not passed here: the provider reads `GITLAB_TOKEN` itself and fails closed without one.
-      return createGitLabDeliveryProvider({ ...gitlabDeliveryOptions(options), git: createGitRunner() });
+      // is passed explicitly so the variable the operator NAMED (`delivery.tokenEnv`) is the one read.
+      return createGitLabDeliveryProvider({ ...mapped, ...(token === undefined ? {} : { token }), git: createGitRunner() });
     }
     case 'github': {
       const { createGitHubDeliveryProvider } = await import('@takumi/delivery-github');
-      // The git runner is a PROGRAMMATIC option (never read from config), injected explicitly so the
-      // three adapters are wired identically and a future default change cannot silently leave git
-      // unconfigured. The token is not passed here: the provider reads `GITHUB_TOKEN` itself and fails
-      // closed without one.
-      return createGitHubDeliveryProvider({ ...githubDeliveryOptions(options), git: createGitRunner() });
+      const mapped = githubDeliveryOptions(options);
+      const token = assertDeliveryToken(options.providerId, options);
+      // Same as GitLab: the runner is injected explicitly, and the token is passed so the named
+      // variable is the one that is read.
+      return createGitHubDeliveryProvider({ ...mapped, ...(token === undefined ? {} : { token }), git: createGitRunner() });
     }
     default:
       throw new Error(`unknown delivery provider: ${options.providerId} (forgejo, gitlab, github)`);

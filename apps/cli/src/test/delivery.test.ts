@@ -201,9 +201,18 @@ test('delivery options: gitlab maps repo owner/name to the adapter project and k
 });
 
 test('createDeliveryProvider: the gitlab adapter is built, with its real capabilities', async () => {
-  const provider = await createDeliveryProvider({ providerId: 'gitlab', providerOptions: { repo: 'aicodesh/takumi-e2e' } });
-  assert.equal(provider.metadata().id, 'gitlab');
-  assert.deepEqual(provider.capabilities(), { canPushBranch: true, canOpenPullRequest: true, canRunChecks: true, canMerge: true });
+  // A token is REQUIRED before anything is built (ADR-051): the metadata test provides one, since what
+  // it is about is the capabilities, not the credential.
+  const previous = process.env['GITLAB_TOKEN'];
+  process.env['GITLAB_TOKEN'] = 'a-token-for-the-metadata-test';
+  try {
+    const provider = await createDeliveryProvider({ providerId: 'gitlab', providerOptions: { repo: 'aicodesh/takumi-e2e' } });
+    assert.equal(provider.metadata().id, 'gitlab');
+    assert.deepEqual(provider.capabilities(), { canPushBranch: true, canOpenPullRequest: true, canRunChecks: true, canMerge: true });
+  } finally {
+    if (previous === undefined) delete process.env['GITLAB_TOKEN'];
+    else process.env['GITLAB_TOKEN'] = previous;
+  }
 });
 
 test('createDeliveryProvider: gitlab without its required option fails fast, naming it', async () => {
@@ -261,9 +270,17 @@ test('delivery options: github keeps repo owner/name and baseBranch a run defaul
 });
 
 test('createDeliveryProvider: the github adapter is built, with its real capabilities', async () => {
-  const provider = await createDeliveryProvider({ providerId: 'github', providerOptions: { repo: 'sscodeai/takumi-delivery-demo' } });
-  assert.equal(provider.metadata().id, 'github');
-  assert.deepEqual(provider.capabilities(), { canPushBranch: true, canOpenPullRequest: true, canRunChecks: true, canMerge: true });
+  // A token is REQUIRED before anything is built (ADR-051): the metadata test provides one.
+  const previous = process.env['GITHUB_TOKEN'];
+  process.env['GITHUB_TOKEN'] = 'a-token-for-the-metadata-test';
+  try {
+    const provider = await createDeliveryProvider({ providerId: 'github', providerOptions: { repo: 'sscodeai/takumi-delivery-demo' } });
+    assert.equal(provider.metadata().id, 'github');
+    assert.deepEqual(provider.capabilities(), { canPushBranch: true, canOpenPullRequest: true, canRunChecks: true, canMerge: true });
+  } finally {
+    if (previous === undefined) delete process.env['GITHUB_TOKEN'];
+    else process.env['GITHUB_TOKEN'] = previous;
+  }
 });
 
 test('createDeliveryProvider: github without its required option fails fast, naming it', async () => {
@@ -535,11 +552,38 @@ test('run: a configured delivery reaches ctx.delivery — the publish step drive
   }
 });
 
+test('run: a configured gitlab delivery with NO token is REFUSED before the run starts, naming the variable', async () => {
+  const previousGitlab = process.env['GITLAB_TOKEN'];
+  delete process.env['GITLAB_TOKEN'];
+  const p = project([
+    '  provider: gitlab',
+    '  repo: aicodesh/takumi-e2e',
+    '  apiBase: http://127.0.0.1:1/api/v4',
+    '  baseBranch: main',
+    '  remote: origin',
+  ]);
+  try {
+    const worktree = gitWorktree(p.dir);
+    const config = loadConfig(p.dir) as ProjectConfig;
+    // The refusal happens BEFORE the run: no worktree work, no agent, no acceptance, nothing published.
+    // Measured on 2026-10-11, a missing token used to surface at `publish` — after the whole chain had
+    // run — so the operator paid for the implementation, the tests and the acceptance first.
+    await assert.rejects(
+      () => runTask({ cwd: p.dir, prompt: 'do the work', runtimeId: 'fake', workflow: 'publish-wf', config, worktree }),
+      /GITLAB_TOKEN/,
+      'the refusal names the variable to set',
+    );
+  } finally {
+    if (previousGitlab !== undefined) process.env['GITLAB_TOKEN'] = previousGitlab;
+    p.cleanup();
+  }
+});
+
 test('run: a configured gitlab delivery reaches ctx.delivery — the publish step drives the REAL GitLab provider', async () => {
   const previousGitlab = process.env['GITLAB_TOKEN'];
-  // No token: the provider is built with its fail-closed unconfigured transport, so the delivery
-  // attempt is provable without any network and without a credential.
-  delete process.env['GITLAB_TOKEN'];
+  // A token IS present, so the provider is built with a REAL transport pointed at an unreachable local
+  // port: the run reaches the publish step, the failure is the HOST's, and nothing leaves the machine.
+  process.env['GITLAB_TOKEN'] = 'a-token-for-the-wiring-test';
   const p = project([
     '  provider: gitlab',
     '  repo: aicodesh/takumi-e2e',
@@ -562,7 +606,7 @@ test('run: a configured gitlab delivery reaches ctx.delivery — the publish ste
     // provider's own — which is how we know `ctx.delivery` is the provider the config selected.
     assert.equal(result.status, 'failed', result.events.join('\n'));
     const log = result.events.join('\n');
-    assert.match(log, /gitlab-delivery: no request transport configured/);
+    assert.ok(!log.includes('no request transport configured'), 'the token built a real transport');
     assert.ok(!log.includes('no delivery provider (ctx.delivery)'), 'the provider WAS constructed into ctx.delivery');
   } finally {
     if (previousGitlab !== undefined) process.env['GITLAB_TOKEN'] = previousGitlab;
@@ -570,11 +614,36 @@ test('run: a configured gitlab delivery reaches ctx.delivery — the publish ste
   }
 });
 
+test('run: a configured github delivery with NO token is REFUSED before the run starts, naming the variable', async () => {
+  const previousGithub = process.env['GITHUB_TOKEN'];
+  delete process.env['GITHUB_TOKEN'];
+  const p = project([
+    '  provider: github',
+    '  repo: sscodeai/takumi-delivery-demo',
+    '  apiBase: http://127.0.0.1:1/api/v3',
+    '  baseBranch: main',
+    '  remote: origin',
+  ]);
+  try {
+    const worktree = gitWorktree(p.dir);
+    const config = loadConfig(p.dir) as ProjectConfig;
+    // The measured case (2026-10-11 16:38): a run accepted its service 11/11 and was refused at
+    // `publish` because GITHUB_TOKEN was not in the environment. It is refused up front now.
+    await assert.rejects(
+      () => runTask({ cwd: p.dir, prompt: 'do the work', runtimeId: 'fake', workflow: 'publish-wf', config, worktree }),
+      /GITHUB_TOKEN/,
+      'the refusal names the variable to set',
+    );
+  } finally {
+    if (previousGithub !== undefined) process.env['GITHUB_TOKEN'] = previousGithub;
+    p.cleanup();
+  }
+});
+
 test('run: a configured github delivery reaches ctx.delivery — the publish step drives the REAL GitHub provider', async () => {
   const previousGithub = process.env['GITHUB_TOKEN'];
-  // No token: the provider is built with its fail-closed unconfigured transport, so the delivery
-  // attempt is provable without any network and without a credential.
-  delete process.env['GITHUB_TOKEN'];
+  // A token IS present, so the transport is real and the failure is the host's (an unreachable port).
+  process.env['GITHUB_TOKEN'] = 'a-token-for-the-wiring-test';
   const p = project([
     '  provider: github',
     '  repo: sscodeai/takumi-delivery-demo',
@@ -597,10 +666,12 @@ test('run: a configured github delivery reaches ctx.delivery — the publish ste
     // provider's own — which is how we know `ctx.delivery` is the provider the config selected.
     assert.equal(result.status, 'failed', result.events.join('\n'));
     const log = result.events.join('\n');
-    assert.match(log, /github-delivery: no request transport configured/);
+    assert.ok(!log.includes('no request transport configured'), 'the token built a real transport');
     assert.ok(!log.includes('no delivery provider (ctx.delivery)'), 'the provider WAS constructed into ctx.delivery');
   } finally {
     if (previousGithub !== undefined) process.env['GITHUB_TOKEN'] = previousGithub;
     p.cleanup();
   }
 });
+
+
