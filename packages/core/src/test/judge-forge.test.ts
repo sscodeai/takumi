@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   ArtifactStore,
   executeWorkflow,
@@ -80,6 +80,13 @@ interface Fixture {
  * containing it stops for a person. Same remedy as the earlier fixture tokens.
  */
 const acceptArtifactOf = (dir: string): string => join(dir, '.takumi', 'artifacts', 'acceptance', `ACCEPT-${'001'}.md`);
+
+/**
+ * Every `judge.sh` under a tree. The judge directory is RUN-scoped (ADR-052), so a test that has to ask
+ * "does a judge exist yet?" cannot name one path — it asks whether ANY judge exists under the project.
+ */
+const judgeFilesUnder = (dir: string): string[] =>
+  existsSync(dir) ? (readdirSync(dir, { recursive: true }) as string[]).filter((n) => n.endsWith('judge.sh')) : [];
 
 function project(forgeScript: string): Fixture {
   const dir = mkdtempSync(join(tmpdir(), 'takumi-forge-'));
@@ -180,13 +187,13 @@ test('judge forge: the judge is produced outside the worktree and runs from its 
       context(f, (step, prompt) => {
         prompts.push({ step, prompt });
         if (step === 'implementation') {
-          judgeExistedDuringImplementation = existsSync(join(f.dir, '.takumi/acceptance/judge/judge.sh'));
+          judgeExistedDuringImplementation = judgeFilesUnder(join(f.dir, '.takumi/acceptance')).length > 0;
         }
       }),
     );
 
     assert.equal(res.status, 'completed', `the run completes (${JSON.stringify(res.steps.map((s) => [s.stepId, s.status]))})`);
-    const judgeDir = join(f.dir, '.takumi/acceptance/judge');
+    const judgeDir = dirname(judgePathOf(acceptArtifactOf(f.dir)));
     assert.ok(!judgeDir.startsWith(f.worktree), 'the judge directory is not inside the worktree');
 
     // The judge ran from ITS OWN directory, not from the implementation worktree, and it was told
@@ -202,9 +209,9 @@ test('judge forge: the judge is produced outside the worktree and runs from its 
     assert.ok(!/judge/i.test(implPrompt), `the implementer prompt must not mention the judge: ${implPrompt}`);
 
     const artifact = readFileSync(acceptArtifactOf(f.dir), 'utf8');
-    assert.match(artifact, /judge: .*\.takumi\/acceptance\/judge\/judge\.sh/);
+    assert.match(artifact, /judge: .*\.takumi\/acceptance\/[^/]+\/judge\/judge\.sh/);
     assert.match(artifact, /judgeDigest: sha256:[0-9a-f]{64}/);
-    assert.match(artifact, /cwd: .*\.takumi\/acceptance\/judge$/m);
+    assert.match(artifact, /cwd: .*\.takumi\/acceptance\/[^/]+\/judge$/m);
     assert.match(artifact, /worktree: .*\/worktree$/m);
     assert.match(artifact, /verdictMarker: "ACCEPT_VERDICT: pass"/);
   } finally {
@@ -318,6 +325,44 @@ test('judge forge: a forged judge with no verdict marker fails the acceptance', 
     assert.equal(res.status, 'failed');
     assert.match(res.steps.find((s) => s.stepId === 'accept')?.summary ?? '', /was missing/);
     assert.equal(res.steps.find((s) => s.stepId === 'ship')?.status, 'skipped');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// --- two runs on ONE project do not share a judge directory (ADR-052) ---------------------------
+
+/** The judge path the acceptance artifact records — the artifact is the evidence, so it is the source. */
+const judgePathOf = (artifactPath: string): string => {
+  const text = readFileSync(artifactPath, 'utf8');
+  const found = /^\s*judge:\s*(\S+)\s*$/m.exec(text);
+  assert.ok(found, `the acceptance artifact names the judge it ran: ${text.slice(0, 300)}`);
+  return found[1] as string;
+};
+
+test('judge forge: two runs on one project do not share a judge directory', async () => {
+  // `.takumi/acceptance/<stepId>/` is ONE path for the whole project, and the step RECREATES it
+  // (`rm -rf`) before forging. So a second run destroys the judge a run still in flight is being
+  // judged by, and two concurrent runs overwrite each other's judge — the very evidence a run is
+  // bound to. Measured on 2026-10-11: the run directory had to be cleaned by hand between runs for
+  // exactly this reason.
+  const f = project(forge(judge('pass')));
+  try {
+    const first = await executeWorkflow(workflow(), context(f));
+    assert.equal(first.status, 'completed', JSON.stringify(first.steps.map((s) => [s.stepId, s.status])));
+    const firstJudge = judgePathOf(acceptArtifactOf(f.dir));
+    assert.ok(existsSync(firstJudge), `the first run's judge exists at ${firstJudge}`);
+
+    // The artifact is rewritten by the second run, so the first run's judge path is read BEFORE it.
+    const second = await executeWorkflow(workflow(), context(f));
+    assert.equal(second.status, 'completed', JSON.stringify(second.steps.map((s) => [s.stepId, s.status])));
+    const secondJudge = judgePathOf(acceptArtifactOf(f.dir));
+
+    assert.notEqual(secondJudge, firstJudge, 'the second run judges from its OWN directory');
+    assert.ok(
+      existsSync(firstJudge),
+      `the second run did not destroy the first run's judge (expected it to survive at ${firstJudge})`,
+    );
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }

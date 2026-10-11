@@ -435,7 +435,12 @@ async function createProviders(
   }
   if (deliveryId === 'github') {
     const { createGitHubDeliveryProvider } = await import('@takumi/delivery-github');
-    return { board, delivery: createGitHubDeliveryProvider({ repo: deliveryOptions['repo'] ?? '', ...(deliveryOptions['apiBase'] === undefined ? {} : { apiBase: deliveryOptions['apiBase'] }) }) };
+    // The token is resolved BEFORE the run starts (ADR-051): a run that reaches `publish` without one
+    // has already paid for the implementation, the tests and the acceptance. `delivery.tokenEnv` names
+    // the variable; the default is GITHUB_TOKEN.
+    const { assertDeliveryToken } = await import('./delivery-command.js');
+    const token = assertDeliveryToken(deliveryId, { providerId: deliveryId, providerOptions: deliveryOptions });
+    return { board, delivery: createGitHubDeliveryProvider({ repo: deliveryOptions['repo'] ?? '', ...(token === undefined ? {} : { token }), ...(deliveryOptions['apiBase'] === undefined ? {} : { apiBase: deliveryOptions['apiBase'] }) }) };
   }
   if (deliveryId === 'git') {
     // A bare remote: the branch is pushed and READ BACK, and integration is a fast-forward of the
@@ -454,7 +459,10 @@ async function createProviders(
 
   if (deliveryId === 'gitlab') {
     const { createGitLabDeliveryProvider } = await import('@takumi/delivery-gitlab');
-    return { board, delivery: createGitLabDeliveryProvider({ project: deliveryOptions['project'] ?? '', ...(deliveryOptions['apiBase'] === undefined ? {} : { apiBase: deliveryOptions['apiBase'] }) }) };
+    // Same as GitHub: the token is resolved before the run starts (ADR-051).
+    const { assertDeliveryToken } = await import('./delivery-command.js');
+    const token = assertDeliveryToken(deliveryId, { providerId: deliveryId, providerOptions: deliveryOptions });
+    return { board, delivery: createGitLabDeliveryProvider({ project: deliveryOptions['project'] ?? '', ...(token === undefined ? {} : { token }), ...(deliveryOptions['apiBase'] === undefined ? {} : { apiBase: deliveryOptions['apiBase'] }) }) };
   }
   throw new Error(`unknown delivery provider: ${deliveryId} (fake | github | gitlab)`);
 }
