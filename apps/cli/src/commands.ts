@@ -17,6 +17,8 @@ import { FakeRuntime } from '@takumi/runtime-fake';
 import { CliRuntimeAdapter } from '@takumi/runtime-cli';
 import { createDeliveryFromSection } from './delivery-command.js';
 import type { DeliveryProviderWithReporting, DeliverySection } from './delivery-command.js';
+import { createBoardFromSection } from './board-projection-command.js';
+import type { BoardSection } from './board-projection-command.js';
 import { assertWorktreeQualifies, createDeliveryWorktree } from './worktree-command.js';
 
 /**
@@ -84,6 +86,13 @@ export interface ProjectConfig {
    * exists to prevent.
    */
   delivery?: DeliverySection;
+  /**
+   * The DELIVERY board a run projects its progress onto (ADR-044): the write-only row a human reads,
+   * one per delivery run. Absent means the run projects nowhere — which is not an error: the
+   * projection is for readers, and a run nobody is watching is still a run. It is NOT the task board
+   * (that is the `pilot:` section's business): a black-box run has no work to find or claim.
+   */
+  board?: BoardSection;
   /** Audit trail dir (default `.takumi/audit`). */
   audit?: string;
   /**
@@ -440,6 +449,13 @@ export async function runTask(opts: RunOptions): Promise<{
       );
     }
 
+    // The DELIVERY board (ADR-044): write-only, injected exactly like `ctx.delivery`. Built here,
+    // before any step runs, so an invalid `board:` section (an unknown provider, a missing databaseId)
+    // refuses up front rather than after the run has spent its work. Absent means the run projects
+    // nowhere, which is not an error — the projection is for readers, and a run nobody is watching is
+    // still a run.
+    const board = opts.config.board === undefined ? undefined : await createBoardFromSection(opts.config.board);
+
     // (B)/(C) THE WORKTREE. `--worktree` is an EXPLICIT OVERRIDE for an existing checkout
     // (continuing an existing branch, an advanced case); with a configured `delivery:` and no
     // `--worktree`, the run CREATES its own worktree from the target repository, so the ancestry
@@ -504,6 +520,7 @@ export async function runTask(opts: RunOptions): Promise<{
         loadWorkflow: (ref: string) => loadWorkflow(opts.cwd, opts.config, ref),
         resume: resumeCtx,
         ...(delivery === undefined ? {} : { delivery }),
+        ...(board === undefined ? {} : { board }),
         // The `publish` step falls back to these when the step itself declares neither: the base
         // branch and remote are deployment decisions, so a project names them once in takumi.yaml
         // rather than in every workflow.
