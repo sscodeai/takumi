@@ -144,11 +144,26 @@ export interface Scenario {
   reportPath?: string;
   /** Required: the criterion in the human's words, so a failure reads as a requirement, not a script. */
   expect: string;
+  /**
+   * The HTTP status the surface must answer with (ADR-046). Declaring it (or `expectBody`) is what makes
+   * a service scenario LOOK AT THE RESPONSE: without one, a scenario whose `run` merely reaches the
+   * surface passes whatever the surface said, which is the vacuous green this project treats as the worst
+   * kind of defect.
+   */
+  expectStatus?: number;
+  /** A substring the response body must contain (ADR-046), the body half of the same assertion. */
+  expectBody?: string;
   timeoutMs?: number;
 }
 
 export interface DeliverableBlock {
   run?: string;
+  /**
+   * The bound on ONE invocation of the deliverable (ADR-046), in milliseconds. Optional in the document;
+   * the bound itself is not — the forge and the generated CI job apply `DEFAULT_RUN_TIMEOUT_MS` when the
+   * document declares none, because a start-and-serve `run` never exits on its own.
+   */
+  timeoutMs?: number;
   /** The declared scenarios, in document order (ADR-035). */
   scenarios: Scenario[];
   /** The mutation tool configuration a `mutation-detection` relation runs (ADR-039), when declared. */
@@ -214,6 +229,7 @@ export function parseScenarios(text: string): Scenario[] {
     const id = stringOf(entry['id']);
     if (id === undefined) continue;
     const number = entry['timeoutMs'];
+    const status = entry['expect_status'];
     scenarios.push({
       id,
       run: stringOf(entry['run']) ?? '',
@@ -223,6 +239,8 @@ export function parseScenarios(text: string): Scenario[] {
       ...(stringOf(entry['url']) === undefined ? {} : { url: stringOf(entry['url']) }),
       ...(stringOf(entry['report']) === undefined ? {} : { report: stringOf(entry['report']) }),
       ...(stringOf(entry['report_path']) === undefined ? {} : { reportPath: stringOf(entry['report_path']) }),
+      ...(typeof status === 'number' && Number.isFinite(status) ? { expectStatus: status } : {}),
+      ...(stringOf(entry['expect_body']) === undefined ? {} : { expectBody: stringOf(entry['expect_body']) }),
       ...(typeof number === 'number' && Number.isFinite(number) ? { timeoutMs: number } : {}),
     });
   }
@@ -638,6 +656,20 @@ export function validateRequirementDocument(text: string): string[] {
       issues.push('the deliverable block declares an empty scenarios list: a scenario block that declares nothing is a document claiming a check it does not have');
     }
     const relationIds = new Set(block.bindings.filter((b) => b.kind !== 'scenario').map((b) => b.checkId));
+    // The RAW scenario entries, so a value the parser had to drop (a non-numeric `expect_status`, a blank
+    // `expect_body`) can be named in a refusal instead of vanishing into "declares no assertion".
+    const rawScenarios = new Map<string, Record<string, unknown>>();
+    {
+      const list = deliverableOf(text)?.['scenarios'];
+      if (Array.isArray(list)) {
+        for (const raw of list) {
+          if (raw === null || typeof raw !== 'object') continue;
+          const entry = raw as Record<string, unknown>;
+          const id = stringOf(entry['id']);
+          if (id !== undefined) rawScenarios.set(id, entry);
+        }
+      }
+    }
     for (const scenario of block.scenarios) {
       if (relationIds.has(scenario.id)) {
         issues.push(`${scenario.id} is declared twice (as a scenario and as a relation): a check id has to identify one check`);
@@ -660,6 +692,31 @@ export function validateRequirementDocument(text: string): string[] {
       }
       if (scenario.url !== undefined && scenario.start === undefined) {
         issues.push(`${scenario.id} declares a url but nothing to start: the judge waits for a surface it was never told how to bring up`);
+      }
+      // ADR-046: a scenario that reaches an HTTP surface has to SAY WHAT IT ASSERTS about the response.
+      // Without this the check is vacuous by construction — the `run` command only has to exit 0, and a
+      // command that reaches the surface but never looks at the status or the body passes whatever the
+      // surface said. That is the vacuous green this project treats as the worst kind of defect, so the
+      // document has to declare `expect_status` and/or `expect_body`, and a url/start with neither is
+      // REFUSED.
+      const rawEntry = rawScenarios.get(scenario.id);
+      const declaresAssertion = rawEntry?.['expect_status'] !== undefined || rawEntry?.['expect_body'] !== undefined;
+      if ((scenario.url !== undefined || scenario.start !== undefined) && !declaresAssertion) {
+        issues.push(
+          `${scenario.id} declares a url/start but neither expect_status nor expect_body: a scenario that reaches a surface without asserting anything about the response passes without ever looking at it, so the check is vacuous — declare expect_status: <100-599> and/or expect_body: <substring of the response body>`,
+        );
+      }
+      const rawStatus = rawEntry?.['expect_status'];
+      if (rawStatus !== undefined && (typeof rawStatus !== 'number' || !Number.isInteger(rawStatus) || rawStatus < 100 || rawStatus > 599)) {
+        issues.push(
+          `${scenario.id} declares expect_status ${JSON.stringify(rawStatus)}, which is not an HTTP status code (an integer from 100 to 599): the judge would compare the surface's answer against a number it cannot mean`,
+        );
+      }
+      const rawBody = rawEntry?.['expect_body'];
+      if (rawBody !== undefined && (typeof rawBody !== 'string' || rawBody.trim().length === 0)) {
+        issues.push(
+          `${scenario.id} declares expect_body ${JSON.stringify(rawBody)}, which is not a non-empty string: a body assertion the judge cannot search for asserts nothing`,
+        );
       }
       if (scenario.timeoutMs !== undefined && scenario.timeoutMs < 1000) {
         issues.push(`${scenario.id} declares timeoutMs ${scenario.timeoutMs}: a scenario is given at least a second, or the timeout is a refusal nobody sees`);

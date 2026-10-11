@@ -63,6 +63,7 @@ ambiguities:
     blocking: true
 deliverable:
   run: "bash summary.sh {csv}"          # how a judge invokes the thing; {csv} is the input file
+  timeoutMs: 120000                     # optional: the bound on ONE invocation (floor 1000; default 120000)
   input_format:                         # the WORLD a judge builds its fixtures in: it has no other source
     columns: "date:date,station:id,temperature_c:measure"   # name:role, in file order
     sample: |                           # >= 3 real rows, >= 2 distinct ids, numeric measures
@@ -82,6 +83,8 @@ deliverable:
       expect: "the page lists one row per station with count, min, max and mean"   # required, in words
       start: "python3 -m http.server 8731 -d site"    # optional: the judge starts this and always kills it
       url: "http://127.0.0.1:8731/index.html"         # optional: the judge waits for this before running
+      expect_status: 200              # REQUIRED when `url`/`start` is declared: what the surface must answer
+      expect_body: "station"          # and/or a substring the response body must contain
       report: ctrf                    ## optional: one of the three formats below (see rule 13)
       report_path: "e2e/report.json"  # required when `report` is given
   relations:                            # what a judge must be able to CHECK, from output alone
@@ -197,13 +200,22 @@ from your text alone.
  forged — so put it in the right place (the first real run of this prompt put all three on the
  relations and the gate refused the document, which is the gate working).
 13. `scenarios` declares end-to-end checks of a surface a person interacts with (a page, a CLI session, a
-    service). The judge runs YOUR commands: it starts what `start` names, waits for `url`, runs `run`,
-    reads the `report` at `report_path` when one is declared, and always kills what it started. A scenario
-    that exits 0 but whose report counts a failing test FAILS; a report that cannot be read FAILS — never a
-    silent pass. Give at most a few scenarios, each naming one thing a human would check; a scenario whose
-    only test is "the command exited 0" is worth less than a `relation` that recomputes a number. Refused
-    before a human confirms: no `run`, no `expect`, `report` without `report_path` (or the reverse), a
-    `report` outside the three formats, `url` with nothing to `start`, ids that are not `SCN-nnn` in order.
+    service). The judge runs YOUR commands: it starts what `start` names, waits for `url` (it waits for
+    the surface to ANSWER, not for it to answer 2xx), APPLIES the response assertion you declare, runs
+    `run`, reads the `report` at `report_path` when one is declared, and always kills what it started. A
+    scenario that exits 0 but whose report counts a failing test FAILS; a report that cannot be read
+    FAILS — never a silent pass. `{csv}` in `start` and in `run` is replaced with the fixture the judge
+    generated, exactly as in `deliverable.run`.
+    A scenario that reaches a surface (`url` and/or `start`) MUST say what it asserts about the response,
+    with `expect_status: <100-599>` and/or `expect_body: <substring of the response body>`. Without one the
+    check is VACUOUS BY CONSTRUCTION: `run` only has to exit 0, so a command that reaches the surface but
+    never looks at it passes whatever the surface said. The judge applies the assertion itself, so a
+    service scenario cannot pass without looking at the response.
+    Give at most a few scenarios, each naming one thing a human would check; a scenario whose only test is
+    "the command exited 0" is worth less than a `relation` that recomputes a number. Refused before a human
+    confirms: no `run`, no `expect`, `report` without `report_path` (or the reverse), a `report` outside
+    the three formats, `url` with nothing to `start`, `url`/`start` with neither `expect_status` nor
+    `expect_body`, an `expect_status` outside 100..599, ids that are not `SCN-nnn` in order.
 14. `differential` declares at least one anchor (`DIFF-nnn`) that recomputes part of the answer
     independently of the tool's own arithmetic. Equality with the tool's own output is not a check.
 15. Prose criteria that no fixture can decide (performance, file-size limits, human readability) stay as
@@ -228,3 +240,16 @@ from your text alone.
     REFUSED before a human confirms: a `mutation-detection` relation with no `mutation:` block, a
     `mutation:` block with no relation using it, an unknown `format`, a `max_survivors` that is not a
     non-negative integer, and a `timeoutMs` below the floor.
+17. The invocation of the deliverable is ALWAYS BOUNDED. A service-shaped `run` STARTS the thing and never
+    exits, so an unbounded invocation is not a check — it is a hang that ends as a timeout for the wrong
+    reason. `deliverable.timeoutMs` tightens the bound for one invocation (a whole number of milliseconds,
+    at least 1000); when it is omitted the judge and the generated CI job apply the default of 120000.
+    A bound that is HIT is a FAILURE that names the command ("the deliverable command timed out after
+    <n>ms, so the deliverable was never exercised: <command>"), never a pass and never a silent "no
+    output"; and the generated CI `deliverable` job runs the command under the same bound, so a
+    start-and-serve command fails the job by name instead of waiting out the runner's own limit.
+18. `deliverable.build` and `deliverable.tests` are REFUSED. Nothing in the chain reads or runs either
+    one: the delivered project's own tests are run from the WORKFLOW's `testCommand`, and no install/build
+    step exists at all. A declaration that is never executed reads as compliance, which is worse than a
+    refusal — so if the request needs a build or a test step, say it in the requirement text and in the
+    acceptance criteria, never as a `deliverable` key.
