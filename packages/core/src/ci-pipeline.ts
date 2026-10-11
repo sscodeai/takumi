@@ -31,6 +31,19 @@ export function isCiDialect(value: unknown): value is CiDialect {
 }
 
 /**
+ * The dialect a delivery provider's host speaks, or `undefined` when the provider names no host takumi
+ * writes a pipeline for (a bare git remote, the fake provider).
+ *
+ * `metadata().id` is the provider's OWN name for its host, and it is the same word the dialects use
+ * (`github`, `gitlab`, `forgejo`), so the mapping is the identity: the provider IS the authority on which
+ * pipeline file its host runs. A provider id that is not a dialect derives nothing, and the step's own
+ * default stands — this never invents a dialect for a host it does not know.
+ */
+export function dialectForDeliveryProvider(providerId: string | undefined): CiDialect | undefined {
+  return isCiDialect(providerId) ? providerId : undefined;
+}
+
+/**
  * Where a dialect keeps its pipeline file. Forgejo and Gitea read `.forgejo/workflows/`; GitHub reads
  * `.github/workflows/`; GitLab reads a single `.gitlab-ci.yml` at the repository root.
  */
@@ -188,8 +201,20 @@ export interface CiConfigStepContext {
   worktree: string;
   /** The command that runs the delivered project's own tests. Required: refused when absent. */
   testCommand?: string;
-  /** `forgejo` (default), `github` (both GitHub-Actions YAML) or `gitlab` (GitLab CI YAML). */
+  /**
+   * The dialect to write, when the step declares one — an explicit declaration WINS over the delivery
+   * provider. `forgejo` (also Gitea) and `github` are both GitHub-Actions YAML (only the path differs);
+   * `gitlab` is GitLab CI YAML, a different language. When the step declares none, the dialect is
+   * DERIVED from `deliveryProviderId`; failing that, `forgejo` is the default.
+   */
   dialect?: string;
+  /**
+   * The delivery provider's host id (`metadata().id`). Consulted ONLY when the step declares no
+   * `dialect`: the dialect is then DERIVED from the provider, so a run whose `delivery:` section names
+   * `provider: github` writes `.github/workflows/ci.yml` rather than a file its host never runs
+   * (docs/bugs-fixed.md #48). A provider id that is not a dialect derives nothing, and the default stands.
+   */
+  deliveryProviderId?: string;
   /** The confirmed requirement document, relative to `projectDir`. */
   requirementRef?: string;
   /** When present, the generated file is also recorded as a run artifact a human can read. */
@@ -228,7 +253,19 @@ export async function executeCiConfigStep(input: CiConfigStepContext): Promise<C
       artifacts: [],
     };
   }
-  const dialect: CiDialect = isCiDialect(input.dialect) ? input.dialect : 'forgejo';
+  // The dialect: an explicit declaration WINS; otherwise it is DERIVED from the delivery provider, so a
+  // run against a GitHub host writes the file GitHub actually runs (docs/bugs-fixed.md #48); and failing
+  // both, the historical `forgejo` default stands. The ORIGIN is carried into the summary, so a transcript
+  // says WHY this path was chosen rather than only which one — the derivation is invisible otherwise.
+  const declaredDialect = isCiDialect(input.dialect) ? input.dialect : undefined;
+  const derivedDialect = declaredDialect === undefined ? dialectForDeliveryProvider(input.deliveryProviderId) : undefined;
+  const dialect: CiDialect = declaredDialect ?? derivedDialect ?? 'forgejo';
+  const dialectOrigin =
+    declaredDialect !== undefined
+      ? 'declared by the step'
+      : derivedDialect !== undefined
+        ? `derived from the delivery provider "${input.deliveryProviderId}"`
+        : 'the default: the step declares no dialect and the delivery provider names no host takumi writes a pipeline for';
   const relPath = ciConfigPath(dialect);
 
   // The document the pipeline is derived from. When one is named it must be readable: a pipeline that
@@ -266,7 +303,7 @@ export async function executeCiConfigStep(input: CiConfigStepContext): Promise<C
       ? `deliverable run: (${requirementRef.length === 0 ? 'no requirement document was named' : 'the document declares no deliverable.run'})`
       : `deliverable run (declared by ${requirementRef}): ${runCommand}`;
   const summary = [
-    `ci_config: wrote ${relPath} (${dialect} dialect) into the delivery worktree at ${input.worktree}`,
+    `ci_config: wrote ${relPath} (${dialect} dialect, ${dialectOrigin}) into the delivery worktree at ${input.worktree}`,
     "the delivery now CONTAINS the pipeline that will judge it: the host runs this file against the delivered head, and it runs the DELIVERED project's own tests, not takumi's",
     `test command: ${testCommand}`,
     runLine,

@@ -1537,6 +1537,18 @@ export async function executeWorkflow(
         run.stepStatus[stepId] = 'running';
         const resolvedRef = requirementRefOf(step.requirementRef);
         const ciWorktree = (await import('node:path')).resolve(ctx.worktree ?? ctx.cwd);
+        // The dialect the step does NOT declare is DERIVED from the delivery provider's host id
+        // (docs/bugs-fixed.md #48): the provider names its host, and the host is what decides which
+        // pipeline file it runs, so a `provider: github` run must write `.github/workflows/ci.yml`.
+        // `metadata()` is the provider's own description of itself; a provider whose metadata throws
+        // derives nothing and the step's historical `forgejo` default stands.
+        const deliveryProviderId = (() => {
+          try {
+            return ctx.delivery?.metadata().id;
+          } catch {
+            return undefined;
+          }
+        })();
         const ciResult = await executeCiConfigStep({
           stepId,
           runId,
@@ -1544,6 +1556,7 @@ export async function executeWorkflow(
           worktree: ciWorktree,
           ...(step.testCommand === undefined ? {} : { testCommand: step.testCommand }),
           ...(step.dialect === undefined ? {} : { dialect: step.dialect }),
+          ...(deliveryProviderId === undefined ? {} : { deliveryProviderId }),
           ...(resolvedRef.ref.length === 0 ? {} : { requirementRef: resolvedRef.ref }),
           artifacts: ctx.artifacts,
           trace: taskTraceFor(step, vars),

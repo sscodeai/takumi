@@ -11,6 +11,7 @@ import {
   type WorkflowStep,
 } from '../index.js';
 import { TestRuntime } from '../test-utils.js';
+import { dialectForDeliveryProvider } from '../ci-pipeline.js';
 import type { CheckSummary, DeliveryProvider, PullRequestRef } from '../delivery.js';
 
 /**
@@ -207,7 +208,7 @@ test('ci_config: the gitlab dialect writes .gitlab-ci.yml as GitLab CI YAML, der
     assert.match(content, /^    - \|$/m, 'the script is a YAML block scalar');
 
     // The dialect is recorded in the summary, and the protected-path consequence holds by default.
-    assert.match(r.step?.summary ?? '', /wrote \.gitlab-ci\.yml \(gitlab dialect\)/);
+    assert.match(r.step?.summary ?? '', /wrote \.gitlab-ci\.yml \(gitlab dialect, declared by the step\)/);
     assert.match(r.step?.summary ?? '', /protected path: CI configuration is a protected path/);
 
     // The gitlab dialect touches NEITHER of the GitHub-Actions paths.
@@ -329,6 +330,123 @@ test('ci_config: the deterministic reviewer reports the created pipeline as a NO
     changes: [{ path: '.github/workflows/ci.yml', status: 'modified', baseContent: 'name: ci', headContent: 'name: ci2' }],
   });
   assert.equal(modified.find((f) => f.rule === 'protected-path')?.severity, 'human');
+});
+
+// ---------------------------------------------------------------------------------------------
+// (a2) the dialect is DERIVED from the delivery provider unless the step declares one (bug #48)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A provider that only has to NAME its host: `metadata().id` is what the dialect is derived from, and
+ * `ci_config` reads nothing else off the provider. The other methods are present because the port
+ * requires them; a `ci_config` run never calls them.
+ */
+function hostProvider(id: string): DeliveryProvider {
+  return {
+    metadata: () => ({ id, name: id, version: '0' }),
+    capabilities: () => ({ canPushBranch: true, canOpenPullRequest: true, canRunChecks: true, canMerge: false }),
+    async deliver() {
+      return { created: true, push: { mode: 'plain', branch: 'task', head: 'head1' }, notes: [] };
+    },
+    async status() {
+      return { state: 'open', headSha: 'head1', baseSha: 'base1', mergeable: true };
+    },
+    async checks(): Promise<CheckSummary[]> {
+      return [];
+    },
+    async merge() {
+      return { merged: true, method: 'merge', headSha: 'head1', url: 'https://host/pulls/7' };
+    },
+  };
+}
+
+test('ci_config: with NO dialect declared, a github delivery DERIVES the github dialect and writes the file GitHub runs', async () => {
+  const p = fixture();
+  try {
+    const step: StepWithRef = { id: 'ci_config', type: 'ci_config', testCommand: 'node --test', requirementRef: p.docRef };
+    const r = await runStep(p, step, hostProvider('github'));
+    assert.equal(r.status, 'completed', r.step?.summary);
+    assert.ok(
+      existsSync(join(p.worktree, '.github', 'workflows', 'ci.yml')),
+      'a `provider: github` run must write .github/workflows/ci.yml',
+    );
+    assert.ok(
+      !existsSync(join(p.worktree, '.forgejo', 'workflows', 'ci.yml')),
+      'and NOT the forgejo path the old hard-coded default would have written (a file GitHub never runs)',
+    );
+    // The summary says WHY this path was chosen — the derivation is invisible otherwise.
+    assert.match(
+      r.step?.summary ?? '',
+      /wrote \.github\/workflows\/ci\.yml \(github dialect, derived from the delivery provider "github"\)/,
+    );
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('ci_config: a gitlab delivery derives .gitlab-ci.yml and a forgejo delivery derives .forgejo/workflows/ci.yml', async () => {
+  const p = fixture();
+  try {
+    const step: StepWithRef = { id: 'ci_config', type: 'ci_config', testCommand: 'node --test' };
+
+    const gitlab = await runStep(p, step, hostProvider('gitlab'));
+    assert.equal(gitlab.status, 'completed', gitlab.step?.summary);
+    assert.ok(existsSync(join(p.worktree, '.gitlab-ci.yml')), 'a gitlab delivery derives the GitLab CI dialect');
+    assert.match(gitlab.step?.summary ?? '', /derived from the delivery provider "gitlab"/);
+    rmSync(join(p.worktree, '.gitlab-ci.yml'), { force: true });
+
+    const forgejo = await runStep(p, step, hostProvider('forgejo'));
+    assert.equal(forgejo.status, 'completed', forgejo.step?.summary);
+    assert.ok(existsSync(join(p.worktree, '.forgejo', 'workflows', 'ci.yml')), 'a forgejo delivery derives the forgejo dialect');
+    assert.match(forgejo.step?.summary ?? '', /derived from the delivery provider "forgejo"/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('ci_config: an EXPLICIT dialect declaration WINS over the delivery provider', async () => {
+  const p = fixture();
+  try {
+    // The provider says github; the step says forgejo. The step's own declaration is the authority.
+    const step: StepWithRef = { id: 'ci_config', type: 'ci_config', testCommand: 'node --test', dialect: 'forgejo' };
+    const r = await runStep(p, step, hostProvider('github'));
+    assert.equal(r.status, 'completed', r.step?.summary);
+    assert.ok(existsSync(join(p.worktree, '.forgejo', 'workflows', 'ci.yml')), 'the declared dialect is written');
+    assert.ok(!existsSync(join(p.worktree, '.github', 'workflows', 'ci.yml')), 'the provider does NOT override an explicit declaration');
+    assert.match(r.step?.summary ?? '', /\(forgejo dialect, declared by the step\)/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('ci_config: a provider that names no host (git / fake), or none at all, derives NOTHING and the default stands', async () => {
+  const p = fixture();
+  try {
+    const step: StepWithRef = { id: 'ci_config', type: 'ci_config', testCommand: 'node --test' };
+
+    // A bare git remote is not a host takumi writes a pipeline for: never invent a dialect for it.
+    const bare = await runStep(p, step, hostProvider('git'));
+    assert.equal(bare.status, 'completed', bare.step?.summary);
+    assert.ok(existsSync(join(p.worktree, '.forgejo', 'workflows', 'ci.yml')), 'the historical forgejo default stands');
+    assert.match(bare.step?.summary ?? '', /the default: the step declares no dialect and the delivery provider names no host/);
+
+    // No provider at all is the same story: the default, said out loud.
+    const none = await runStep(p, step, undefined);
+    assert.equal(none.status, 'completed', none.step?.summary);
+    assert.match(none.step?.summary ?? '', /the default: the step declares no dialect and the delivery provider names no host/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('dialectForDeliveryProvider: the provider id IS the dialect, and an unknown id derives nothing', () => {
+  assert.equal(dialectForDeliveryProvider('github'), 'github');
+  assert.equal(dialectForDeliveryProvider('gitlab'), 'gitlab');
+  assert.equal(dialectForDeliveryProvider('forgejo'), 'forgejo');
+  // Not dialects: a bare git remote, the fake provider, an absent provider.
+  assert.equal(dialectForDeliveryProvider('git'), undefined);
+  assert.equal(dialectForDeliveryProvider('fake'), undefined);
+  assert.equal(dialectForDeliveryProvider(undefined), undefined);
 });
 
 // ---------------------------------------------------------------------------------------------
