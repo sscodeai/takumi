@@ -464,3 +464,170 @@ test('service: a SCRIPT-shaped deliverable that backgrounds a surface leaves NOT
     f.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// (f) a SINGLE-QUOTED shape is quoting, not part of the pattern
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The spike document writes its JSON shapes the way YAML invites: `shape: '{"station":...}'`. The
+ * `output_format` reader stripped only DOUBLE quotes, so the outer single quotes stayed in the pattern
+ * and the forged regex became `^'\{...}'$` — a pattern that demands a literal `'` at both ends. An
+ * implementation that serves the declared shape CORRECTLY then fails every relation with "nothing in
+ * its output (exit 0) matched a declared output shape", i.e. a check failing for a reason the document
+ * never said (ADR-038). Measured live: a run whose implementation matched the declared shape exactly
+ * scored 2/11 on this, and the forged judge's own `GROUP_RE` carried the stray quotes.
+ *
+ * The implementation below serves exactly what the document declares — no stray quotes, no spaces.
+ */
+const JSON_DOC = (): string =>
+  [
+    'requirements:',
+    '  - id: REQ-001',
+    '    title: A station summary service',
+    '    acceptance_criteria:',
+    '      - The service answers with one JSON object per station.',
+    'ambiguities:',
+    '  - id: AMB-001',
+    '    question: How are values rounded?',
+    '    options: ["half-up", "truncate"]',
+    '    default: "half-up"',
+    '    chosen: "half-up"',
+    '    checkedAs: half-up',
+    '    blocking: true',
+    '  - id: AMB-002',
+    '    question: When the same station repeats, what wins?',
+    '    options: ["merge", "last-row"]',
+    '    default: "merge"',
+    '    chosen: "merge"',
+    '    checkedAs: merge',
+    '    blocking: true',
+    'deliverable:',
+    '  run: "bash serve.sh {csv} {port}"',
+    '  read: "curl -fsS {url}"',
+    '  url: "http://127.0.0.1:{port}/summary"',
+    '  timeoutMs: 5000',
+    '  input_format:',
+    '    columns: "date:date,station:id,temperature_c:measure"',
+    '    sample: |',
+    '      2024-01-01,ALPHA,10.4',
+    '      2024-01-01,BRAVO,-2.5',
+    '      2024-01-02,ALPHA,11.6',
+    '  output_format:',
+    '    station_line:',
+    `      shape: '{"station":"<station>","count":<count>,"min":<min>,"max":<max>,"mean":<mean>}'`,
+    '      fields: [id, count, min, max, mean]',
+    '    skipped_line:',
+    `      shape: '{"skipped":<skipped-count>}'`,
+    '      fields: [skipped-count]',
+    '    total_line:',
+    `      shape: '{"total":<count>}'`,
+    '      fields: [count]',
+    '  relations:',
+    '    - id: REL-001',
+    '      relation: row-order-invariance',
+    '      description: Shuffling the rows changes nothing.',
+    '    - id: REL-002',
+    '      relation: additivity',
+    '      description: The per-station counts sum to the total.',
+    '    - id: REL-003',
+    '      relation: duplicate-resolution',
+    '      description: A repeated station merges.',
+    '      decides: AMB-002',
+    '  differential:',
+    '    - id: DIFF-001',
+    '      anchor: independent-aggregation',
+    '      decides: AMB-001',
+    '      description: An independent recomputation matches the report.',
+    '',
+  ].join('\n');
+
+/** Serves the DECLARED shape exactly: one JSON object per line, no stray quotes and no spaces. */
+const JSON_SERVICE = [
+  '#!/usr/bin/env bash',
+  'set -eu',
+  'exec python3 - "$1" "$2" <<\'PY\'',
+  'import csv, json, sys, http.server',
+  'from decimal import Decimal, ROUND_HALF_UP',
+  'path, port = sys.argv[1], int(sys.argv[2])',
+  'rows, skipped = {}, 0',
+  'with open(path, newline="") as f:',
+  '    for rec in csv.reader(f):',
+  '        if len(rec) != 3:',
+  '            skipped += 1',
+  '            continue',
+  '        date, station, temp = rec[0].strip(), rec[1].strip(), rec[2].strip()',
+  '        try:',
+  '            v = Decimal(temp)',
+  '        except Exception:',
+  '            skipped += 1',
+  '            continue',
+  '        if not station or not date:',
+  '            skipped += 1',
+  '            continue',
+  '        rows.setdefault(station, []).append(v)',
+  'def q(x):',
+  '    return str(Decimal(x).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))',
+  'lines = []',
+  'for station in sorted(rows, key=lambda s: s.encode("utf-8")):',
+  '    vals = rows[station]',
+  `    lines.append('{"station":%s,"count":%d,"min":%s,"max":%s,"mean":%s}' % (json.dumps(station), len(vals), q(min(vals)), q(max(vals)), q(sum(vals) / len(vals))))`,
+  `lines.append('{"skipped":%d}' % skipped)`,
+  `lines.append('{"total":%d}' % sum(len(v) for v in rows.values()))`,
+  'body = ("\\n".join(lines) + "\\n").encode()',
+  'class H(http.server.BaseHTTPRequestHandler):',
+  '    def do_GET(self):',
+  '        self.send_response(200)',
+  '        self.send_header("Content-Type", "application/json")',
+  '        self.send_header("Content-Length", str(len(body)))',
+  '        self.end_headers()',
+  '        self.wfile.write(body)',
+  '    def log_message(self, *a):',
+  '        pass',
+  'http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()',
+  'PY',
+  '',
+].join('\n');
+
+function jsonFixture(): Fixture {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-json-shape-'));
+  const worktree = join(dir, 'worktree');
+  const judgeDir = join(dir, 'judge');
+  mkdirSync(join(dir, 'docs/requirements'), { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  mkdirSync(judgeDir, { recursive: true });
+  writeFileSync(join(dir, 'docs/requirements/poc.yaml'), JSON_DOC());
+  writeFileSync(join(worktree, 'serve.sh'), JSON_SERVICE);
+  chmodSync(join(worktree, 'serve.sh'), 0o755);
+  const env = {
+    ...process.env,
+    TAKUMI_REQUIREMENT: 'docs/requirements/poc.yaml',
+    TAKUMI_PROJECT: dir,
+    TAKUMI_WORKTREE: worktree,
+    TAKUMI_JUDGE_DIR: judgeDir,
+  };
+  const forge = run('bash', [FORGE], env, dir);
+  return {
+    dir,
+    env,
+    forge,
+    judge: () => run('bash', [join(judgeDir, 'judge.sh')], env, judgeDir),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+test('service: a single-quoted shape is quoting — the judge exercises a service that serves it correctly', () => {
+  const f = jsonFixture();
+  try {
+    assert.equal(f.forge.status, 0, `the forge builds for a single-quoted shape (${f.forge.out})`);
+    const r = f.judge();
+    // The implementation serves EXACTLY the declared shape, so every relation has to be exercised.
+    assert.match(r.out, /^ok \d+ - REL-001 row-order-invariance/m, r.out);
+    assert.match(r.out, /^ok \d+ - REL-002 additivity/m, r.out);
+    assert.match(r.out, /^ok \d+ - REL-003 duplicate-resolution/m, r.out);
+    assert.match(r.out, /^ok \d+ - DIFF-001 independent-aggregation/m, r.out);
+    assert.match(r.out, /ACCEPT_VERDICT: pass/, r.out);
+  } finally {
+    f.cleanup();
+  }
+});

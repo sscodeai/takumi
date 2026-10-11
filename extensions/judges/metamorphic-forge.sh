@@ -569,6 +569,18 @@ fi
 OUTPUT_LINES=$(awk '
   function ind(s) { match(s, /^[ ]*/); return RLENGTH }
   function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+  # The OUTER quote pair, whichever kind YAML used, is the quoting and NOT part of the shape: the
+  # spike document writes `shape: '{"station":...}'`, which IS the JSON object. Stripping only double
+  # quotes kept the single quotes, so the forged regex became `^'\{...}'$` — a pattern demanding a
+  # literal quote at BOTH ends — and an implementation that served the declared shape correctly failed
+  # every relation with "nothing in its output matched a declared output shape": a check failing for a
+  # reason the document never said (ADR-038, the same class as docs/bugs-fixed.md #56).
+  # A single quote cannot be written literally inside this shell-quoted awk program, so it is built.
+  function strip_outer(s,   c, n, SQ) {
+    SQ = sprintf("%c", 39); n = length(s)
+    if (n >= 2) { c = substr(s, 1, 1); if ((c == "\"" || c == SQ) && substr(s, n, 1) == c) return substr(s, 2, n - 2) }
+    return s
+  }
   function flush() {
     if (key == "") return
     print key "|" shape "|" fields
@@ -590,13 +602,13 @@ OUTPUT_LINES=$(awk '
       if (ci == 0) next
       key = substr(t, 1, ci - 1)
       val = trim(substr(t, ci + 1))
-      if (val != "") { gsub(/^"|"$/, "", val); shape = val }
+      if (val != "") shape = strip_outer(val)
       next
     }
     ci = index(t, ":")
     if (ci == 0) next
     k = substr(t, 1, ci - 1); v = trim(substr(t, ci + 1))
-    if (k == "shape") { gsub(/^"|"$/, "", v); shape = v }
+    if (k == "shape") shape = strip_outer(v)
     else if (k == "fields") { gsub(/^\[|\]$/, "", v); gsub(/[[:space:]]/, "", v); fields = v }
     next
   }
