@@ -75,6 +75,31 @@ Run the MEA loop:
 pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --max-rounds 5
 ```
 
+## Delivery credentials
+
+A run that publishes needs a token for the host, and Takumi refuses **before the run starts** when a
+provider cannot work without one — a missing variable costs a sentence, not a whole chain:
+
+| provider | variable | when it is required |
+|---|---|---|
+| `github` | `GITHUB_TOKEN` | refused up front without one |
+| `gitlab` | `GITLAB_TOKEN` | refused up front without one |
+| `forgejo` | `FORGEJO_TOKEN` (or `GITEA_TOKEN`) | read lazily; an unauthenticated request may be legitimate on a host that allows it |
+
+Name a different variable with `delivery.tokenEnv` — it takes a **name**, never a value:
+
+```yaml
+delivery:
+  provider: github
+  repo: owner/name
+  tokenEnv: MY_GITHUB_TOKEN
+```
+
+The secret itself never belongs in configuration: a secret in a config file is one commit away from a
+secret in a repository. Without a token the publish step is refused **after** the implementation, the
+delivered tests, the quality gate, the rule review and the acceptance have all run — which is why the
+refusal was moved to the front (ADR-051).
+
 ## Why Takumi
 
 | Problem | Takumi approach |
