@@ -9,11 +9,15 @@ import { loadConfig, runTask, type ProjectConfig } from '../commands.js';
 import {
   createDeliveryFromSection,
   createDeliveryProvider,
+  deliveryCloneUrl,
   deliveryOptionsFromSection,
   forgejoDeliveryOptions,
+  githubDeliveryOptions,
   gitlabDeliveryOptions,
   splitOwnerRepo,
 } from '../delivery-command.js';
+import { createDeliveryWorktree } from '../worktree-command.js';
+import type { GitRunner } from '@takumi/core';
 
 /**
  * The delivery provider, reachable from `takumi.yaml` (ADR-007 / ADR-037).
@@ -135,7 +139,7 @@ test('createDeliveryProvider: a provider without its required option fails fast,
 });
 
 test('createDeliveryProvider: an unknown provider lists the known ones', async () => {
-  await assert.rejects(() => createDeliveryProvider({ providerId: 'trello', providerOptions: { repo: 'a/b' } }), /unknown delivery provider: trello \(forgejo, gitlab\)/);
+  await assert.rejects(() => createDeliveryProvider({ providerId: 'trello', providerOptions: { repo: 'a/b' } }), /unknown delivery provider: trello \(forgejo, gitlab, github\)/);
 });
 
 test('delivery options: a credential in configuration is refused, with the reason', async () => {
@@ -230,6 +234,219 @@ test('delivery options: a key the gitlab adapter does not read is refused, and t
     () => createDeliveryProvider({ providerId: 'gitlab', providerOptions: { repo: 'aicodesh/takumi-e2e', git: 'x' } }),
     /set in code/,
   );
+});
+
+// --- github: the same wiring, onto the GitHub adapter (ADR-007 / ADR-037) ----------------------
+
+test('delivery options: github keeps repo owner/name and baseBranch a run default', () => {
+  const opts = githubDeliveryOptions({
+    providerId: 'github',
+    providerOptions: { repo: 'sscodeai/takumi-delivery-demo', apiBase: 'https://api.github.com', remote: 'upstream' },
+  });
+  assert.deepEqual(opts, {
+    repo: 'sscodeai/takumi-delivery-demo',
+    apiBase: 'https://api.github.com',
+    remote: 'upstream',
+  });
+
+  // A malformed repo is refused with the SAME sentence the other mappers give.
+  assert.throws(() => githubDeliveryOptions({ providerId: 'github', providerOptions: { repo: 'sscodeai' } }), /repo must be owner\/name/);
+  assert.throws(() => githubDeliveryOptions({ providerId: 'github', providerOptions: { repo: 'host/sscodeai/takumi-delivery-demo' } }), /repo must be owner\/name/);
+
+  // baseBranch stays OUT of the provider options, exactly as it does for forgejo and gitlab.
+  const section = { provider: 'github', repo: 'sscodeai/takumi-delivery-demo', baseBranch: 'main', remote: 'origin' };
+  const options = deliveryOptionsFromSection(section);
+  assert.deepEqual(options.providerOptions, { repo: 'sscodeai/takumi-delivery-demo', remote: 'origin' });
+  assert.ok(!('baseBranch' in options.providerOptions), 'baseBranch is a run default, not a provider option');
+});
+
+test('createDeliveryProvider: the github adapter is built, with its real capabilities', async () => {
+  const provider = await createDeliveryProvider({ providerId: 'github', providerOptions: { repo: 'sscodeai/takumi-delivery-demo' } });
+  assert.equal(provider.metadata().id, 'github');
+  assert.deepEqual(provider.capabilities(), { canPushBranch: true, canOpenPullRequest: true, canRunChecks: true, canMerge: true });
+});
+
+test('createDeliveryProvider: github without its required option fails fast, naming it', async () => {
+  await assert.rejects(
+    () => createDeliveryProvider({ providerId: 'github', providerOptions: {} }),
+    /provider github needs repo owner\/name/,
+  );
+});
+
+test('delivery options: a credential in configuration is refused for github too, with the reason', async () => {
+  await assert.rejects(
+    () => createDeliveryProvider({ providerId: 'github', providerOptions: { repo: 'sscodeai/takumi-delivery-demo', token: 'secret' } }),
+    /token comes from the ENVIRONMENT/,
+  );
+});
+
+test('delivery options: a key the github adapter does not read is refused, and the readable ones are listed', async () => {
+  await assert.rejects(
+    () => createDeliveryProvider({ providerId: 'github', providerOptions: { repo: 'sscodeai/takumi-delivery-demo', owner: 'sscodeai' } }),
+    (e: unknown) => {
+      assert.ok(e instanceof Error);
+      assert.match(e.message, /unknown option "owner"/);
+      assert.match(e.message, /repo, apiBase, remote/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => createDeliveryProvider({ providerId: 'github', providerOptions: { repo: 'sscodeai/takumi-delivery-demo', git: 'x' } }),
+    /set in code/,
+  );
+});
+
+// --- the clone URL: provider-generic, so a `provider: github` section clones GitHub -------------
+
+test('clone URL: github derives https://github.com/<owner>/<repo>.git', async () => {
+  assert.equal(
+    await deliveryCloneUrl({ provider: 'github', repo: 'sscodeai/takumi-delivery-demo' }),
+    'https://github.com/sscodeai/takumi-delivery-demo.git',
+  );
+});
+
+test('clone URL: github honours a GitHub Enterprise apiBase', async () => {
+  assert.equal(
+    await deliveryCloneUrl({ provider: 'github', repo: 'acme/widget', apiBase: 'https://ghe.example.com/api/v3' }),
+    'https://ghe.example.com/acme/widget.git',
+  );
+});
+
+test('clone URL: gitlab derives https://gitlab.com/<namespace>/<project>.git, and honours a self-hosted apiBase', async () => {
+  assert.equal(
+    await deliveryCloneUrl({ provider: 'gitlab', repo: 'aicodesh/takumi-e2e' }),
+    'https://gitlab.com/aicodesh/takumi-e2e.git',
+  );
+  assert.equal(
+    await deliveryCloneUrl({ provider: 'gitlab', repo: 'aicodesh/takumi-e2e', apiBase: 'https://gitlab.example.com/api/v4' }),
+    'https://gitlab.example.com/aicodesh/takumi-e2e.git',
+  );
+});
+
+test('clone URL: forgejo keeps its provider-resolved web base (unchanged behaviour)', async () => {
+  assert.equal(
+    await deliveryCloneUrl({ provider: 'forgejo', repo: 'dev/widget', apiBase: 'https://forgejo.example.com/api/v1' }),
+    'https://forgejo.example.com/dev/widget.git',
+  );
+});
+
+// --- `apiBase` is the API endpoint, NEVER the git host (docs/bugs-fixed.md #46) ------------------
+//
+// MEASURED live: three runs failed closed at the worktree-clone step because the git host was derived
+// from `apiBase`. The shapes below are the exact ones those runs produced — GitHub's OWN API base (a
+// host that is not the git host) and the committed Forgejo placeholder `apiBase` INHERITED through
+// `takumi.local.yaml`'s per-key merge over `takumi.yaml` (omitting `apiBase` does not clear it).
+
+test('clone URL: github ignores its OWN api.github.com base — that host is not the git host', async () => {
+  assert.equal(
+    await deliveryCloneUrl({ provider: 'github', repo: 'sscodeai/takumi-delivery-demo', apiBase: 'https://api.github.com' }),
+    'https://github.com/sscodeai/takumi-delivery-demo.git',
+  );
+});
+
+test('clone URL: an INHERITED forgejo placeholder apiBase does not become a github clone host', async () => {
+  // The committed `takumi.yaml` apiBase, inherited by a `provider: github` section through the merge.
+  assert.equal(
+    await deliveryCloneUrl({
+      provider: 'github',
+      repo: 'sscodeai/takumi-delivery-demo',
+      apiBase: 'http://forgejo.internal.invalid:3000/api/v1',
+    }),
+    'https://github.com/sscodeai/takumi-delivery-demo.git',
+  );
+});
+
+test('clone URL: the same inherited placeholder does not become a gitlab clone host either', async () => {
+  assert.equal(
+    await deliveryCloneUrl({
+      provider: 'gitlab',
+      repo: 'aicodesh/takumi-e2e',
+      apiBase: 'http://forgejo.internal.invalid:3000/api/v1',
+    }),
+    'https://gitlab.com/aicodesh/takumi-e2e.git',
+  );
+});
+
+test('clone URL: a self-hosted host is honoured ONLY when apiBase carries the provider API path', async () => {
+  // The provider's own API path is the discriminator: /api/v3 (GitHub Enterprise), /api/v4 (GitLab).
+  assert.equal(
+    await deliveryCloneUrl({ provider: 'github', repo: 'acme/widget', apiBase: 'https://ghe.example.com/api/v3/' }),
+    'https://ghe.example.com/acme/widget.git',
+  );
+  assert.equal(
+    await deliveryCloneUrl({ provider: 'gitlab', repo: 'group/widget', apiBase: 'https://gitlab.example.com/api/v4' }),
+    'https://gitlab.example.com/group/widget.git',
+  );
+  // A host carrying ANOTHER provider's API path is not this provider's endpoint, so it is NOT the git host.
+  assert.equal(
+    await deliveryCloneUrl({ provider: 'github', repo: 'acme/widget', apiBase: 'https://gitlab.example.com/api/v4' }),
+    'https://github.com/acme/widget.git',
+  );
+});
+
+test('clone URL: a malformed repo and an unknown provider are refused, naming the provider', async () => {
+  await assert.rejects(() => deliveryCloneUrl({ provider: 'github', repo: 'sscodeai' }), /repo must be owner\/name/);
+  await assert.rejects(() => deliveryCloneUrl({ provider: 'github' }), /provider github needs repo owner\/name/);
+  await assert.rejects(
+    () => deliveryCloneUrl({ provider: 'trello', repo: 'a/b' }),
+    /a clone URL is only defined for provider "trello" \(forgejo, gitlab, github\)/,
+  );
+});
+
+test('createDeliveryWorktree: the REAL clone of a github section uses the derived github URL', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-clone-url-'));
+  try {
+    // The git seam is injected so the assertion is about the argv the REAL worktree creation builds.
+    const argv: string[][] = [];
+    const git: GitRunner = {
+      run: async (args: string[]) => {
+        argv.push(args);
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    };
+    const created = await createDeliveryWorktree({
+      cwd: dir,
+      section: { provider: 'github', repo: 'sscodeai/takumi-delivery-demo', baseBranch: 'main', remote: 'origin' },
+      branch: 'takumi/run-test',
+      git,
+    });
+    assert.equal(created.cloneUrl, 'https://github.com/sscodeai/takumi-delivery-demo.git');
+    assert.deepEqual(argv[0], ['clone', '--branch', 'main', 'https://github.com/sscodeai/takumi-delivery-demo.git', created.path]);
+    assert.equal(created.baseBranch, 'main');
+    assert.equal(created.remote, 'origin');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('createDeliveryWorktree: an inherited forgejo apiBase still clones the github host (the live defect)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-clone-url-'));
+  try {
+    const argv: string[][] = [];
+    const git: GitRunner = {
+      run: async (args: string[]) => {
+        argv.push(args);
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    };
+    const created = await createDeliveryWorktree({
+      cwd: dir,
+      // The section a merged `takumi.local.yaml` actually produces: provider github + the INHERITED apiBase.
+      section: {
+        provider: 'github',
+        repo: 'sscodeai/takumi-delivery-demo',
+        apiBase: 'http://forgejo.internal.invalid:3000/api/v1',
+        baseBranch: 'main',
+        remote: 'origin',
+      },
+      branch: 'takumi/run-test',
+      git,
+    });
+    assert.equal(created.cloneUrl, 'https://github.com/sscodeai/takumi-delivery-demo.git');
+    assert.deepEqual(argv[0], ['clone', '--branch', 'main', 'https://github.com/sscodeai/takumi-delivery-demo.git', created.path]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- the front door: refuse BEFORE the run starts ---------------------------------------------
@@ -349,6 +566,41 @@ test('run: a configured gitlab delivery reaches ctx.delivery — the publish ste
     assert.ok(!log.includes('no delivery provider (ctx.delivery)'), 'the provider WAS constructed into ctx.delivery');
   } finally {
     if (previousGitlab !== undefined) process.env['GITLAB_TOKEN'] = previousGitlab;
+    p.cleanup();
+  }
+});
+
+test('run: a configured github delivery reaches ctx.delivery — the publish step drives the REAL GitHub provider', async () => {
+  const previousGithub = process.env['GITHUB_TOKEN'];
+  // No token: the provider is built with its fail-closed unconfigured transport, so the delivery
+  // attempt is provable without any network and without a credential.
+  delete process.env['GITHUB_TOKEN'];
+  const p = project([
+    '  provider: github',
+    '  repo: sscodeai/takumi-delivery-demo',
+    '  apiBase: http://127.0.0.1:1/api/v3',
+    '  baseBranch: main',
+    '  remote: origin',
+  ]);
+  try {
+    const worktree = gitWorktree(p.dir);
+    const config = loadConfig(p.dir) as ProjectConfig;
+    const result = await runTask({
+      cwd: p.dir,
+      prompt: 'do the work',
+      runtimeId: 'fake',
+      workflow: 'publish-wf',
+      config,
+      worktree,
+    });
+    // The run reached the publish step (so it was NOT refused) and the failure is the GitHub
+    // provider's own — which is how we know `ctx.delivery` is the provider the config selected.
+    assert.equal(result.status, 'failed', result.events.join('\n'));
+    const log = result.events.join('\n');
+    assert.match(log, /github-delivery: no request transport configured/);
+    assert.ok(!log.includes('no delivery provider (ctx.delivery)'), 'the provider WAS constructed into ctx.delivery');
+  } finally {
+    if (previousGithub !== undefined) process.env['GITHUB_TOKEN'] = previousGithub;
     p.cleanup();
   }
 });

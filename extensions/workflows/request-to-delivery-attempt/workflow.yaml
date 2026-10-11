@@ -22,7 +22,13 @@ steps:
       elif [ -f run-tests.sh ]; then bash run-tests.sh 2>&1 | tail -60;
       elif ls *.test.mjs >/dev/null 2>&1; then node --test *.test.mjs 2>&1 | tail -60;
       else echo "no test command found in this project" >&2; exit 1; fi
-    dialect: forgejo
+    # NO `dialect:` HERE, DELIBERATELY. The dialect is the DELIVERY HOST's, not this repository's, so it is
+    # DERIVED from the run's delivery provider (`ctx.delivery`, via the provider's `metadata().id`): a
+    # `provider: github` section writes `.github/workflows/ci.yml`, a Forgejo/Gitea section
+    # `.forgejo/workflows/ci.yml`, a GitLab section `.gitlab-ci.yml`. Declaring one here would pin EVERY run
+    # to one host's file — a file the others never run, so `await_checks` would fail closed on an empty
+    # check set (docs/bugs-fixed.md #48). A step that genuinely needs a dialect of its own can still declare
+    # one, and that declaration WINS over the derivation.
     requirementRef: "{requirement}"
   - id: implementation
     type: agent
@@ -33,9 +39,11 @@ steps:
       which decisions it settles. You choose the language, architecture and stack; no human will read
       your design or your code.
 
-      A pipeline file has already been written into this directory at `.forgejo/workflows/ci.yml`: keep it,
-      and make sure your commit includes it. takumi never commits — the host runs what YOU commit — so the
-      delivery must be one commit that contains your work AND that pipeline file.
+      A pipeline file has already been written into this directory by the `ci_config` step, in the
+      DELIVERY HOST's own dialect, derived from the run's delivery provider: `.github/workflows/ci.yml`
+      for a GitHub delivery, `.forgejo/workflows/ci.yml` for Forgejo/Gitea, `.gitlab-ci.yml` for GitLab.
+      Keep it, and make sure your commit includes it. takumi never commits — the host runs what YOU
+      commit — so the delivery must be one commit that contains your work AND that pipeline file.
 
       This is delivery attempt {repairRound}. If the text between the markers below is empty, this is the
       FIRST attempt at this delivery and there is nothing to repair. If it is not empty, a previous

@@ -1,0 +1,33 @@
+name: blackbox-acceptance-generic
+version: 0.1.0
+description: >
+  The ACCEPTANCE half of the black-box chain, pointed at whatever requirement document THIS RUN was
+  confirmed against ({requirement}) instead of a path frozen into the file. It forges the judge from
+  the confirmed document and runs it; it does NOT implement, review or publish anything. It exists
+  so a declared relation (mutation-detection) can be carried through a real CLI run end to end —
+  confirm -> forge -> judge -> verdict — on a hand-placed delivery, without paying for a full
+  implement-and-publish chain whose tail this host cannot run. `blackbox-acceptance` is the same
+  chain with the PoC document's path frozen in; this one runs on any confirmed document, which is
+  what makes it usable for a proof that must not edit that document.
+runtime: fake
+steps:
+  - id: judge_forge
+    # ADR-026: the judge is produced HERE, outside the implementation worktree, from the CONFIRMED
+    # document's deliverable contract and without reading the implementation.
+    type: judge_forge
+    requirementRef: "{requirement}"
+    forgeRef: extensions/judges/metamorphic-forge.sh
+    timeoutMs: 120000
+  - id: artifact_acceptance
+    # ADR-025 + ADR-026: the acceptance runs the FORGED judge ({judgePath}) and refuses any other
+    # harness; it fails closed on an edited requirement, a missing confirmation, a judge that could not
+    # be forged, and a missing or failing ACCEPT_VERDICT marker.
+    type: acceptance
+    requirementRef: "{requirement}"
+    acceptanceRef: "{judgePath}"
+    dependsOn: [judge_forge]
+    timeoutMs: 120000
+  - id: delivery
+    type: delivery
+    prompt: Package the run's artifacts into a delivery manifest.
+    dependsOn: [artifact_acceptance]
