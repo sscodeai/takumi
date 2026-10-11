@@ -83,6 +83,48 @@ interface GitHubCombinedStatus {
   statuses?: Array<{ context?: string; state?: string; target_url?: string }>;
 }
 
+/**
+ * The issue surface of the same host.
+ *
+ * WHY IT IS NOT PART OF `DeliveryProvider`: the port (ADR-007) models how a committed change reaches
+ * the host — a pull request, checks, a merge. An ISSUE is a different capability, and adding it to the
+ * port would force every other adapter (a bare git remote included) to lie about supporting issues.
+ * So it is an EXTRA method on the provider, exactly as `@takumi/delivery-forgejo` does it, and the
+ * engine treats its absence as a fact to report rather than an error.
+ *
+ * `labels` here are label NAMES: GitHub's create-issue endpoint takes names directly, so unlike
+ * Forgejo (which wants ids and therefore resolves them) there is no lookup and no second request.
+ */
+export interface GitHubIssueInput {
+  title: string;
+  body: string;
+  /** Label names; an unknown name is refused by the host, which is reported, not swallowed. */
+  labels?: string[];
+}
+
+/** What {@link GitHubDeliveryProvider.openIssue} returns: the host's own issue identity. */
+export interface GitHubIssueRef {
+  number: string;
+  url: string;
+}
+
+/** What {@link GitHubDeliveryProvider.commentOnPullRequest} returns. */
+export interface GitHubCommentRef {
+  id: string;
+  url: string;
+}
+
+/** The subset of GitHub's issue/comment JSON this module reads. */
+interface GitHubIssuePayload {
+  number?: number;
+  html_url?: string;
+}
+
+interface GitHubCommentPayload {
+  id?: number;
+  html_url?: string;
+}
+
 export class GitHubDeliveryProvider implements DeliveryProvider {
   private readonly repo: string;
   private readonly apiBase: string;
@@ -325,6 +367,81 @@ export class GitHubDeliveryProvider implements DeliveryProvider {
       throw kind === undefined ? error : new DeliveryError('precondition', error.message, { item: ref.number });
     }
     return { merged: true, method, headSha: opts.expectedHeadSha, url: ref.url };
+  }
+
+  // --- the issue surface (an extra capability, NOT part of the delivery port) ---
+
+  /**
+   * Open an issue on the same host.
+   *
+   * The black-box chain files ONE issue per run when a delivered pipeline is not green (ADR-037):
+   * the pull request carries the change, the issue carries the record that the change failed a check
+   * a human will want to see. "One issue per run" is enforced by the ENGINE (it tracks what it has
+   * already filed), not here: this method opens exactly the issue it is asked to open, so a caller
+   * that asks twice gets two — the same contract `@takumi/delivery-forgejo` keeps.
+   */
+  async openIssue(input: GitHubIssueInput): Promise<GitHubIssueRef> {
+    const title = input.title.trim();
+    if (title.length === 0) {
+      throw new DeliveryError('precondition', 'openIssue: `title` is required');
+    }
+    const issue = await requestBoardJson<GitHubIssuePayload>(
+      this.request,
+      {
+        method: 'POST',
+        url: `${this.apiBase}/repos/${this.repo}/issues`,
+        body: {
+          title,
+          body: input.body,
+          ...(input.labels === undefined || input.labels.length === 0 ? {} : { labels: input.labels }),
+        },
+      },
+      'create issue',
+    );
+    const number = issue.number;
+    if (typeof number !== 'number' || !Number.isInteger(number)) {
+      throw new DeliveryError(
+        'transport',
+        `GitHub answered with an issue that carries no number: ${JSON.stringify(issue).slice(0, 200)}`,
+      );
+    }
+    return { number: String(number), url: issue.html_url ?? '' };
+  }
+
+  /**
+   * Comment on a pull request.
+   *
+   * A pull request is an issue on GitHub's REST API, so the comment endpoint is the issue-comment one
+   * under the pull request's number — which is what makes "the failure is ABOUT this pull request"
+   * land where the reviewer is already reading. `ref` accepts a `PullRequestRef` or anything with a
+   * `number`.
+   */
+  async commentOnPullRequest(
+    ref: Pick<PullRequestRef, 'number'> | { number: string },
+    body: string,
+  ): Promise<GitHubCommentRef> {
+    const number = String(ref.number).trim();
+    if (number.length === 0) {
+      throw new DeliveryError('precondition', 'commentOnPullRequest: the pull request number is required');
+    }
+    const comment = await requestBoardJson<GitHubCommentPayload>(
+      this.request,
+      {
+        method: 'POST',
+        url: `${this.apiBase}/repos/${this.repo}/issues/${encodeURIComponent(number)}/comments`,
+        body: { body },
+      },
+      `comment on pull request ${number}`,
+    );
+    const id = comment.id;
+    if (typeof id !== 'number' || !Number.isInteger(id)) {
+      throw new DeliveryError(
+        'transport',
+        `GitHub answered with a comment that carries no id: ${JSON.stringify(comment).slice(0, 200)}`,
+        { item: number },
+      );
+    }
+    return { id: String(id), url: comment.html_url ?? '' };
   }
 
   private async fetchPull(number: string): Promise<GitHubPull> {

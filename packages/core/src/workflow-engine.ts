@@ -17,6 +17,8 @@ import { detectHardFailure, judgeGate, parseTestReport } from './quality-gate.js
 import { createGitRunner, type GitRunner } from './git-runner.js';
 import { ProviderError } from './provider-error.js';
 import type { CheckSummary, DeliveryMergeMethod, DeliveryProvider, MergeOutcome, PullRequestRef, PullRequestStatus } from './delivery.js';
+import type { DeliveryBoardPort, DeliveryBoardProjection } from './delivery-board.js';
+import { DELIVERY_BOARD_LABELS, DELIVERY_BOARD_STEP_STATES } from './delivery-board.js';
 import { executeCiConfigStep, executeAwaitChecksStep } from './ci-pipeline.js';
 import { collectReviewInput, verdictFromFindings } from './review.js';
 import {
@@ -137,6 +139,19 @@ export interface WorkflowExecutionContext {
    * reader" defect in a new costume.
    */
   deliveryDefaults?: { baseBranch?: string; remote?: string };
+  /**
+   * The board this run PROJECTS its delivery onto for a human to read (ADR-044): write-only, injected
+   * by the caller exactly like `ctx.delivery`. The engine has no default board and no board config of
+   * its own, and a run with no board port projects nowhere — which is not an error: the projection is
+   * for readers, and a run nobody is watching is still a run.
+   *
+   * ONE DELIVERY = ONE ROW, keyed by the run id: a re-run UPDATES the row it wrote before rather than
+   * filing a second one, and an implementation MUST be idempotent on that id. A projection failure is
+   * LOUD and NEVER FATAL (ADR-017 rule 2): the delivery was accepted by the pipeline, the judge and the
+   * host, and a decorative board must not be able to un-accept it — the failure is named in the step's
+   * own summary so a reader knows the row is stale, and the run is otherwise unaffected.
+   */
+  board?: DeliveryBoardPort;
   /**
    * Set by the repair loop on every round that is NOT the last: the failure being handled is going to be
    * retried, so the requirement document must not be edited per attempt (ADR-034). Exactly one `FB-nnn`
@@ -477,6 +492,33 @@ export async function executeWorkflow(
       };
     }
     return { ref };
+  };
+
+  /**
+   * The row title a delivery projects under: the confirmed requirement's ref when there is one, else
+   * the workflow's name — the SAME `itemId` the `publish` step already uses, so a board row and the
+   * pull request it is about name the same thing.
+   */
+  const boardItemId = ctx.confirmedRequirement?.ref ?? workflow.name;
+
+  /**
+   * Project one delivery step onto the board (ADR-044) and return the line a reader sees in the step's
+   * own summary — or `null` when this run has no board port, so a run that projects nowhere is not
+   * decorated with a line about a board it never had.
+   *
+   * LOUD and NEVER FATAL: the projection is for readers, and a decorative board must not be able to
+   * un-accept a delivery the pipeline, the judge and the host already accepted. So every failure is
+   * caught HERE and reported as what it is, and no caller's step outcome depends on this returning.
+   */
+  const projectBoard = async (input: Omit<DeliveryBoardProjection, 'runId' | 'title'>): Promise<string | null> => {
+    const board = ctx.board;
+    if (board === undefined) return null;
+    try {
+      const ref = await board.project({ runId, title: boardItemId, ...input });
+      return `board: row ${ref.created ? 'created' : 'updated'} (${ref.id}${ref.url.length > 0 ? `, ${ref.url}` : ''})`;
+    } catch (e) {
+      return `board: COULD NOT be written (${e instanceof Error ? e.message : String(e)}) — the delivery is unaffected; the row is stale`;
+    }
   };
 
   const byId = new Map(workflow.steps.map((s) => [s.id, s]));
@@ -1663,6 +1705,15 @@ export async function executeWorkflow(
             ctx.onEvent?.(stepId, `pipeline failure reported: ${reportNotes.join('; ')}`);
           }
         }
+        // The board row follows the pipeline verdict (ADR-044): `pr_open` when every check went green
+        // (+ `takumi-approved`), `fix_needed` when one failed or timed out (+ `takumi-blocked`). This is
+        // the state a human triaging the board needs — the row says whether the delivery can land.
+        const boardLine = await projectBoard({
+          state: awaitResult.status === 'completed' ? DELIVERY_BOARD_STEP_STATES.green : DELIVERY_BOARD_STEP_STATES.red,
+          labels: [awaitResult.status === 'completed' ? DELIVERY_BOARD_LABELS.approved : DELIVERY_BOARD_LABELS.blocked],
+          detail: awaitSummary.split('\n')[0] ?? awaitSummary,
+        });
+        if (boardLine !== null) awaitSummary = `${awaitSummary}\n${boardLine}`;
         stepResults.push({ stepId, status: awaitResult.status, summary: awaitSummary, artifacts: [], tests: [] });
         ctx.onEvent?.(stepId, awaitSummary.split('\n')[0] ?? awaitSummary);
         done.add(stepId);
@@ -1784,6 +1835,17 @@ export async function executeWorkflow(
             }
           }
           lines.push(`  ${issueLine}`);
+          // The board row for this delivery (ADR-044): ONE row per run, keyed by the run id, moved to
+          // `claimed` — a run owns this delivery, the pull request is open, and no pipeline has been
+          // read yet. A board failure is loud (the line below) and never undoes the pull request.
+          const boardLine = await projectBoard({
+            state: DELIVERY_BOARD_STEP_STATES.publish,
+            detail:
+              pr === undefined
+                ? `publish: ${branch} pushed to ${baseBranch} (this host has no review surface)`
+                : `publish: pull request ${pr.number} opened (${pr.url})`,
+          });
+          if (boardLine !== null) lines.push(`  ${boardLine}`);
           run.stepStatus[stepId] = 'completed';
           stepResults.push({ stepId, status: 'completed', summary: lines.join('\n'), artifacts: [], tests: [] });
           // The pipeline step judges the head the HOST has, so the reference travels with the run: a later
@@ -1922,6 +1984,14 @@ export async function executeWorkflow(
         } catch (e) {
           summaryLines.push(`  note: the merge artifact could not be persisted (${e instanceof Error ? e.message : String(e)}) — the merge happened and is named here`);
         }
+        // The row LANDS (ADR-044): `merged` (+ `takumi-merged`), with the merged commit in the detail so
+        // the landed SHA is auditable from the board itself, not only from the run's artifacts.
+        const boardLine = await projectBoard({
+          state: DELIVERY_BOARD_STEP_STATES.merged,
+          labels: [DELIVERY_BOARD_LABELS.merged],
+          detail: `merge: pull request ${deliveryRef} merged (${outcome.method}, head ${outcome.headSha})`,
+        });
+        if (boardLine !== null) summaryLines.push(`  ${boardLine}`);
         run.stepStatus[stepId] = 'completed';
         stepResults.push({ stepId, status: 'completed', summary: summaryLines.join('\n'), artifacts: artifactPaths, tests: [] });
         // What a later step needs to know the delivery LANDED: the flag, the commit that landed and the
