@@ -71,9 +71,31 @@ refuse() { echo "$1" >&2; exit 1; }
 # --- read the deliverable contract out of the requirement document -----------------------------
 
 RUN_TEMPLATE=$(awk '/^[[:space:]]*run:[[:space:]]*/ { sub(/^[[:space:]]*run:[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' "$DOC")
-if [ -z "$RUN_TEMPLATE" ]; then
-  refuse "the requirement document declares no deliverable.run, so there is no way to run the thing"
+# --- the bound on ONE invocation of the deliverable (ADR-046) -------------------------------------
+# A SERVICE-shaped `run` is a start-and-serve command that NEVER exits: without a bound the judge waits
+# for ever. The bound is therefore unconditional. It is read from the deliverable block's own
+# `timeoutMs` — the DIRECT child of `deliverable:` (indent two deeper than the key), so a scenario's or
+# the mutation block's `timeoutMs` is never mistaken for it — and the floor/default live on their own
+# lines so the TypeScript front door and this shell can be kept honest by a test that parses both.
+RUN_MIN_TIMEOUT_MS=1000
+DEFAULT_RUN_TIMEOUT_MS=120000
+RUN_TIMEOUT_MS=$(awk '
+  function ind(s) { match(s, /^[ ]*/); return RLENGTH }
+  /^[[:space:]]*deliverable:[[:space:]]*$/ { ind_d = 1; di = ind($0); next }
+  ind_d && $0 ~ /^[[:space:]]*[a-zA-Z_]+:[[:space:]]*$/ && ind($0) <= di { ind_d = 0; next }
+  ind_d && ind($0) == di + 2 && /^[[:space:]]*timeoutMs:[[:space:]]*/ {
+    t = $0; sub(/^[[:space:]]*timeoutMs:[[:space:]]*/, "", t); gsub(/^"|"$/, "", t); print t; exit
+  }
+' "$DOC")
+if [ -n "$RUN_TIMEOUT_MS" ]; then
+  case "$RUN_TIMEOUT_MS" in
+    ''|*[!0-9]*) refuse "the deliverable block declares timeoutMs \"$RUN_TIMEOUT_MS\", which is not a whole number of milliseconds" ;;
+  esac
+  [ "$RUN_TIMEOUT_MS" -ge "$RUN_MIN_TIMEOUT_MS" ] || refuse "the deliverable block declares timeoutMs $RUN_TIMEOUT_MS, below the honest floor of ${RUN_MIN_TIMEOUT_MS}ms for one invocation of the deliverable"
 fi
+[ -n "$RUN_TIMEOUT_MS" ] || RUN_TIMEOUT_MS=$DEFAULT_RUN_TIMEOUT_MS
+RUN_TIMEOUT_S=$(( RUN_TIMEOUT_MS / 1000 ))
+[ "$RUN_TIMEOUT_S" -ge 1 ] || RUN_TIMEOUT_S=1
 
 # relations / anchors: `id relation` (the check ids, and what kind each one is) and, separately,
 # `id decides` (which decision that check exercises).
@@ -748,11 +770,16 @@ decide() { # $1 relation id, $2 decision id, $3 line id, $4 the chosen option
   fi
 }
 
-RUN_OUT=""; RUN_STATUS=0
-run_tool() { # $1 = absolute csv path; leaves the tool's combined output in RUN_OUT and its status in RUN_STATUS
+RUN_OUT=""; RUN_STATUS=0; RUN_CMD=""
+run_tool() { # $1 = absolute csv path; leaves the tool's combined output in RUN_OUT, its status in
+             # RUN_STATUS and the command actually invoked (fixture resolved) in RUN_CMD.
   local csv="$1" cmd
   cmd=$(printf '%s' "$RUN_TEMPLATE" | sed "s|{csv}|$csv|g")
-  RUN_OUT=$( ( cd "$WORKTREE" && sh -c "$cmd" ) 2>&1 ); RUN_STATUS=$?
+  RUN_CMD="$cmd"
+  # ADR-046: BOUNDED. A service-shaped run starts the thing and never exits, so an unbounded invocation
+  # is not a check, it is a hang that eventually reads as a failure for the wrong reason. `timeout` turns
+  # it into exit 124, and the caller's guard reports it as a FAILURE naming the command.
+  RUN_OUT=$( ( cd "$WORKTREE" && timeout "$RUN_TIMEOUT_S" sh -c "$cmd" ) 2>&1 ); RUN_STATUS=$?
 }
 
 # --- declared scenarios (ADR-035) ---------------------------------------------------------------
@@ -934,6 +961,10 @@ mutation_report_failures() { # $1 format, $2 path, $3 max_survivors -> a reason,
 HEADER
 
   printf '\nRUN_TEMPLATE=%s\n' "'$(sq "$RUN_TEMPLATE")'"
+  # ADR-046: the bound on one invocation of the deliverable, as declared (or the default) and in whole
+  # seconds for `timeout`. Emitted as its own lines so the generated judge reads a number, never a guess.
+  printf 'RUN_TIMEOUT_MS=%s\n' "$RUN_TIMEOUT_MS"
+  printf 'RUN_TIMEOUT_S=%s\n' "$RUN_TIMEOUT_S"
   printf 'REQUIREMENT_REF=%s\n' "'$(sq "$TAKUMI_REQUIREMENT")'"
   printf 'DUPLICATE_MODE=%s\n' "'$(sq "$DUPLICATE_MODE")'"
   printf 'MALFORMED_MODE=%s\n' "'$(sq "$MALFORMED_MODE")'"
@@ -1197,6 +1228,15 @@ trap 'kill_scenario_surfaces' EXIT INT TERM
 run_tool "$FIX/base.csv"
 base_output="$RUN_OUT"
 base_status="$RUN_STATUS"
+base_cmd="$RUN_CMD"
+# ADR-046: a bound that was hit is a FAILURE that names the command, never a pass and never a silent
+# "no output". The message mirrors the mutation relation's wording, so one kind of timeout reads the
+# same wherever it is hit.
+BASE_TIMEOUT_DETAIL=""
+if [ "$base_status" = 124 ]; then
+  BASE_TIMEOUT_DETAIL="the deliverable command timed out after ${RUN_TIMEOUT_MS}ms, so the deliverable was never exercised: ${base_cmd}"
+  printf '# %s\n' "$BASE_TIMEOUT_DETAIL"
+fi
 if [ -z "$base_output" ]; then
   printf '# the deliverable produced no output at all (exit %s)\n' "$base_status"
 fi
@@ -1208,9 +1248,14 @@ alive=0
 
 # The vacuous-green guard (ADR-013/ADR-033): if the deliverable produced nothing the declared shapes
 # can parse, then NO relation was exercised, so none of them may pass — a relation must never pass by
-# comparing two empty results.
+# comparing two empty results. A bound that was hit is reported as its own failure, naming the command,
+# because "exit 124" alone reads as a mystery rather than as a command that hung.
 guard_fail() { # $1 relation id, $2 text
-  relation not_ok "$1" "$2" "the judge did not exercise the deliverable: nothing in its output (exit ${base_status}) matched a declared output shape, so this relation is unproven"
+  if [ -n "$BASE_TIMEOUT_DETAIL" ]; then
+    relation not_ok "$1" "$2" "$BASE_TIMEOUT_DETAIL"
+  else
+    relation not_ok "$1" "$2" "the judge did not exercise the deliverable: nothing in its output (exit ${base_status}) matched a declared output shape, so this relation is unproven"
+  fi
 }
 RUNS
 
