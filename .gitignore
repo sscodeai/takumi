@@ -16,3 +16,6 @@ bench/results/*.json
 # Local secrets (a token pasted into a chat is already leaked; it must never reach a commit).
 .env
 .env.local
+# Local config override: the operator's real endpoints, merged over the committed takumi.yaml.
+# The committed file stays the shareable example; this one never reaches a commit.
+takumi.local.yaml

@@ -160,13 +160,66 @@ export interface ProjectConfig {
   };
 }
 
+/** True for a YAML mapping (`{...}`): an object that is not an array and not null. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Recursively merge a local override over the base config.
+ *
+ * Objects merge key by key; every other value (a scalar, an array, `null`) is REPLACED by the
+ * local value. A local file that names only the one endpoint it wants to change therefore keeps
+ * the rest of the committed section — while a local `registry.skills` or a local list replaces
+ * the committed value outright, rather than appending to it.
+ */
+export function mergeConfig(base: unknown, override: unknown): unknown {
+  if (isPlainObject(base) && isPlainObject(override)) {
+    const merged: Record<string, unknown> = { ...base };
+    for (const [key, value] of Object.entries(override)) {
+      merged[key] = key in base ? mergeConfig(base[key], value) : value;
+    }
+    return merged;
+  }
+  return override;
+}
+
+/**
+ * The project config: `takumi.yaml`, with an optional `takumi.local.yaml` merged OVER it.
+ *
+ * The committed file is the SHAREABLE example — it names placeholder hosts
+ * (`forgejo.internal.invalid`), never an operator's real endpoint. An operator who needs the real
+ * one keeps it in `takumi.local.yaml` (gitignored), which is merged over the committed file before
+ * the config is used: objects merge recursively, scalars and arrays are replaced by the local
+ * value. Applying it prints exactly ONE line, naming the file, so a run's transcript records that
+ * the effective config was not the committed one. A local file that exists but cannot be read as a
+ * mapping fails LOUDLY: silently ignoring it would run the whole thing against the committed
+ * placeholders while the operator believed their real endpoint was in use.
+ */
 export function loadConfig(cwd: string): ProjectConfig {
   const p = join(cwd, 'takumi.yaml');
   if (!existsSync(p)) {
     throw new Error(`no takumi.yaml found in ${cwd} — run "takumi init" first`);
   }
-  const raw = readFileSync(p, 'utf8');
-  return parse(raw) as ProjectConfig;
+  const base = parse(readFileSync(p, 'utf8')) as unknown;
+  const localPath = join(cwd, 'takumi.local.yaml');
+  if (!existsSync(localPath)) {
+    return base as ProjectConfig;
+  }
+  let local: unknown;
+  try {
+    local = parse(readFileSync(localPath, 'utf8'));
+  } catch (err) {
+    throw new Error(`takumi.local.yaml in ${cwd} is not valid YAML: ${(err as Error).message}`);
+  }
+  if (!isPlainObject(local)) {
+    throw new Error(
+      `takumi.local.yaml in ${cwd} must contain a YAML mapping (an object), not ` +
+        `${local === null ? 'null' : typeof local}`,
+    );
+  }
+  console.log(`  [config] local override applied: ${localPath} (merged over takumi.yaml)`);
+  return mergeConfig(base, local) as ProjectConfig;
 }
 
 /**
