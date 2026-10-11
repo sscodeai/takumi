@@ -138,3 +138,8 @@ deliverable:
       decides: AMB-002
       checkedAs: half-up
       description: "An independent re-computation of each station's count, min, max and mean from the same readings, rounding half away from zero, must equal the tool's printed values."
+
+confirmation:
+  by: "SS"
+  at: "2026-10-11T09:17:13.940Z"
+  method: bounded-choice
