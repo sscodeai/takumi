@@ -194,7 +194,8 @@ ambiguities:
     chosen: "valid readings only: the sum of the per-station counts"
 # The judge contract (ADR-026). A service is not "run once and exits": `run` starts it, the input world
 # is the CSV it serves, and the ONLY check that can reach it is a declared scenario (ADR-035), which
-# starts the surface, waits for the URL and runs a command against it.
+# starts the surface, waits for the URL, ASSERTS what the document declares about the response
+# (`expect_status`/`expect_body`, ADR-046) and runs a command against it.
 deliverable:
   # HOW IT RUNS. A service is started, not invoked once per file — so this is the start command, and the
   # path the service should summarise is passed through the `{csv}` placeholder the judge resolves (in
