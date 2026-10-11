@@ -1,5 +1,5 @@
 /**
- * A standing authorization (ADR-045), PIN-ONLY (v1).
+ * A standing authorization (ADR-045): a signed grant with a SELECTABLE scope.
  *
  * Today a run is bound to a requirement document a human confirmed interactively (ADR-025, ADR-027), and
  * a NON-TTY confirmation is refused outright — deliberately, because the human gives the criteria and
@@ -7,26 +7,45 @@
  * run: to write and confirm the requirement, and to adjudicate a failure afterwards.
  *
  * A standing authorization is the second way to produce the SAME token: a human signs, once, a committed
- * file that says which ONE revision of which ONE requirement document may be confirmed by the document's
- * OWN `default:` answers, for which classes of decision. The confirmation still happens; the digest is
- * still the token; the acceptance still binds to it. What changes is who wrote the `chosen:` lines, and
- * what the record says about it.
+ * file that says which requirement documents, and which classes of decision inside them, may be confirmed
+ * by the documents' OWN `default:` answers. The confirmation still happens; the digest is still the token;
+ * the acceptance still binds to it. What changes is who wrote the `chosen:` lines, and what the record
+ * says about it.
  *
- * Two properties carry the whole design:
+ * THE SCOPE IS A CHOICE, NOT TWO PRODUCTS. The human selects exactly ONE of two forms, and the form
+ * written IS the mode:
+ *
+ *   * `pin: {ref, digest}` — ONE revision of ONE document ("signed once"): the digest binds the exact
+ *     text a human read, so a single byte changed after signing is refused.
+ *   * `scope: {documents: [globs]}` — a FAMILY of requirement documents, matched by repo-relative glob
+ *     ("unattended"). There is no per-document digest to pin; what binds the run is the document's OWN
+ *     confirmation token (ADR-025), and the review before signing is the human's act.
+ *
+ * Declaring BOTH forms, or NEITHER, is refused at load by name: a grant whose edges a reader cannot see
+ * is a grant they cannot revoke with confidence.
+ *
+ * Three properties carry the whole design, unchanged by the wider form:
  *
  *   1. IT MAY ONLY NARROW, NEVER WIDEN. The licensable set is fixed in code (`AUTHORIZATION_CLASSES`,
  *      `AUTHORIZATION_POLICIES`); the authorization is a filter over it. A field that would add to it —
- *      a scope over a family of documents, `allowProtectedPaths`, `anyDecision`, `override` — is refused
- *      at load, BY NAME. That is what makes the rule a rule rather than a list somebody maintains.
+ *      `allowProtectedPaths`, `anyDecision`, `override`, a raw path set — is refused at load, BY NAME.
+ *      The `documents` globs of the wider form NARROW which documents are in reach: they add no decision
+ *      class, lower no protected path, and widen no answer.
  *   2. IT LICENSES AN ANSWER THE DOCUMENT ALREADY OFFERS; IT NEVER LICENSES A CHANGE THE DOCUMENT DOES
  *      NOT CONTAIN. The complete set of writes it permits is `chosen:` filled from the decision's own
  *      `default:`, the `confirmation:` block, and — later, and never in v1 — a repair round. The
  *      deliverable contract, the protected paths and the document's own `human: true` markers are out of
  *      reach by construction, not by a list of forbidden cases.
+ *   3. THE EXCLUSIONS ARE THE SAME FOR BOTH FORMS. A `human: true` decision, a decision with no default,
+ *      a class outside the vocabulary, a refused failure closure, an open acceptance failure, an expired
+ *      or revoked grant, a document under `docs/authorizations/` — each is refused identically whether the
+ *      scope is a pin or a family. The wider form widens WHICH DOCUMENTS are in reach, never what may be
+ *      written into one.
  *
- * v1 is deliberately narrow (the operator's four decisions): PIN-ONLY (one document, never a family);
+ * v1 was deliberately narrow (the operator's four decisions): PIN-ONLY (one document, never a family);
  * NO extra repair rounds (a failure always stops and asks a human); an explicit `human: true` marker on a
- * decision; and the intake's `checkedAs` placement fixed at its source.
+ * decision; and the intake's `checkedAs` placement fixed at its source. This revision makes the scope a
+ * SELECTABLE wider form — a family of documents by glob — with the same fail-closed exclusions.
  */
 
 import { parse as parseYaml } from 'yaml';
@@ -66,14 +85,18 @@ export const AUTHORIZATION_FAILURE_CLASSES = ['implementation-changes'] as const
 
 /** The fields that would WIDEN the licensable set, and why each is refused. */
 const WIDENING_FIELDS: Record<string, string> = {
-  scope: 'a standing authorization pins ONE document, never a family of them',
-  documents: 'a standing authorization pins ONE document, never a list of them',
-  paths: 'a standing authorization pins ONE document, never a set of paths',
+  documents:
+    'the documents a scope covers belong INSIDE the scope form (`scope.documents`), as repo-relative globs — a bare top-level list would WIDEN the licensable set',
+  refs: 'a scope names documents by glob (`scope.documents`); a raw list of refs would WIDEN the licensable set',
+  paths: 'a scope names requirement documents by glob inside the repository; a raw set of filesystem paths would WIDEN the licensable set',
   allowProtectedPaths: 'a standing authorization never lowers a protected path (ADR-032)',
   allowProtected: 'a standing authorization never lowers a protected path (ADR-032)',
   anyDecision: 'a standing authorization licenses the classes it names, never every decision',
   override: 'a standing authorization never overrides an answer the document already records',
 };
+
+/** The fields a `scope` form is made of. Its shape is CLOSED: an unknown key is refused. */
+const SCOPE_FIELDS: readonly string[] = ['documents'];
 
 /** The failure closures that are a HUMAN's to make, and the reason a machine may not. */
 const REFUSED_FAILURE_CLASSES: Record<string, string> = {
@@ -93,15 +116,36 @@ const AUTHORIZATION_FIELDS: readonly string[] = [
   'revoked',
   'reason',
   'pin',
+  'scope',
   'decisions',
   'failures',
 ];
 
-/** The ONE document revision an authorization licenses. */
+/** The two scope forms, named so a reader can see there are exactly two and the human selects one. */
+export const SCOPE_FORMS = ['pin', 'documents'] as const;
+
+/** The ONE document revision an authorization licenses (the `pin` form). */
 export interface AuthorizationPin {
   ref: string;
   digest: string;
 }
+
+/**
+ * The scope a human SELECTED. Exactly one of two forms is declared, and the form written IS the mode
+ * (ADR-045, "Modes are a choice, not two products"):
+ *
+ *   * `pin` — one revision of one document ("signed once"). The digest binds the exact text a human read,
+ *     so a byte changed after signing is refused.
+ *   * `documents` — a family of requirement documents, matched by repo-relative glob ("unattended").
+ *     There is no per-document digest to pin; what binds the run is the document's OWN confirmation token
+ *     (ADR-025), and the review before signing is the human's act.
+ *
+ * Both forms are the SAME mechanism: the grant still licenses only the decision classes it names, and the
+ * fail-closed exclusions below are identical. Only WHICH DOCUMENTS are in reach differs.
+ */
+export type AuthorizationScope =
+  | { form: 'pin'; pin: AuthorizationPin }
+  | { form: 'documents'; documents: string[] };
 
 /** One class the authorization may default, and with which policy. */
 export interface AuthorizationGrant {
@@ -122,7 +166,8 @@ export interface StandingAuthorization {
   expiresAt: string;
   revoked: boolean;
   reason: string;
-  pin: AuthorizationPin;
+  /** The scope the human SELECTED: exactly one form, and the form written IS the mode. */
+  scope: AuthorizationScope;
   decisions: AuthorizationGrant[];
   failures: AuthorizationFailureGrant[];
 }
@@ -154,6 +199,66 @@ function normalizeDigest(value: string | undefined): string | undefined {
 
 function normalizeRef(ref: string): string {
   return ref.replace(/^\.\//, '').replace(/\/+$/, '');
+}
+
+/**
+ * Compile a scope glob to a RegExp. The vocabulary is deliberately tiny and fully documented, because a
+ * scope a human cannot predict is a scope they cannot sign:
+ *   * `*`  matches any run of characters EXCEPT `/` (so `poc-*.yaml` stays inside one directory);
+ *   * `**` matches any run INCLUDING `/` (so `docs/**` reaches nested directories);
+ *   * `?`  matches exactly one character except `/`;
+ *   * every other character is literal.
+ * There is no dependency and no hidden syntax: the same pattern always compiles to the same matcher.
+ */
+function globToRegExp(pattern: string): RegExp {
+  let source = '^';
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i] as string;
+    if (ch === '*') {
+      if (pattern[i + 1] === '*') {
+        i += 1;
+        if (pattern[i + 1] === '/') i += 1; // `a/**/b` reaches `a/b` as well as `a/x/b`
+        source += '.*';
+      } else {
+        source += '[^/]*';
+      }
+      continue;
+    }
+    if (ch === '?') {
+      source += '[^/]';
+      continue;
+    }
+    source += /[.*+?^${}()|[\]\\]/.test(ch) ? `\\${ch}` : ch;
+  }
+  return new RegExp(`${source}$`);
+}
+
+/**
+ * Why a scope glob may not be used, or undefined when it is fine. Fail-closed, and each reason is a RULE
+ * rather than a case: a scope may only name requirement documents INSIDE the repository, and it may never
+ * reach the authorizations themselves (the self-referential guard, ADR-045).
+ */
+function refuseScopeGlob(pattern: string): string | undefined {
+  if (pattern.length === 0) return 'it is empty';
+  if (pattern.startsWith('/')) return 'it is absolute, and a scope is repo-relative: an absolute path escapes the repository';
+  if (pattern.split('/').includes('..')) return 'it walks out of the repository with ".."';
+  if (pattern.includes('\\')) return 'it carries a backslash, which is not a path separator here';
+  if (!/\.ya?ml$/.test(pattern)) return 'a scope names requirement documents, which are YAML: the glob has to end in .yaml or .yml';
+  if (globToRegExp(normalizeRef(pattern)).test('docs/authorizations/SA-001.yaml')) {
+    return 'it reaches docs/authorizations/, and an authorization may not confirm another authorization (the self-referential guard, ADR-045)';
+  }
+  return undefined;
+}
+
+/**
+ * Does a document ref fall inside the scope the human signed? For a pin that is an equality on the ref
+ * (the digest is checked separately, because a pin binds a REVISION); for a family it is any glob match.
+ * Exported so the CLI and a reader reach the same answer the licence check reaches.
+ */
+export function documentMatchesScope(authorization: StandingAuthorization, documentRef: string): boolean {
+  const ref = normalizeRef(documentRef);
+  if (authorization.scope.form === 'pin') return normalizeRef(authorization.scope.pin.ref) === ref;
+  return authorization.scope.documents.some((pattern) => globToRegExp(pattern).test(ref));
 }
 
 /**
@@ -209,19 +314,77 @@ export function parseStandingAuthorization(text: string): AuthorizationLoad {
     issues.push(`the authorization declares revoked: ${JSON.stringify(revokedRaw)}, which is not true or false`);
   }
 
-  let pin: AuthorizationPin | undefined;
-  const rawPin = block['pin'];
-  if (rawPin === null || typeof rawPin !== 'object' || Array.isArray(rawPin)) {
-    issues.push('the authorization has no pin: it pins exactly ONE document ({ref, digest}), and that document is the only thing it may confirm');
-  } else {
-    const entry = rawPin as Record<string, unknown>;
-    const ref = stringOf(entry['ref']);
-    const digest = normalizeDigest(stringOf(entry['digest']));
-    if (ref === undefined) issues.push('the authorization pin names no ref');
-    if (digest === undefined) {
-      issues.push('the authorization pin names no digest: it is the sha256 of the document AS IT WAS REVIEWED, so the revision a human read is the revision that gets defaulted');
+  // The SCOPE is a choice between exactly two forms (ADR-045, "Modes are a choice, not two products"):
+  // `pin` (one revision of one document) or `scope` (a family of documents by glob). Declaring both, or
+  // neither, is refused BY NAME — a grant whose edges a reader cannot see is one they cannot revoke.
+  const hasPin = Object.prototype.hasOwnProperty.call(block, 'pin');
+  const hasScope = Object.prototype.hasOwnProperty.call(block, 'scope');
+  let scope: AuthorizationScope | undefined;
+  if (hasPin && hasScope) {
+    issues.push(
+      'the authorization declares BOTH a pin and a scope: a standing authorization selects exactly ONE scope form — `pin` (one revision of one document) or `scope` (a family of documents), never both',
+    );
+  } else if (!hasPin && !hasScope) {
+    issues.push(
+      'the authorization declares no scope: it must select exactly ONE form — `pin` (one revision of one document, {ref, digest}) or `scope` (a family of documents, {documents: [globs]})',
+    );
+  } else if (hasPin) {
+    const rawPin = block['pin'];
+    if (rawPin === null || typeof rawPin !== 'object' || Array.isArray(rawPin)) {
+      issues.push('the pin is not a mapping: it names exactly ONE document revision as {ref, digest}');
+    } else {
+      const entry = rawPin as Record<string, unknown>;
+      for (const key of Object.keys(entry)) {
+        if (key !== 'ref' && key !== 'digest') {
+          issues.push(`the pin carries "${key}", which is not a field of a pin (fields: ref, digest): a pin names ONE revision of ONE document, and nothing else`);
+        }
+      }
+      const ref = stringOf(entry['ref']);
+      const digest = normalizeDigest(stringOf(entry['digest']));
+      if (ref === undefined) issues.push('the authorization pin names no ref');
+      if (digest === undefined) {
+        issues.push('the authorization pin names no digest: it is the sha256 of the document AS IT WAS REVIEWED, so the revision a human read is the revision that gets defaulted');
+      }
+      if (ref !== undefined && digest !== undefined) scope = { form: 'pin', pin: { ref: normalizeRef(ref), digest } };
     }
-    if (ref !== undefined && digest !== undefined) pin = { ref, digest };
+  } else {
+    const rawScope = block['scope'];
+    if (rawScope === null || typeof rawScope !== 'object' || Array.isArray(rawScope)) {
+      issues.push('the scope is not a mapping: it declares the `documents` it covers, each a repo-relative glob');
+    } else {
+      const entry = rawScope as Record<string, unknown>;
+      for (const key of Object.keys(entry)) {
+        if (SCOPE_FIELDS.includes(key)) continue;
+        const widening = WIDENING_FIELDS[key];
+        issues.push(
+          widening === undefined
+            ? `the scope carries "${key}", which is not a field of a scope (fields: ${SCOPE_FIELDS.join(', ')})`
+            : `the scope carries "${key}", which would WIDEN the licensable set: ${widening}`,
+        );
+      }
+      const rawDocuments = entry['documents'];
+      if (!Array.isArray(rawDocuments) || rawDocuments.length === 0) {
+        issues.push(
+          'the scope lists no documents: a scope over nothing confirms nothing (documents: a non-empty list of repo-relative globs, each ending .yaml or .yml)',
+        );
+      } else {
+        const documents: string[] = [];
+        rawDocuments.forEach((raw, index) => {
+          const pattern = stringOf(raw);
+          if (pattern === undefined) {
+            issues.push(`documents[${index + 1}] is not a path`);
+            return;
+          }
+          const why = refuseScopeGlob(pattern);
+          if (why !== undefined) {
+            issues.push(`documents[${index + 1}] "${pattern}" is not a usable scope glob: ${why}`);
+            return;
+          }
+          documents.push(normalizeRef(pattern));
+        });
+        if (documents.length === rawDocuments.length) scope = { form: 'documents', documents };
+      }
+    }
   }
 
   const decisions: AuthorizationGrant[] = [];
@@ -322,7 +485,7 @@ export function parseStandingAuthorization(text: string): AuthorizationLoad {
       expiresAt: expiresAt as string,
       revoked: revokedRaw === true,
       reason: reason as string,
-      pin: pin as AuthorizationPin,
+      scope: scope as AuthorizationScope,
       decisions,
       failures,
     },
@@ -374,17 +537,28 @@ export function licenseStandingConfirmation(input: StandingLicenceInput): Standi
   const refusals: string[] = [];
   const now = input.now ?? new Date();
 
-  // The pin first: it licenses ONE revision of ONE document, and a check about decisions is meaningless
-  // once the document is not the one that was signed.
-  if (normalizeRef(authorization.pin.ref) !== normalizeRef(input.documentRef)) {
+  // The SCOPE first: a check about decisions is meaningless once the document is not one the human's
+  // signed grant reaches. The two forms ask two different questions — a pin binds ONE revision of ONE
+  // document, a family binds every document its globs name — and both are answered here, before anything
+  // else is looked at. The wider form widens WHICH DOCUMENTS are in reach; every exclusion below is the
+  // same for both.
+  if (authorization.scope.form === 'pin') {
+    const { pin } = authorization.scope;
+    if (normalizeRef(pin.ref) !== normalizeRef(input.documentRef)) {
+      refusals.push(
+        `the authorization pins "${pin.ref}", and this document is "${input.documentRef}": a pin confirms the one document it names, never a family`,
+      );
+    }
+    const digest = requirementDigest(input.documentText);
+    if (digest !== pin.digest) {
+      refusals.push(
+        `the document has changed since the authorization was signed: the pin is sha256:${pin.digest} and "${input.documentRef}" now hashes to sha256:${digest} — read the document again and sign a new pin`,
+      );
+    }
+  } else if (!documentMatchesScope(authorization, input.documentRef)) {
+    const patterns = authorization.scope.documents.map((pattern) => `"${pattern}"`).join(', ');
     refusals.push(
-      `the authorization pins "${authorization.pin.ref}", and this document is "${input.documentRef}": a standing authorization confirms the one document it pins, never a family`,
-    );
-  }
-  const digest = requirementDigest(input.documentText);
-  if (digest !== authorization.pin.digest) {
-    refusals.push(
-      `the document has changed since the authorization was signed: the pin is sha256:${authorization.pin.digest} and "${input.documentRef}" now hashes to sha256:${digest} — read the document again and sign a new pin`,
+      `the authorization's scope covers ${patterns}, and this document is "${input.documentRef}": a scope confirms the documents its globs name, and nothing else — widen the scope in a signed commit, or confirm from a terminal`,
     );
   }
   if (authorization.revoked) {

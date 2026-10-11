@@ -1,7 +1,9 @@
 # A standing authorization: signed once, auditable afterwards (design)
 
-Status: design for the operator to approve or reject. Nothing here is implemented. This document is the
-only artefact of this workstream; no code, no ADR, no requirement document is changed by it.
+Status: v1 (pin-only) is IMPLEMENTED and green — `packages/core/src/standing-authorization.ts`, the
+`--authorization` path in `apps/cli/src/requirement-command.ts`, and ADR-045. §12 records the wider,
+SELECTABLE scope — a family of documents by glob — which is now implemented as well. Sections 1–11 are
+the design record for the operator; §12 is the one place the shipped shape and this design are reconciled.
 
 Related: ADR-025 (a confirmed requirement and an acceptance bound to it), ADR-027 (a bounded-choice
 confirmation), ADR-028 (a decision is only real if it is checked), ADR-029 (the failure comes back),
@@ -387,6 +389,10 @@ Described, not written:
   the fix that unblocks intake automation — alongside the existing `judge-vocabulary.test.ts` sync tests.
 - **The cross-check.** A run handed an authorization whose digest differs from the one cited in the
   document's `confirmation:` block refuses by name.
+- **The selectable scope (§12).** A `scope` (family) authorization loads and licenses a document its globs
+  reach; a document outside them is refused with the file byte-identical; both forms declared together, or
+  neither, is refused by name; a glob that leaves the repository or reaches `docs/authorizations/` is
+  refused by name; and every exclusion in this list holds for the family form exactly as for the pin.
 
 ## 9. Where this extends or contradicts an existing ADR
 
@@ -455,6 +461,9 @@ Described, not written:
    with `signedBy` a name and not an identity (ADR-018) — OR a stricter form that also pins one document
    digest (`pin: {ref, digest}`), so an authorization licenses exactly one document and never a family.
    The scope form is what makes the chain unattended; the pin form is what makes it safest. Which ships?
+   **DECIDED: both ship, and the human selects (§12).** v1 landed the `pin` form; §12 adds the `scope`
+   form and makes the choice explicit in the file — exactly one of `pin` / `scope`, never both, never
+   neither. The form written IS the mode.
 2. **Which failure classes an authorization may act on.** This design licenses `implementation-changes`
    only, mapped to ADR-034's repair loop with a bounded extra-round budget, and refuses `answer-wrong`
    and `check-at-fault` at load. Confirm that split — and decide whether an authorization may spend extra
@@ -470,3 +479,74 @@ Described, not written:
    carry it on both nodes). Fix the intake prompt and prove it with a test, or accept the mode on the
    relation as a second reading (rejected here — two places for one fact)? Nothing in this design runs
    unattended until this is chosen.
+
+## 12. The wider scope: a family of documents, selectable (implemented)
+
+§11's first decision is closed: the authorization is not pin-only. It has two scope forms, the human
+SELECTS one, and the form written in the file IS the mode — one mechanism, two forms, no flag, no second
+command, no second validator. This is the one section where the SHIPPED shape is stated exactly, because
+the implementation (§1's `scope:` sketch, flattened) and the design have to agree.
+
+```yaml
+# Form 1 — a PIN: one revision of one document ("signed once").
+pin:
+  ref: "docs/requirements/intake.yaml"
+  digest: "sha256:…"          # the revision a human read; a byte changed after signing is refused
+
+# Form 2 — a SCOPE: a family of requirement documents ("unattended").
+scope:
+  documents:
+    - "docs/requirements/intake.yaml"
+    - "docs/requirements/poc-*.yaml"
+```
+
+`decisions` and `failures` are unchanged and sit BESIDE whichever form is chosen; they are not nested
+inside `scope` (the §1 sketch nested them, and the implementation flattened them — this is the
+reconciliation, and it is the shipped shape).
+
+- **Exactly one form, never both, never neither.** A file declaring both `pin` and `scope` is refused at
+  load — *"it selects exactly ONE scope form"* — and so is a file declaring neither. The refusal is by
+  name, because a grant whose edges a reader cannot see is a grant they cannot revoke with confidence.
+- **The glob vocabulary is tiny and predictable**, because a scope a human cannot predict is a scope they
+  cannot sign: `*` matches any run of characters EXCEPT `/` (so `poc-*.yaml` stays inside one directory);
+  `**` matches any run INCLUDING `/`; `?` matches exactly one character except `/`; every other character
+  is literal. There is no dependency and no hidden syntax.
+- **A glob may only name a requirement document inside the repository.** A pattern that is absolute, walks
+  out with `..`, carries a backslash, does not end in `.yaml`/`.yml`, or reaches `docs/authorizations/` is
+  refused at load, BY NAME. The last is §3's self-referential guard: an authorization may not confirm
+  another authorization, so a scope that could reach one is refused rather than trusted.
+- **The exclusions are IDENTICAL for both forms.** §3's rule — it licenses an ANSWER THE DOCUMENT ALREADY
+  OFFERS, never a CHANGE THE DOCUMENT DOES NOT CONTAIN — is untouched. A `human: true` decision, a
+  blocking decision with no `default:`, a class outside the vocabulary, a refused failure closure, an open
+  acceptance failure, an expired or revoked grant: each refuses the confirmation the SAME way under a
+  `scope` as under a `pin`. The wider form widens WHICH DOCUMENTS are in reach, never what may be written
+  into one.
+- **The trade-off, stated plainly.** A `pin` binds a REVISION: a document changed by a byte after signing
+  is refused, so the exact text a human read is the exact text that gets defaulted. A `scope` binds a
+  CLASS of documents: there is no per-document digest to pin, so a document edited after signing is still
+  confirmable. What binds the run in BOTH cases is the document's OWN confirmation token (ADR-025) — the
+  digest the acceptance checks — and under a `scope` the review before signing (§7) is the human's act.
+  This is exactly why §11 called the pin form "safest" and the scope form "unattended"; the human chooses
+  which one they are signing, and the file says which.
+- **The audit trail is unchanged.** The `confirmation:` block still cites the authorization's own
+  `ref@sha256:<digest>` (§4); the form is readable from the file that digest names, so a later reader can
+  tell a pin from a family without a new field. `defaulted:` still names every answer nobody read. The
+  record's job — telling a human's confirmation from an authorization's, and naming what nobody read — is
+  identical for both forms.
+
+### What the tests pin (all of it driving the real confirmation path)
+
+- A family authorization loads, and `documentMatchesScope` answers for it: a matching path is in, a
+  non-matching path is out, and `*` does not cross a `/`.
+- Declaring BOTH forms, or NEITHER, is refused by name; the `scope` block is a closed shape (an unknown
+  or widening key inside it is refused by name).
+- A scope glob that is absolute, walks out with `..`, is not YAML, or reaches `docs/authorizations/` is
+  refused by name.
+- **The real path.** `takumi requirement confirm <ref> --authorization <scope-file>` with a NON-TTY stdin
+  confirms a document its globs reach — it writes each decision's own `default:`, appends the same
+  `confirmation:` block, and prints the document's own token — and refuses a document outside the globs
+  with the file BYTE-IDENTICAL and no token. `--dry-run` runs the same check and writes nothing.
+- **The same fail-closed exclusions** (class not granted, `human: true`, no default, open failure, expiry,
+  revocation) hold under the family form exactly as under the pin — the wider form is wider only in WHICH
+  DOCUMENTS it reaches.
+

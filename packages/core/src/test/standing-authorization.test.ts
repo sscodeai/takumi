@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   authorizationDigest,
+  documentMatchesScope,
   licenseStandingConfirmation,
   parseStandingAuthorization,
   readRequirementConfirmation,
@@ -107,6 +108,33 @@ function authText(doc: string, mutate: (lines: string[]) => string[] = (l) => l)
   return mutate(base).join('\n');
 }
 
+/** The authorization file for the FAMILY form: a `scope` over globs, and no pin. */
+function familyAuthText(mutate: (lines: string[]) => string[] = (l) => l): string {
+  const base = [
+    'id: SA-002',
+    'signedBy: "moon"',
+    'signedAt: "2026-10-11T00:00:00Z"',
+    'expiresAt: "2026-11-11T00:00:00Z"',
+    'revoked: false',
+    'reason: "unattended intake for the station-summary family"',
+    'scope:',
+    '  documents:',
+    `    - "${DOC_REF}"`,
+    '    - "docs/requirements/poc-*.yaml"',
+    'decisions:',
+    '  - class: malformed-row-accounting',
+    '    policy: document-default',
+    '  - class: duplicate-resolution',
+    '    policy: document-default',
+    '  - class: unmechanised',
+    '    policy: document-default',
+    'failures:',
+    '  - class: implementation-changes',
+    '',
+  ];
+  return mutate(base).join('\n');
+}
+
 function load(text: string) {
   return parseStandingAuthorization(text);
 }
@@ -121,13 +149,13 @@ function loaded(text: string) {
 
 // --- what it IS ---------------------------------------------------------------------------------
 
-test('a standing authorization is one committed pin, plus the classes it may default', () => {
+test('a standing authorization is one committed scope, plus the classes it may default', () => {
   const authorization = loaded(authText(DOC));
   assert.equal(authorization.id, 'SA-001');
   assert.equal(authorization.signedBy, 'moon');
   assert.equal(authorization.revoked, false);
-  assert.equal(authorization.pin.ref, DOC_REF);
-  assert.equal(authorization.pin.digest, requirementDigest(DOC));
+  // The scope form written IS the mode: this fixture selected the PIN form.
+  assert.deepEqual(authorization.scope, { form: 'pin', pin: { ref: DOC_REF, digest: requirementDigest(DOC) } });
   assert.deepEqual(
     authorization.decisions.map((d) => [d.class, d.policy]),
     [
@@ -160,7 +188,8 @@ test('a class outside the project vocabulary is refused at load, by name', () =>
 
 test('a field that would WIDEN the licensable set is refused at load, by name', () => {
   const widenings: [string, string[]][] = [
-    ['scope.documents', ['scope:', '  documents:', `    - "${DOC_REF}"`]],
+    ['documents', ['documents:', `  - "${DOC_REF}"`]],
+    ['paths', ['paths:', `  - "${DOC_REF}"`]],
     ['allowProtectedPaths', ['allowProtectedPaths: true']],
     ['anyDecision', ['anyDecision: true']],
     ['override', ['override: "confirm everything"']],
@@ -170,7 +199,7 @@ test('a field that would WIDEN the licensable set is refused at load, by name', 
     assert.equal(result.authorization, undefined, `${name} must refuse the file`);
     assert.equal(result.issues.length, 1, `${name}: one issue, naming itself`);
     assert.match(result.issues[0] ?? '', new RegExp(name.split('.')[0] ?? name), `${name} must be named`);
-    assert.match(result.issues[0] ?? '', /widen|pin/i);
+    assert.match(result.issues[0] ?? '', /widen/i);
   }
 });
 
@@ -222,6 +251,81 @@ test('an unknown policy, a duplicate class and a missing pin are each refused by
   const noPin = load(authText(DOC, (lines) => lines.filter((line) => !/^  (ref|digest):/.test(line) && line !== 'pin:')));
   assert.equal(noPin.authorization, undefined);
   assert.match(noPin.issues.join(' '), /pin/);
+});
+
+// --- the SCOPE is a choice: a pin or a family, and exactly one ------------------------------------
+
+test('the scope is SELECTABLE: a family form loads, and names the documents its globs cover', () => {
+  const authorization = loaded(familyAuthText());
+  assert.equal(authorization.scope.form, 'documents');
+  assert.deepEqual(authorization.scope.form === 'documents' ? authorization.scope.documents : [], [
+    DOC_REF,
+    'docs/requirements/poc-*.yaml',
+  ]);
+  // The glob vocabulary is small and predictable: `*` stays inside a directory, `**` crosses one.
+  assert.equal(documentMatchesScope(authorization, DOC_REF), true);
+  assert.equal(documentMatchesScope(authorization, './docs/requirements/intake.yaml'), true, 'a leading ./ is the same ref');
+  assert.equal(documentMatchesScope(authorization, 'docs/requirements/poc-mutation-detection.yaml'), true);
+  assert.equal(documentMatchesScope(authorization, 'docs/requirements/nested/poc-x.yaml'), false, '`*` does not cross a slash');
+  assert.equal(documentMatchesScope(authorization, 'docs/requirements/other.yaml'), false);
+});
+
+test('declaring BOTH scope forms, or NEITHER, is refused at load by name', () => {
+  // The base already carries a `pin`; a `scope` beside it selects two forms at once.
+  const both = load(`${authText(DOC)}scope:\n  documents:\n    - "docs/requirements/poc-*.yaml"\n`);
+  assert.equal(both.authorization, undefined, 'both forms must refuse the file');
+  assert.equal(both.issues.length, 1, 'one issue: the file selected two forms, not two separate problems');
+  assert.match(both.issues[0] ?? '', /BOTH/i);
+  assert.match(both.issues[0] ?? '', /pin/);
+  assert.match(both.issues[0] ?? '', /scope/);
+
+  const neither = load(authText(DOC, (lines) => lines.filter((line) => !/^  (ref|digest):/.test(line) && line !== 'pin:')));
+  assert.equal(neither.authorization, undefined, 'no form must refuse the file');
+  assert.match(neither.issues.join(' '), /no scope/);
+  assert.match(neither.issues.join(' '), /pin/);
+  assert.match(neither.issues.join(' '), /scope/);
+});
+
+test('the scope block is a CLOSED shape: an unknown or widening key inside it is refused by name', () => {
+  const unknown = load(
+    familyAuthText((lines) =>
+      lines.flatMap((line) =>
+        line === '    - "docs/requirements/poc-*.yaml"' ? [line, '  minDigest: "deadbeef"'] : [line],
+      ),
+    ),
+  );
+  assert.equal(unknown.authorization, undefined);
+  assert.match(unknown.issues.join(' '), /minDigest/);
+  assert.match(unknown.issues.join(' '), /not a field of a scope/);
+
+  const widening = load(
+    familyAuthText((lines) =>
+      lines.flatMap((line) =>
+        line === '    - "docs/requirements/poc-*.yaml"' ? [line, '  allowProtectedPaths: true'] : [line],
+      ),
+    ),
+  );
+  assert.equal(widening.authorization, undefined);
+  assert.match(widening.issues.join(' '), /allowProtectedPaths/);
+  assert.match(widening.issues.join(' '), /widen/i);
+});
+
+test('a scope glob that leaves the repository, or reaches the authorizations, is refused by name', () => {
+  const cases: [string, RegExp][] = [
+    ['/etc/requirements/x.yaml', /absolute/i],
+    ['../docs/requirements/x.yaml', /walks out|\.\./],
+    ['docs/requirements/anything', /YAML|\.yaml/],
+    ['docs/authorizations/*.yaml', /authorizations|self-referential/i],
+    ['**/*.yaml', /authorizations|self-referential/i],
+  ];
+  for (const [pattern, why] of cases) {
+    const result = load(
+      familyAuthText((lines) => lines.map((line) => (line === '    - "docs/requirements/poc-*.yaml"' ? `    - "${pattern}"` : line))),
+    );
+    assert.equal(result.authorization, undefined, `${pattern} must refuse the file`);
+    assert.match(result.issues.join(' '), new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${pattern} must be named`);
+    assert.match(result.issues.join(' '), why);
+  }
 });
 
 // --- what it may license ------------------------------------------------------------------------
@@ -345,6 +449,102 @@ test('expiry, revocation and a document that changed since it was signed are ref
   });
   assert.deepEqual(otherDoc.defaulted, []);
   assert.match(otherDoc.refusals.join('\n'), /other\.yaml/);
+});
+
+test('the FAMILY form licenses a document its globs reach, exactly as the pin form licenses it', () => {
+  const authorization = loaded(familyAuthText());
+  const licence = licenseStandingConfirmation({ authorization, documentRef: DOC_REF, documentText: DOC });
+  assert.deepEqual(licence.refusals, []);
+  assert.deepEqual(
+    licence.defaulted.map((d) => [d.id, d.class, d.chosen]),
+    [
+      ['AMB-001', 'malformed-row-accounting', 'skip-count: skipped and counted on a SKIPPED line'],
+      ['AMB-002', 'duplicate-resolution', 'merge: every occurrence counts as its own reading'],
+      ['AMB-003', UNMECHANISED_CLASS, 'ascending station id'],
+    ],
+  );
+});
+
+test('a document the FAMILY form does not reach STOPS it, and the refusal names the globs', () => {
+  const authorization = loaded(familyAuthText());
+  const licence = licenseStandingConfirmation({ authorization, documentRef: 'docs/requirements/other.yaml', documentText: DOC });
+  assert.deepEqual(licence.defaulted, [], 'nothing is defaulted for a document out of the family');
+  assert.match(licence.refusals.join('\n'), /other\.yaml/);
+  assert.match(licence.refusals.join('\n'), /poc-\*\.yaml/);
+});
+
+test('the FAMILY form binds a document CLASS, not a revision: an edit after signing still confirms', () => {
+  // The honest trade-off the wider form records. A pin refuses a byte changed after signing; a family
+  // scope has no per-document digest to pin, so the binding is the document's OWN token (ADR-025), which
+  // the confirmation block carries. That is why the pin form is "safest" and the family is "unattended".
+  const authorization = loaded(familyAuthText());
+  const edited = DOC.replace('    blocking: false', '    blocking: false\n    # a human edited this after signing');
+  const licence = licenseStandingConfirmation({ authorization, documentRef: DOC_REF, documentText: edited });
+  assert.deepEqual(licence.refusals, []);
+  assert.equal(licence.defaulted.length, 3);
+});
+
+test('the SAME fail-closed exclusions hold for the FAMILY form', () => {
+  const authorization = loaded(familyAuthText());
+
+  // A decision class the scope does not grant.
+  const ungranted = loaded(
+    familyAuthText((lines) => lines.filter((line) => line !== '  - class: duplicate-resolution' && line !== '    policy: document-default')),
+  );
+  const ungrantedLicence = licenseStandingConfirmation({ authorization: ungranted, documentRef: DOC_REF, documentText: DOC });
+  assert.deepEqual(ungrantedLicence.defaulted, []);
+  assert.match(ungrantedLicence.refusals.join('\n'), /AMB-002/);
+  assert.match(ungrantedLicence.refusals.join('\n'), /duplicate-resolution/);
+
+  // A decision marked human: true.
+  const humanDoc = DOC.replace('    checkedAs: merge\n', '    checkedAs: merge\n    human: true\n');
+  const humanLicence = licenseStandingConfirmation({ authorization, documentRef: DOC_REF, documentText: humanDoc });
+  assert.deepEqual(humanLicence.defaulted, []);
+  assert.match(humanLicence.refusals.join('\n'), /AMB-002/);
+  assert.match(humanLicence.refusals.join('\n'), /human/i);
+
+  // A decision with no default.
+  const noDefaultDoc = DOC.replace('    default: "ascending station id"\n', '');
+  const noDefaultLicence = licenseStandingConfirmation({ authorization, documentRef: DOC_REF, documentText: noDefaultDoc });
+  assert.deepEqual(noDefaultLicence.defaulted, []);
+  assert.match(noDefaultLicence.refusals.join('\n'), /AMB-003/);
+  assert.match(noDefaultLicence.refusals.join('\n'), /default/);
+
+  // An open acceptance failure.
+  const withFailure = [
+    DOC,
+    'feedback:',
+    '  - id: FB-001',
+    '    at: "2026-10-01T00:00:00.000Z"',
+    '    run: "wf-deadbeef"',
+    '    requirementDigest: "aaaa"',
+    '    judgeDigest: "sha256:bbbb"',
+    '    status: open',
+    '    checks:',
+    '      - "REL-002 duplicate-resolution: the chosen option \\"merge\\" does not hold"',
+    '',
+  ].join('\n');
+  const failureLicence = licenseStandingConfirmation({ authorization, documentRef: DOC_REF, documentText: withFailure });
+  assert.deepEqual(failureLicence.defaulted, []);
+  assert.match(failureLicence.refusals.join('\n'), /FB-001/);
+  assert.match(failureLicence.refusals.join('\n'), /failure/i);
+});
+
+test('expiry and revocation are the SAME refusals for the FAMILY form', () => {
+  const authorization = loaded(familyAuthText());
+  const expired = licenseStandingConfirmation({
+    authorization,
+    documentRef: DOC_REF,
+    documentText: DOC,
+    now: new Date('2026-12-01T00:00:00Z'),
+  });
+  assert.deepEqual(expired.defaulted, []);
+  assert.match(expired.refusals.join('\n'), /expired/i);
+
+  const revoked = loaded(familyAuthText((lines) => lines.map((line) => (line === 'revoked: false' ? 'revoked: true' : line))));
+  const revokedLicence = licenseStandingConfirmation({ authorization: revoked, documentRef: DOC_REF, documentText: DOC });
+  assert.deepEqual(revokedLicence.defaulted, []);
+  assert.match(revokedLicence.refusals.join('\n'), /revoked/i);
 });
 
 // --- the audit trail ----------------------------------------------------------------------------

@@ -8,14 +8,17 @@ import { authorizationDigest, requirementDigest, validateRequirementDocument } f
 import { runRequirementCommand } from '../requirement-command.js';
 
 /**
- * The standing authorization at the REAL confirmation path (ADR-045, pin-only v1).
+ * The standing authorization at the REAL confirmation path (ADR-045).
  *
  * These tests drive `takumi requirement confirm <ref> --authorization <ref>` with a NON-TTY stdin —
- * the input the command refuses outright today — and pin the two things that make the exception safe:
+ * the input the command refuses outright today — for BOTH scope forms the human may select:
  *   * a covered document is confirmed non-interactively, writes its own defaults, and prints the same
  *     token an interactive confirmation would (the token is the document's, unchanged, ADR-025); and
  *   * a document the authorization does not cover is refused BY NAME with nothing written — the
  *     refusal is the feature, so the load-bearing assertion is that the file is byte-identical.
+ *
+ * The scope is a choice, not two products: `pin` licenses one revision of one document; `scope` licenses
+ * a family of documents by glob. The exclusions are the same for both.
  */
 
 const DOC_REF = 'docs/requirements/intake.yaml';
@@ -88,6 +91,32 @@ function authText(doc: string, mutate: (lines: string[]) => string[] = (l) => l)
     'pin:',
     `  ref: "${DOC_REF}"`,
     `  digest: "${requirementDigest(doc)}"`,
+    'decisions:',
+    '  - class: malformed-row-accounting',
+    '    policy: document-default',
+    '  - class: duplicate-resolution',
+    '    policy: document-default',
+    '  - class: unmechanised',
+    '    policy: document-default',
+    'failures:',
+    '  - class: implementation-changes',
+    '',
+  ]).join('\n');
+}
+
+/** The FAMILY-form authorization: a `scope` over globs, and no pin (the wider form). */
+function familyAuthText(mutate: (lines: string[]) => string[] = (l) => l): string {
+  return mutate([
+    'id: SA-001',
+    'signedBy: "moon"',
+    'signedAt: "2026-10-11T00:00:00Z"',
+    'expiresAt: "2099-11-11T00:00:00Z"',
+    'revoked: false',
+    'reason: "unattended intake for the station-summary family"',
+    'scope:',
+    '  documents:',
+    `    - "${DOC_REF}"`,
+    '    - "docs/requirements/poc-*.yaml"',
     'decisions:',
     '  - class: malformed-row-accounting',
     '    policy: document-default',
@@ -341,5 +370,76 @@ test('it fills blanks only: an answer a human already wrote is left exactly as i
     assert.ok(!/AMB-002[\s\S]*?defaulted/.test(written), 'the answered decision is not in the defaulted list');
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+// --- the WIDER scope: a family of documents, the same fail-closed path ---------------------------
+
+test('the FAMILY scope confirms a covered document non-interactively: the same block, the same token', async () => {
+  const f = project(DOC, familyAuthText());
+  try {
+    const { code, lines, text } = await confirm(f);
+    assert.equal(code, 0, text);
+
+    const written = readFileSync(f.docPath, 'utf8');
+    // Every open decision gets its OWN default, exactly as the pin form does.
+    assert.match(written, /- id: AMB-001[\s\S]*?chosen: "skip-count: skipped and counted on a SKIPPED line"/);
+    assert.match(written, /- id: AMB-002[\s\S]*?chosen: "merge: every occurrence counts as its own reading"/);
+    assert.match(written, /- id: AMB-003[\s\S]*?chosen: "ascending station id"/);
+    assert.match(written, /# A hand-written requirement document, comments and all\./);
+    // The audit block is the SAME one: who signed, the method, the authorization and its digest.
+    assert.match(written, /^  method: standing-authorization$/m);
+    assert.match(written, /^  by: "moon"$/m);
+    assert.match(written, /SA-001\.yaml/);
+    assert.match(written, new RegExp(authorizationDigest(readFileSync(f.authPath, 'utf8'))));
+    assert.match(written, /^  defaulted:$/m);
+
+    // The token is the digest of the document just written — the same token the pin form prints.
+    const printed = lines.find((l) => l.startsWith('sha256:')) ?? '';
+    assert.equal(printed, `sha256:${requirementDigest(written)}`);
+    assert.deepEqual(validateRequirementDocument(written), [], 'the family confirmation leaves a valid document');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('a document the FAMILY scope does not reach is refused: nothing written, no token', async () => {
+  // The scope names only the poc-*.yaml family, not this document.
+  const f = project(DOC, familyAuthText((lines) => lines.filter((line) => line !== `    - "${DOC_REF}"`)));
+  try {
+    const { code, text } = await confirm(f);
+    assert.equal(code, 1);
+    assert.match(text, /not covered by/);
+    assert.match(text, /poc-\*\.yaml/, 'the refusal names the globs the scope does cover');
+    assert.ok(!text.includes('sha256:'), 'no token for a document out of the family');
+    assert.equal(readFileSync(f.docPath, 'utf8'), DOC, 'the document is byte-identical');
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('a scope glob that reaches the authorizations is refused at load, through the real path', async () => {
+  const f = project(DOC, familyAuthText((lines) => lines.map((line) => (line === `    - "${DOC_REF}"` ? '    - "docs/authorizations/*.yaml"' : line))));
+  try {
+    const { code, text } = await confirm(f);
+    assert.equal(code, 1);
+    assert.match(text, /not a standing authorization/);
+    assert.match(text, /authorizations|self-referential/i);
+    assert.equal(readFileSync(f.docPath, 'utf8'), DOC);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('--dry-run with the FAMILY scope runs the SAME check and writes nothing', async () => {
+  const covered = project(DOC, familyAuthText());
+  try {
+    const { code, text } = await confirm(covered, ['--dry-run']);
+    assert.equal(code, 0, text);
+    assert.equal(readFileSync(covered.docPath, 'utf8'), DOC, '--dry-run never writes');
+    assert.ok(!text.includes('sha256:'), '--dry-run prints no token');
+    assert.match(text, /AMB-001/);
+  } finally {
+    rmSync(covered.dir, { recursive: true, force: true });
   }
 });
