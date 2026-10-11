@@ -15,7 +15,7 @@ import {
 import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
 import { CliRuntimeAdapter } from '@takumi/runtime-cli';
-import { createDeliveryFromSection } from './delivery-command.js';
+import { createDeliveryFromSection, workflowNeedsHost } from './delivery-command.js';
 import type { DeliveryProviderWithReporting, DeliverySection } from './delivery-command.js';
 import { createBoardFromSection } from './board-projection-command.js';
 import type { BoardSection } from './board-projection-command.js';
@@ -439,7 +439,10 @@ export async function runTask(opts: RunOptions): Promise<{
     let delivery: DeliveryProviderWithReporting | undefined;
     const deliverySection = opts.config.delivery;
     if (deliverySection !== undefined) {
-      delivery = await createDeliveryFromSection(deliverySection);
+      // The token is required up front only when this workflow ever TALKS TO THE HOST (ADR-051):
+      // `request-intake` produces a document and stops, and refusing it for a missing GITHUB_TOKEN would
+      // make the front of the chain impossible without a credential the run never uses.
+      delivery = await createDeliveryFromSection(deliverySection, { requireToken: workflowNeedsHost(wf.steps) });
     } else if (publishSteps.length > 0) {
       throw new Error(
         `workflow "${wf.name}" declares a publish step [${publishSteps.join(', ')}] but takumi.yaml has no ` +

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertKnownProviderOptions, createDeliveryProvider } from '../delivery-command.js';
+import { assertKnownProviderOptions, createDeliveryProvider, workflowNeedsHost } from '../delivery-command.js';
 
 // A DELIVERY TOKEN IS RESOLVED BEFORE THE RUN, NOT AFTER IT (measured, 2026-10-11).
 //
@@ -86,4 +86,24 @@ test('delivery token: `tokenEnv` is a configurable key — a secret still never 
 
 test('delivery token: a provider with no API token needs none (the bare-remote `git` provider)', () => {
   assert.doesNotThrow(() => assertKnownProviderOptions({ providerId: 'git', providerOptions: { repo: 'x' } }));
+});
+
+test('delivery token: a workflow that never talks to the host needs no token', () => {
+  // `request-intake` produces a document and stops. Refusing it for a missing GITHUB_TOKEN would make
+  // the FRONT of the chain impossible without a credential the run never uses — which is exactly what
+  // happened on the first headless intake run (2026-10-11), and why the requirement is scoped to the
+  // workflows that reach the host.
+  assert.equal(workflowNeedsHost([{ type: 'agent' }, { type: 'quality_gate' }, { type: 'approval' }]), false);
+  assert.equal(workflowNeedsHost([{ type: 'agent' }, { type: 'publish' }]), true);
+  assert.equal(workflowNeedsHost([{ type: 'await_checks' }]), true);
+  assert.equal(workflowNeedsHost([{ type: 'merge' }]), true);
+});
+
+test('delivery token: a run that never publishes is NOT refused for a missing token', async () => {
+  await withEnv({}, async () => {
+    // The provider is still built (the section exists) but without the up-front refusal: nothing in this
+    // workflow will call it.
+    const provider = await createDeliveryProvider(github(), { requireToken: false });
+    assert.ok(provider, 'the provider is built when the workflow never reaches the host');
+  });
 });

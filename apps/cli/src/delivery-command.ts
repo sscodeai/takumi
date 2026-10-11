@@ -186,10 +186,15 @@ export function assertDeliveryToken(
   providerId: string,
   options: DeliveryCommandOptions,
   env: NodeJS.ProcessEnv = process.env,
+  required = true,
 ): string | undefined {
   const { token, names } = deliveryToken(providerId, options, env);
   if (token !== undefined) return token;
-  if (!TOKEN_REQUIRED.includes(providerId)) return undefined;
+  // A run whose workflow never talks to the host needs no token: `request-intake` produces a document
+  // and stops, and refusing it for a missing GITHUB_TOKEN would make the FRONT of the chain impossible
+  // without a credential the run never uses. Measured on 2026-10-11: the first headless intake run was
+  // refused exactly that way, which is why `required` is a parameter and not a constant.
+  if (!required || !TOKEN_REQUIRED.includes(providerId)) return undefined;
   const named = options.providerOptions['tokenEnv'];
   throw new Error(
     `${providerId}: the delivery section names this provider but no token is configured — set the ` +
@@ -198,6 +203,14 @@ export function assertDeliveryToken(
       ', because the publish step is refused without one AFTER the implementation, the delivered tests ' +
       'and the acceptance have all run, and an unauthenticated request is never sent',
   );
+}
+
+/** The step types that TALK TO THE HOST: a workflow with none of them never uses the provider. */
+export const HOST_STEP_TYPES: readonly string[] = ['publish', 'await_checks', 'merge'];
+
+/** Does this workflow ever reach the host? Its answer decides whether a token is required up front. */
+export function workflowNeedsHost(steps: readonly { type: string }[]): boolean {
+  return steps.some((step) => HOST_STEP_TYPES.includes(step.type));
 }
 
 function required(options: DeliveryCommandOptions, key: string, what: string): string {
@@ -289,7 +302,10 @@ export function githubDeliveryOptions(
  * provider that needs credentials only fails when it is actually asked for — the same shape
  * `createBoardProvider` uses.
  */
-export async function createDeliveryProvider(options: DeliveryCommandOptions): Promise<DeliveryProviderWithReporting> {
+export async function createDeliveryProvider(
+  options: DeliveryCommandOptions,
+  opts: { requireToken?: boolean } = {},
+): Promise<DeliveryProviderWithReporting> {
   // Before anything is built: every option must be one this adapter READS.
   assertKnownProviderOptions(options);
   switch (options.providerId) {
@@ -299,7 +315,7 @@ export async function createDeliveryProvider(options: DeliveryCommandOptions): P
       // token question is asked. Then the token (ADR-051): `forgejo` may legitimately have none, so an
       // unresolvable one is passed as absent and the adapter's own lazy read decides.
       const mapped = forgejoDeliveryOptions(options);
-      const token = assertDeliveryToken(options.providerId, options);
+      const token = assertDeliveryToken(options.providerId, options, process.env, opts.requireToken !== false);
       // The git runner is a PROGRAMMATIC option (never read from config), and it is REQUIRED for the
       // provider to do anything: without it every git call is the fail-closed "no git runner
       // configured" error. The CLI is a real caller, so it injects the real spawn-based runner.
@@ -312,7 +328,7 @@ export async function createDeliveryProvider(options: DeliveryCommandOptions): P
     case 'gitlab': {
       const { createGitLabDeliveryProvider } = await import('@takumi/delivery-gitlab');
       const mapped = gitlabDeliveryOptions(options);
-      const token = assertDeliveryToken(options.providerId, options);
+      const token = assertDeliveryToken(options.providerId, options, process.env, opts.requireToken !== false);
       // The git runner is a PROGRAMMATIC option (never read from config). The GitLab adapter's default is
       // already the real spawn-based runner, but the CLI injects it explicitly so the two adapters are
       // wired identically and a future default change cannot silently leave git unconfigured. The token
@@ -322,7 +338,7 @@ export async function createDeliveryProvider(options: DeliveryCommandOptions): P
     case 'github': {
       const { createGitHubDeliveryProvider } = await import('@takumi/delivery-github');
       const mapped = githubDeliveryOptions(options);
-      const token = assertDeliveryToken(options.providerId, options);
+      const token = assertDeliveryToken(options.providerId, options, process.env, opts.requireToken !== false);
       // Same as GitLab: the runner is injected explicitly, and the token is passed so the named
       // variable is the one that is read.
       return createGitHubDeliveryProvider({ ...mapped, ...(token === undefined ? {} : { token }), git: createGitRunner() });
@@ -333,11 +349,14 @@ export async function createDeliveryProvider(options: DeliveryCommandOptions): P
 }
 
 /** Build the provider named by a `delivery:` section, refusing a section with no provider. */
-export async function createDeliveryFromSection(section: DeliverySection): Promise<DeliveryProviderWithReporting> {
+export async function createDeliveryFromSection(
+  section: DeliverySection,
+  opts: { requireToken?: boolean } = {},
+): Promise<DeliveryProviderWithReporting> {
   if (typeof section.provider !== 'string' || section.provider.trim().length === 0) {
     throw new Error('the `delivery:` section needs a `provider` (e.g. `provider: forgejo`)');
   }
-  return createDeliveryProvider(deliveryOptionsFromSection(section));
+  return createDeliveryProvider(deliveryOptionsFromSection(section), opts);
 }
 
 /**
