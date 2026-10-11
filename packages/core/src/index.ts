@@ -237,6 +237,29 @@ export type { GitRunner, GitResult, GitRunnerOptions } from './git-runner.js';
 export { renderRunMarker, parseRunMarkers, hasRunMarker } from './run-marker.js';
 export { createKeyOf, hasCreateMarker, parseCreateMarkers, renderCreateMarker } from './create-marker.js';
 
+// The run record: one machine-readable file per run, so cost / success rate / the
+// most-failing step are answered from data rather than by reading logs (see run-record.ts).
+export {
+  RUN_RECORD_DIR,
+  formatDuration,
+  readRunRecords,
+  renderRunAggregate,
+  runRecordPath,
+  summarizeRuns,
+  writeRunRecord,
+} from './run-record.js';
+export type {
+  RunAggregate,
+  RunCostAggregate,
+  RunRecord,
+  RunRecordCost,
+  RunRecordPublished,
+  RunRecordStep,
+  RunRecordUnreadable,
+  RunStepFailureCount,
+  RunStepStatus,
+} from './run-record.js';
+
 // Pilot metrics: counters a scheduler's monitoring can scrape.
 export {
   bumpMetrics,

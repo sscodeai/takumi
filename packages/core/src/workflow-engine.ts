@@ -32,6 +32,8 @@ import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { requirementDigest, shortDigest } from './review-digest.js';
 import { appendFeedback, parseFeedback } from './requirement-feedback.js';
+import { writeRunRecord, type RunRecord, type RunRecordStep, type RunStepStatus } from './run-record.js';
+import type { Usage } from './types.js';
 import { parse as parseYamlText } from 'yaml';
 const execAsync = promisify(exec);
 /** Runs a harness FILE without a shell, so a path in a manifest is never a shell string. */
@@ -445,6 +447,36 @@ export async function executeWorkflow(
   };
   const stepResults: WorkflowStepResult[] = [];
   const vars: Record<string, string> = { ...inputVars };
+
+  // --- what the run record needs, collected as the run happens -------------------------------
+  // Per-step wall-clock duration: the start is stamped when a step begins and the finish when
+  // its result is recorded. A step's result is pushed through `pushStep`, so every one of the
+  // loop's branches is timed without touching each branch.
+  const stepStartedAt = new Map<string, number>();
+  const stepDurationMs = new Map<string, number>();
+  const pushStep = (result: WorkflowStepResult): void => {
+    if (!stepDurationMs.has(result.stepId)) {
+      const started = stepStartedAt.get(result.stepId) ?? run.startedAt;
+      stepDurationMs.set(result.stepId, Math.max(0, Date.now() - started));
+    }
+    stepResults.push(result);
+  };
+  /**
+   * The token usage the RUNTIME reported, one entry per agent task that came back with a real
+   * result. A timeout's synthesized usage is NOT collected (it carries `usageUnavailable`): the
+   * runtime never reported it, and recording a zero would read as "free" rather than "unknown".
+   */
+  const usages: Usage[] = [];
+  const collectUsage = (usage: Usage | undefined): void => {
+    if (usage === undefined) return;
+    if ((usage.extra ?? {})['usageUnavailable'] !== undefined) return;
+    usages.push(usage);
+  };
+  // The references the run opened/landed, captured structurally (the step summaries are prose;
+  // a later reader must not have to parse them). Null until a step sets them.
+  let publishedPr: { number: string; url: string } | null = null;
+  let publishedIssue: { number: string } | null = null;
+  let boardRowId: string | null = null;
   /**
    * The document THIS RUN was confirmed against (ADR-025). Every step that names `{requirement}` —
    * in a `requirementRef` or in a prompt — means THAT document, so the name is filled once, here,
@@ -515,6 +547,7 @@ export async function executeWorkflow(
     if (board === undefined) return null;
     try {
       const ref = await board.project({ runId, title: boardItemId, ...input });
+      boardRowId = ref.id;
       return `board: row ${ref.created ? 'created' : 'updated'} (${ref.id}${ref.url.length > 0 ? `, ${ref.url}` : ''})`;
     } catch (e) {
       return `board: COULD NOT be written (${e instanceof Error ? e.message : String(e)}) — the delivery is unaffected; the row is stale`;
@@ -543,6 +576,82 @@ export async function executeWorkflow(
    */
   let pipelineIssueFiled = false;
 
+  /**
+   * Assemble and write the run's machine-readable record: `.takumi/runs/<run-id>.json`.
+   *
+   * WHAT HAPPENS WHEN IT CANNOT BE PRODUCED — the decision this workstream asks for: a PARTIAL
+   * record is written, marked `partial: true` with the reason, rather than failing the run. The
+   * run's outcome is decided by its steps; a record-keeping failure must not rewrite that outcome,
+   * and no file at all would be indistinguishable from a run that never happened — silently
+   * dropping this run out of every future statistic the aggregator computes. If even the partial
+   * write fails (a full disk, a read-only tree), the failure is LOUD on the run's own event channel
+   * and NEVER FATAL, for the same reason.
+   */
+  const writeRecord = (finalStatus: 'completed' | 'failed' | 'cancelled'): void => {
+    const steps: RunRecordStep[] = stepResults.map((s) => ({
+      id: s.stepId,
+      // The step's declared type from the definition; the synthetic `workflow` failure entry
+      // (an error thrown outside any step) has no definition, so it is kinded `workflow`.
+      kind: byId.get(s.stepId)?.type ?? 'workflow',
+      // `completed` is recorded as `done`: the record says what happened, not which enum the
+      // engine happens to use. cancelled/failed/skipped pass through unchanged.
+      status: (s.status === 'completed' ? 'done' : s.status) as RunStepStatus,
+      durationMs: stepDurationMs.get(s.stepId) ?? 0,
+      summary: s.summary,
+    }));
+    const firstFailed = stepResults.find((s) => s.status === 'failed');
+    const models = [...new Set(usages.map((u) => u.model ?? '').filter((m) => m.length > 0))];
+    // COST: the runtime's own numbers, or a plain statement that it reported none. Never a 0 that
+    // would read as "free", and never an omitted field that would read as "not measured".
+    const cost: RunRecord['cost'] =
+      usages.length === 0
+        ? { available: false, why: 'the runtime reports no token usage' }
+        : {
+            available: true,
+            runtimeId: run.runtimeId,
+            models,
+            promptTokens: usages.reduce((n, u) => n + u.promptTokens, 0),
+            completionTokens: usages.reduce((n, u) => n + u.completionTokens, 0),
+            totalTokens: usages.reduce((n, u) => n + u.totalTokens, 0),
+            costUsd: usages.reduce((n, u) => n + u.costUsd, 0),
+            stepsReporting: usages.length,
+          };
+    const finishedAt = run.finishedAt ?? Date.now();
+    const record: RunRecord = {
+      runId,
+      workflow: workflow.name,
+      requirement:
+        ctx.confirmedRequirement === undefined
+          ? null
+          : { ref: ctx.confirmedRequirement.ref, digest: ctx.confirmedRequirement.digest },
+      startedAt: new Date(run.startedAt).toISOString(),
+      finishedAt: new Date(finishedAt).toISOString(),
+      durationMs: Math.max(0, finishedAt - run.startedAt),
+      steps,
+      outcome: finalStatus,
+      // The same mapping the CLI's exit code uses: a failed or cancelled run is not a success.
+      exitCode: finalStatus === 'completed' ? 0 : 1,
+      // "Accepted" here is the run's own completion: no step failed. The JUDGE's verdict, when the
+      // run ran an acceptance, is recorded in the ACCEPT artifact the acceptance step wrote.
+      accepted: finalStatus === 'completed',
+      failure: firstFailed === undefined ? null : { stepId: firstFailed.stepId, message: firstFailed.summary },
+      published: {
+        pullRequest: publishedPr,
+        issue: publishedIssue,
+        mergedSha: vars['mergedHead'] ?? null,
+      },
+      boardRowId,
+      cost,
+    };
+    const result = writeRunRecord(ctx.cwd, record);
+    ctx.onEvent?.(
+      'workflow',
+      result.written
+        ? `run record: ${result.path}`
+        : `run record COULD NOT be written (${result.error ?? 'unknown error'}): the run's outcome is unaffected, but this run will be missing from \`takumi runs\``,
+    );
+  };
+
   try {
     // P2 parallel: pre-execute all no-dependency AGENT steps concurrently.
     // (Independent steps at topo level 0 can run in parallel; their results
@@ -565,6 +674,7 @@ export async function executeWorkflow(
           };
           try {
             const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
+            collectUsage(res.usage);
             if (res.status === 'completed') {
               const art = res.summary ? await ctx.artifacts.write({
                 taskId: task.id, kind: stepArtifactKind(step, stepId.split('_')[0] ?? 'output'),
@@ -578,14 +688,21 @@ export async function executeWorkflow(
             return { stepId, status: 'failed', summary: e instanceof Error ? e.message : String(e), artifacts: [], tests: [] };
           }
         };
+        const batchStart = Date.now();
         const results = await Promise.all(lvl0.map(runOne));
+        // Parallel steps share one wall-clock window: each records the duration of the batch,
+        // which is what the run actually spent on them.
+        const batchMs = Math.max(0, Date.now() - batchStart);
         for (const r of results) {
+          stepDurationMs.set(r.stepId, batchMs);
           preRun.set(r.stepId, r);
           vars[`step.${r.stepId}`] = r.summary;
         }
       }
     }
     for (const stepId of order) {
+      // Stamp the step's start: `pushStep` turns this into the step's recorded duration.
+      stepStartedAt.set(stepId, Date.now());
       const step = byId.get(stepId);
       if (!step) {
         run.stepStatus[stepId] = 'failed';
@@ -596,7 +713,7 @@ export async function executeWorkflow(
       const pre = preRun.get(stepId);
       if (pre) {
         run.stepStatus[stepId] = pre.status;
-        stepResults.push(pre);
+        pushStep(pre);
         if (pre.status === 'completed') done.add(stepId);
         else if (pre.status === 'skipped') skippedIds.add(stepId);
         else failedIds.add(stepId);
@@ -616,7 +733,7 @@ export async function executeWorkflow(
         const because = unmet.some((d) => failedIds.has(d)) ? 'dependency failed' : 'dependency skipped';
         run.stepStatus[stepId] = 'skipped';
         skippedIds.add(stepId);
-        stepResults.push({ stepId, status: 'skipped', summary: `skipped (${because}: ${unmet.join(', ')})`, artifacts: [], tests: [] });
+        pushStep({ stepId, status: 'skipped', summary: `skipped (${because}: ${unmet.join(', ')})`, artifacts: [], tests: [] });
         continue;
       }
 
@@ -625,7 +742,7 @@ export async function executeWorkflow(
       const resumed = ctx.resume?.completed.get(stepId);
       if (resumed) {
         run.stepStatus[stepId] = 'completed';
-        stepResults.push(resumed);
+        pushStep(resumed);
         done.add(stepId);
         ctx.onEvent?.(stepId, `resumed from history (${resumed.status})`);
         continue;
@@ -652,11 +769,13 @@ export async function executeWorkflow(
         if (!approved) {
           run.stepStatus[stepId] = 'failed';
           run.status = 'cancelled';
-          stepResults.push({ stepId, status: 'failed', summary: 'rejected by approver', artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'failed', summary: 'rejected by approver', artifacts: [], tests: [] });
+          run.finishedAt = Date.now();
+          writeRecord('cancelled');
           return { run, steps: stepResults, status: 'cancelled', vars };
         }
         run.stepStatus[stepId] = 'completed';
-        stepResults.push({ stepId, status: 'completed', summary: 'approved', artifacts: [], tests: [] });
+        pushStep({ stepId, status: 'completed', summary: 'approved', artifacts: [], tests: [] });
         done.add(stepId);
         continue;
       }
@@ -682,13 +801,13 @@ export async function executeWorkflow(
             trace: taskTraceFor(step, vars),
           });
           run.stepStatus[stepId] = 'completed';
-          stepResults.push({ stepId, status: 'completed', summary: out, artifacts: [artifact.path], tests: [] });
+          pushStep({ stepId, status: 'completed', summary: out, artifacts: [artifact.path], tests: [] });
           ctx.onEvent?.(stepId, `tool completed (${artifact.path})`);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           run.stepStatus[stepId] = 'failed';
           failedIds.add(stepId);
-          stepResults.push({ stepId, status: 'failed', summary: `tool failed: ${msg}`, artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'failed', summary: `tool failed: ${msg}`, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `tool failed: ${msg}`);
         }
         done.add(stepId);
@@ -738,13 +857,13 @@ export async function executeWorkflow(
         const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${shapeLine}\nreason: ${verdict.reason}\n${out.slice(0, 1200)}`;
         if (gatePassed) {
           run.stepStatus[stepId] = 'completed';
-          stepResults.push({ stepId, status: 'completed', summary, artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'completed', summary, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `quality gate PASSED (${fails} failing)`);
         } else {
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
           failedIds.add(stepId);
-          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `quality gate FAILED (${fails} failing) — workflow aborted`);
         }
         done.add(stepId);
@@ -768,7 +887,7 @@ export async function executeWorkflow(
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
           failedIds.add(stepId);
-          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `repair FAILED: ${summary.split('\n')[0]}`);
         };
         if (ctx.loadWorkflow === undefined) {
@@ -854,7 +973,7 @@ export async function executeWorkflow(
         run.stepStatus[stepId] = accepted ? 'completed' : 'failed';
         if (!accepted) run.status = 'failed';
         if (!accepted) failedIds.add(stepId);
-        stepResults.push({
+        pushStep({
           stepId,
           status: accepted ? 'completed' : 'failed',
           summary,
@@ -905,7 +1024,7 @@ export async function executeWorkflow(
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
           failedIds.add(stepId);
-          stepResults.push({
+          pushStep({
             stepId,
             status: 'failed',
             summary: artifactPath === null ? summary : `${summary}\nrule_review artifact: ${artifactPath}`,
@@ -1037,7 +1156,7 @@ export async function executeWorkflow(
             : `rule_review PASSED: ${notes.length} note(s) in ${baseSha.slice(0, 12)}..${headSha.slice(0, 12)}\n${renderFindingsLines(notes)}`;
         const artifactPath = await writeFindingsArtifact('verdict: PASSED', `${summary}\n\n${renderFindingsLines(findings)}`);
         run.stepStatus[stepId] = 'completed';
-        stepResults.push({
+        pushStep({
           stepId,
           status: 'completed',
           summary: artifactPath === null ? summary : `${summary}\nrule_review artifact: ${artifactPath}`,
@@ -1075,6 +1194,7 @@ export async function executeWorkflow(
           context: { workflowStep: stepId, workflow: workflow.name, independentReview: true },
         };
         const res2 = await runTaskAndCollect(ctx.runtime, reviewTask);
+        collectUsage(res2.usage);
         const parsed = parseReviewVerdict(res2.summary);
         const passed = parsed.verdict === 'pass';
         const kind = step.id.split('_')[0] ?? 'review';
@@ -1093,7 +1213,7 @@ export async function executeWorkflow(
         const summary = passed
           ? `independent review passed (${verdictLine})\n${res2.summary.slice(0, 800)}\nreview artifact: ${artifact.path}`
           : `independent review FAILED (${verdictLine}): ${parsed.error ?? 'the reviewer reported findings'}\n${res2.summary.slice(0, 1500)}\nreview artifact: ${artifact.path}`;
-        stepResults.push({
+        pushStep({
           stepId,
           status: passed ? 'completed' : 'failed',
           summary,
@@ -1130,7 +1250,7 @@ export async function executeWorkflow(
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
           failedIds.add(stepId);
-          stepResults.push({ stepId, status: 'failed', summary: resolved.error, artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'failed', summary: resolved.error, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `judge forge FAILED: ${resolved.error}`);
           done.add(stepId);
           continue;
@@ -1139,7 +1259,7 @@ export async function executeWorkflow(
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
           failedIds.add(stepId);
-          stepResults.push({ stepId, status: 'failed', summary: message, artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'failed', summary: message, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `judge forge FAILED: ${message.split('\n')[0] ?? message}`);
         };
         if (requirementRef.length === 0 || forgeRef.length === 0) {
@@ -1233,7 +1353,7 @@ export async function executeWorkflow(
         vars['judgeDir'] = judgeDir;
         const forgeSummary = `judge forged: ${judgePath} sha256:${shortDigest(judgeDigest)} (outside ${worktreePath})\n${summaryLines}`;
         run.stepStatus[stepId] = 'completed';
-        stepResults.push({ stepId, status: 'completed', summary: forgeSummary, artifacts: [], tests: [] });
+        pushStep({ stepId, status: 'completed', summary: forgeSummary, artifacts: [], tests: [] });
         done.add(stepId);
         ctx.onEvent?.(stepId, `judge forged: ${judgePath} sha256:${shortDigest(judgeDigest)}`);
         continue;
@@ -1261,7 +1381,7 @@ export async function executeWorkflow(
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
           failedIds.add(stepId);
-          stepResults.push({ stepId, status: 'failed', summary: message, artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'failed', summary: message, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `acceptance FAILED: ${message.split('\n')[0] ?? message}`);
         };
 
@@ -1434,7 +1554,7 @@ export async function executeWorkflow(
             ctx.onEvent?.(stepId, `artifact persist failed: ${e instanceof Error ? e.message : String(e)}`);
           }
           run.stepStatus[stepId] = 'completed';
-          stepResults.push({
+          pushStep({
             stepId,
             status: 'completed',
             summary,
@@ -1608,7 +1728,7 @@ export async function executeWorkflow(
           run.status = 'failed';
           failedIds.add(stepId);
         }
-        stepResults.push({ stepId, status: ciResult.status, summary: ciResult.summary, artifacts: ciResult.artifacts, tests: [] });
+        pushStep({ stepId, status: ciResult.status, summary: ciResult.summary, artifacts: ciResult.artifacts, tests: [] });
         ctx.onEvent?.(stepId, ciResult.summary.split('\n')[0] ?? ciResult.summary);
         done.add(stepId);
         continue;
@@ -1714,7 +1834,7 @@ export async function executeWorkflow(
           detail: awaitSummary.split('\n')[0] ?? awaitSummary,
         });
         if (boardLine !== null) awaitSummary = `${awaitSummary}\n${boardLine}`;
-        stepResults.push({ stepId, status: awaitResult.status, summary: awaitSummary, artifacts: [], tests: [] });
+        pushStep({ stepId, status: awaitResult.status, summary: awaitSummary, artifacts: [], tests: [] });
         ctx.onEvent?.(stepId, awaitSummary.split('\n')[0] ?? awaitSummary);
         done.add(stepId);
         continue;
@@ -1733,7 +1853,7 @@ export async function executeWorkflow(
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
           failedIds.add(stepId);
-          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `publish FAILED: ${summary.split('\n')[0]}`);
         };
         const provider = ctx.delivery;
@@ -1799,6 +1919,9 @@ export async function executeWorkflow(
           // `pr` is optional in the port: a bare git remote has a pushed branch and nothing to review. That
           // is reported as what it is — never as a pull request that does not exist.
           const pr = outcome.pr;
+          // Record what was published as DATA, not only as prose: the run record needs the
+          // pull request and the issue as fields a program can read.
+          publishedPr = pr === undefined ? null : { number: pr.number, url: pr.url };
           const lines = [
             pr === undefined
               ? `published ${branch} -> ${baseBranch}: the branch is pushed and this host has no review surface`
@@ -1830,6 +1953,7 @@ export async function executeWorkflow(
                 ].join('\n'),
               });
               issueLine = `issue: ${issue.number} opened (${issue.url})`;
+              publishedIssue = { number: issue.number };
             } catch (e) {
               issueLine = `issue: COULD NOT be opened (${e instanceof Error ? e.message : String(e)}) — the pull request exists; the record does not`;
             }
@@ -1847,7 +1971,7 @@ export async function executeWorkflow(
           });
           if (boardLine !== null) lines.push(`  ${boardLine}`);
           run.stepStatus[stepId] = 'completed';
-          stepResults.push({ stepId, status: 'completed', summary: lines.join('\n'), artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'completed', summary: lines.join('\n'), artifacts: [], tests: [] });
           // The pipeline step judges the head the HOST has, so the reference travels with the run: a later
           // `await_checks` reads the checks of the pull request this step opened rather than guessing.
           if (pr !== undefined) vars['deliveryRef'] = pr.number;
@@ -1885,7 +2009,7 @@ export async function executeWorkflow(
           run.stepStatus[stepId] = 'failed';
           run.status = 'failed';
           failedIds.add(stepId);
-          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          pushStep({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `merge FAILED: ${summary.split('\n')[0] ?? summary}`);
         };
         const provider = ctx.delivery;
@@ -1993,7 +2117,7 @@ export async function executeWorkflow(
         });
         if (boardLine !== null) summaryLines.push(`  ${boardLine}`);
         run.stepStatus[stepId] = 'completed';
-        stepResults.push({ stepId, status: 'completed', summary: summaryLines.join('\n'), artifacts: artifactPaths, tests: [] });
+        pushStep({ stepId, status: 'completed', summary: summaryLines.join('\n'), artifacts: artifactPaths, tests: [] });
         // What a later step needs to know the delivery LANDED: the flag, the commit that landed and the
         // reference it landed on. A step after this one must not have to infer a merge from prose.
         vars['deliveryMerged'] = 'true';
@@ -2038,7 +2162,7 @@ export async function executeWorkflow(
           contentType: 'text/markdown',
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
         });
-        stepResults.push({ stepId, status: 'completed', summary: `delivery bundle ready (${runArtifacts.length} artifacts)`, artifacts: [deliveryArtifact.path], tests: [] });
+        pushStep({ stepId, status: 'completed', summary: `delivery bundle ready (${runArtifacts.length} artifacts)`, artifacts: [deliveryArtifact.path], tests: [] });
         run.stepStatus[stepId] = 'completed';
         ctx.onEvent?.(stepId, `delivery manifest written (${runArtifacts.length} artifacts)`);
         done.add(stepId);
@@ -2066,6 +2190,7 @@ export async function executeWorkflow(
         };
         try {
           const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
+          collectUsage(res.usage);
           // A cancelled task (user abort / hard timeout cancel) should NOT be
           // retried as a failure, and remaining work should stop: cancellation
           // is an explicit control signal, not a transient error (High fix).
@@ -2132,7 +2257,7 @@ export async function executeWorkflow(
       if (stepOutcome) {
         run.stepStatus[stepId] = stepOutcome.status === 'completed' ? 'completed' : 'failed';
         run.stepResults[stepId] = stepOutcome.summary;
-        stepResults.push(stepOutcome);
+        pushStep(stepOutcome);
         if (stepOutcome.status === 'completed') done.add(stepId);
         // Expose step summary to later steps via {step.<id>} var.
         vars[`step.${stepId}`] = stepOutcome.summary;
@@ -2150,13 +2275,16 @@ export async function executeWorkflow(
 
     run.status = failedIds.size > 0 ? 'failed' : 'completed';
     run.finishedAt = Date.now();
+    writeRecord(run.status);
     return { run, steps: stepResults, status: run.status, vars };
   } catch (e) {
     run.status = 'failed';
     run.finishedAt = Date.now();
     if (e instanceof Error) {
-      stepResults.push({ stepId: 'workflow', status: 'failed', summary: e.message, artifacts: [], tests: [] });
+      pushStep({ stepId: 'workflow', status: 'failed', summary: e.message, artifacts: [], tests: [] });
     }
+    // A run that threw still happened: record it before the error leaves the engine.
+    writeRecord('failed');
     throw e;
   }
 }
