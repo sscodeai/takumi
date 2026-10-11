@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -246,4 +246,52 @@ test('service: the forge carries the same floor and default the front door does'
 
   // And the forge actually applies the bound to the invocation of the deliverable.
   assert.match(forge, /RUN_OUT=\$\( \( cd "\$WORKTREE" && timeout "\$RUN_TIMEOUT_S" sh -c "\$cmd" \) 2>&1 \)/, 'run_tool runs the deliverable under `timeout`');
+});
+
+// --- the forge is a second gate, not a second opinion ------------------------------------------
+
+const FORGE = join(dirname(fileURLToPath(import.meta.url)), '../../../../extensions/judges/metamorphic-forge.sh');
+
+/** Run the REAL forge against `doc` in a throwaway project, and return its status and combined output. */
+function forgeDocument(doc: string): { status: number; out: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-forge-gate-'));
+  try {
+    const worktree = join(dir, 'worktree');
+    const judgeDir = join(dir, 'judge');
+    mkdirSync(join(dir, 'docs/requirements'), { recursive: true });
+    mkdirSync(worktree, { recursive: true });
+    mkdirSync(judgeDir, { recursive: true });
+    writeFileSync(join(dir, 'docs/requirements/poc.yaml'), doc);
+    const res = spawnSync('bash', [FORGE], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        TAKUMI_REQUIREMENT: 'docs/requirements/poc.yaml',
+        TAKUMI_PROJECT: dir,
+        TAKUMI_WORKTREE: worktree,
+        TAKUMI_JUDGE_DIR: judgeDir,
+      },
+      encoding: 'utf8',
+    });
+    return { status: res.status ?? -1, out: `${res.stdout ?? ''}${res.stderr ?? ''}` };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('service: the FORGE refuses build/tests too, so a document cannot reach a judge with a key nobody reads', () => {
+  // The control: the same document WITHOUT the dead key forges cleanly, so the refusal below is about the
+  // key and not about the fixture.
+  const control = forgeDocument(DOC());
+  assert.equal(control.status, 0, `the control document must forge (${control.out})`);
+
+  for (const key of ['build', 'tests'] as const) {
+    const r = forgeDocument(DOC([`  ${key}: "bash ${key}.sh"`]));
+    assert.notEqual(r.status, 0, `the forge must refuse deliverable.${key}`);
+    assert.match(
+      r.out,
+      new RegExp(`the deliverable block declares ${key}, which nothing in the chain reads or runs`),
+      r.out,
+    );
+  }
 });

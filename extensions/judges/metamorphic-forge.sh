@@ -101,6 +101,24 @@ fi
 RUN_TIMEOUT_S=$(( RUN_TIMEOUT_MS / 1000 ))
 [ "$RUN_TIMEOUT_S" -ge 1 ] || RUN_TIMEOUT_S=1
 
+# --- the deliverable keys nothing reads (ADR-046) ------------------------------------------------
+# `deliverable.build` and `deliverable.tests` are DEAD TEXT: the delivered project's own tests are run
+# from the WORKFLOW's `testCommand`, and no install/build step exists anywhere in the chain. The front
+# door refuses both; the forge refuses them too, so a document that reached a judge WITHOUT passing the
+# front door cannot have a key silently ignored — a declaration that is never executed reads as
+# compliance, which is the defect this refusal removes.
+for deadkey in build tests; do
+  if awk -v k="$deadkey" '
+    function ind(s) { match(s, /^[ ]*/); return RLENGTH }
+    /^[[:space:]]*deliverable:[[:space:]]*$/ { ind_d = 1; di = ind($0); next }
+    ind_d && $0 ~ /^[[:space:]]*[a-zA-Z_]+:[[:space:]]*$/ && ind($0) <= di { ind_d = 0; next }
+    ind_d && ind($0) == di + 2 && $0 ~ ("^[[:space:]]*" k ":[[:space:]]*") { f = 1 }
+    END { exit f ? 0 : 1 }
+  ' "$DOC"; then
+    refuse "the deliverable block declares $deadkey, which nothing in the chain reads or runs: a declaration that is never executed reads as compliance, which is worse than a refusal — either wire it as a real step or remove it (the delivered project's own tests are run from the workflow's testCommand, not from deliverable.tests)"
+  fi
+done
+
 # relations / anchors: `id relation` (the check ids, and what kind each one is) and, separately,
 # `id decides` (which decision that check exercises).
 RELATIONS=$(awk '
