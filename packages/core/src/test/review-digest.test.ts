@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  NO_REQUIREMENT,
   REVIEWER_DETERMINISTIC_RULES,
   REVIEW_RULESET_ID,
   policyHash,
+  requirementDigest,
   reviewDigest,
   rulesetHash,
   shortDigest,
@@ -21,6 +23,7 @@ const inputs = {
   policy: policyHash({ reviewMode: 'rules' }),
   ruleset: rulesetHash({ protectedPaths: ['ci/**'] }),
   reviewer: REVIEWER_DETERMINISTIC_RULES,
+  requirement: requirementDigest('requirements:\n  - id: REQ-001\n    title: One thing\n'),
 };
 
 test('review digest: the same inputs give the same digest, and every input changes it', () => {
@@ -33,10 +36,30 @@ test('review digest: the same inputs give the same digest, and every input chang
     policy: policyHash({ reviewMode: 'checks-only' }),
     ruleset: rulesetHash({ protectedPaths: ['ci/**', 'deps/**'] }),
     reviewer: 'reviewer:model@x',
+    requirement: requirementDigest('requirements:\n  - id: REQ-001\n    title: A DIFFERENT thing\n'),
   })) {
     assert.notEqual(reviewDigest({ ...inputs, [key]: value }), digest, `${key} must be part of the digest`);
   }
   assert.equal(shortDigest(digest), digest.slice(0, 12));
+});
+
+test('requirement digest: an editor saving the file differently does not invalidate a confirmation', () => {
+  const doc = 'requirements:\n  - id: REQ-001\n';
+  const digest = requirementDigest(doc);
+  // The same document, saved by a different tool: CRLF endings, trailing blank lines.
+  assert.equal(requirementDigest('requirements:\r\n  - id: REQ-001\r\n\r\n'), digest);
+  // A change to what the document SAYS is a different digest, however small.
+  assert.notEqual(requirementDigest('requirements:\n  - id: REQ-001\n  - id: REQ-002\n'), digest);
+  assert.notEqual(requirementDigest('requirements:\n  - id: REQ-001\n    priority: High\n'), digest);
+});
+
+test('requirement digest: having no requirement is a value, not an absence', () => {
+  // A delivery that later gains a requirement must change the digest, so "none" cannot be
+  // `undefined` (indistinguishable from a field nobody filled in).
+  const without = reviewDigest({ ...inputs, requirement: NO_REQUIREMENT });
+  const withOne = reviewDigest(inputs);
+  assert.notEqual(without, withOne);
+  assert.notEqual(NO_REQUIREMENT, '');
 });
 
 test('the deterministic reviewer is NAMED after the rule set it runs, not maintained beside it', () => {
@@ -70,6 +93,7 @@ test('staleReviewReason: the three answers, and no fourth', () => {
     policy: inputs.policy,
     ruleset: inputs.ruleset,
     reviewer: inputs.reviewer,
+    requirement: inputs.requirement,
     at: '2026-09-16T00:00:00.000Z',
   };
   const withDelivery = (reviewed?: BoardStateRecord['reviewed']): BoardStateRecord => ({
@@ -101,4 +125,14 @@ test('staleReviewReason: the three answers, and no fourth', () => {
   const why = staleReviewReason(withDelivery(other), current, approve);
   assert.match(String(why), /different inputs/);
   assert.match(String(why), /policy changed/);
+  // 5. the REQUIREMENT was edited after the review (ADR-025): refused, and the reason names it.
+  //    This is the whole point of binding it: a confirmation covers one document, and the document
+  //    is the input a human actually controls.
+  const edited = { ...current, digest: 'e'.repeat(64), requirement: requirementDigest('requirements:\n  - id: REQ-001\n    title: Edited\n') };
+  const whyRequirement = staleReviewReason(withDelivery(edited), current, approve);
+  assert.match(String(whyRequirement), /the requirement changed/);
+  // 6. a record written before requirement digests existed cannot say which document it covered,
+  //    which is unknown provenance — never read as "there was no requirement".
+  const predates = { ...current, digest: 'd'.repeat(64), requirement: '' };
+  assert.match(String(staleReviewReason(withDelivery(predates), current, approve)), /predates requirement digests/);
 });

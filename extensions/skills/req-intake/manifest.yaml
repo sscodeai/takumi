@@ -1,0 +1,13 @@
+name: req-intake
+kind: skill
+version: 0.1.0
+description: "Requirement intake for black-box acceptance: turn a natural-language request into a structured requirement document with explicit, bounded open ambiguities."
+prompts:
+  intake: prompts/intake.md
+  confirm: prompts/confirm.md
+  # The re-pass (ADR-030): a document whose acceptance failed and came back with the failure written
+  # into it. The intake keeps every existing entry and proposes decisions only for the failures no
+  # decision covers, each citing the failure it came from.
+  revise: prompts/revise.md
+resources:
+- SKILL.md

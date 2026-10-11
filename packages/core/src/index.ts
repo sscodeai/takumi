@@ -38,8 +38,17 @@ export {
   groupByLevel,
   validateWorkflowManifest,
 } from './workflow.js';
-export { executeWorkflow, renderPrompt, resolveStepPrompt, parseReviewVerdict } from './workflow-engine.js';
+export {
+  ACCEPT_VERDICT_VALUES,
+  executeWorkflow,
+  renderPrompt,
+  resolveStepPrompt,
+  parseAcceptVerdict,
+  parseReviewVerdict,
+} from './workflow-engine.js';
 export type {
+  AcceptVerdict,
+  ParsedAcceptVerdict,
   WorkflowExecutionContext,
   WorkflowRunResult,
   WorkflowStepResult,
@@ -47,17 +56,66 @@ export type {
   ReviewVerdict,
 } from './workflow-engine.js';
 
-export { parseTestReport, judgeGate } from './quality-gate.js';
+export { detectHardFailure, parseTestReport, judgeGate } from './quality-gate.js';
 export type { TestReport, TestShape } from './quality-gate.js';
 
 export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
+export {
+  appendFeedback,
+  FEEDBACK_CLOSURE_KINDS,
+  openFeedback,
+  parseFeedback,
+  renderFeedbackEntry,
+  resolveFeedback,
+} from './requirement-feedback.js';
+export type {
+  FeedbackAppendInput,
+  FeedbackAppendResult,
+  FeedbackClosureKind,
+  FeedbackEntry,
+  FeedbackResolveOptions,
+  FeedbackResolveResult,
+} from './requirement-feedback.js';
+export {
+  checkIdOf,
+  decisionCheckIds,
+  parseDecisionBindings,
+  JUDGE_COLUMN_ROLES,
+  JUDGE_DECISION_MODES,
+  JUDGE_FIELD_ROLES,
+  JUDGE_MUTATION_FORMATS,
+  JUDGE_SCENARIO_REPORTS,
+  JUDGE_RELATION_VOCABULARY,
+  MIN_MUTATION_TIMEOUT_MS,
+  decisionModesFor,
+  parseDeliverableBlock,
+  parseInputFormat,
+  parseMutation,
+  parseOutputLines,
+  parseScenarios,
+  parseRequirements,
+  validateRequirementDocument,
+} from './requirement-decisions.js';
+export type {
+  Decision,
+  DecisionBinding,
+  DeliverableBlock,
+  InputFormat,
+  MutationBlock,
+  OutputLineFormat,
+  Scenario,
+} from './requirement-decisions.js';
+export { FEEDBACK_BRIEF_MARKER, analyseFeedback, failuresWithoutDecision, renderFeedbackBrief } from './feedback-brief.js';
+export type { AnalysedFailure, AnalysedFeedback, FailureKind } from './feedback-brief.js';
 export { carryStateRecordForward } from './board-state-record.js';
 export {
+  NO_REQUIREMENT,
   REVIEWER_DETERMINISTIC_RULES,
   policyHash,
+  requirementDigest,
   reviewDigest,
   rulesetHash,
   shortDigest,

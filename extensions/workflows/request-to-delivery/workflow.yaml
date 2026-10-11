@@ -1,0 +1,53 @@
+name: request-to-delivery
+version: 0.4.0
+description: >
+  The black-box flow, end to end: a CONFIRMED requirement document becomes a delivered product with no
+  human reading the design or the code. The delivery is ATTEMPTED (request-to-delivery-attempt) and, when
+  the forged judge refuses it, repaired against the failing checks and judged again, up to `maxRounds`
+  attempts (ADR-034). Only a run that spends every attempt writes its failure back into the requirement
+  document — a run that repairs itself leaves the human's document untouched. A run that is accepted is
+  PUBLISHED to the host and then WAITS for the host's own pipeline on the published head: a red or
+  still-pending pipeline fails the run closed, naming the checks (ADR-037). Only then is the delivery
+  LANDED: `merge` merges exactly the head the acceptance judged, refusing a moved head before it calls the
+  host (ADR-040).
+runtime: pi
+steps:
+  - id: delivery_attempt
+    # A `repair` step: it runs the sub-workflow once per attempt and passes the judge's failing checks to
+    # the next attempt as `{repairFailures}`. Every attempt re-runs the whole chain, including the
+    # deterministic rule review — a repair is a delivery like any other, and an agent that "fixes" a
+    # failing relation by weakening its test is caught in the same round.
+    type: repair
+    repairRef: request-to-delivery-attempt
+    maxRounds: 2
+  - id: publish
+    # The host-side half of the delivery (ADR-037): push the committed branch and open exactly one pull
+    # request. Everything before this happened in a worktree nobody else can see, and the delivery's own
+    # pipeline (written by the attempt's `ci_config` step) travels with the commit.
+    type: publish
+    dependsOn: [delivery_attempt]
+  - id: await_checks
+    # Wait for the host's pipeline on the head `publish` pushed (ADR-037). `success` for every check is the
+    # only pass: a red check fails the run naming the check and its URL, a check still pending at the
+    # timeout fails naming what is still pending, and a host that cannot report checks at all fails with
+    # that said plainly — the run never reports a green pipeline it did not actually read. The wait is
+    # bounded (declared seconds, default 300, ceiling 1800); the head is derived from the delivery worktree
+    # when no explicit `ref` is declared.
+    type: await_checks
+    waitSeconds: 300
+    dependsOn: [publish]
+  - id: merge
+    # The LAST MILE (ADR-040): land the delivery, but ONLY the head the acceptance judged. The pull request
+    # is the one `publish` opened and the commit is the one the judge accepted; both come from the run, and
+    # neither is a field of this step. Two guards, both required: the reviewed head is handed to the host as
+    # `expectedHeadSha` (the host refuses a moved head), and the pull request's CURRENT head is read and
+    # compared to it BEFORE any merge is attempted — a merge of a different head is exactly the failure this
+    # layer exists to prevent. Because it `dependsOn: [await_checks]`, a red or still-pending pipeline skips
+    # this step structurally: nothing is landed on a pipeline that did not go green.
+    type: merge
+    mergeMethod: merge
+    dependsOn: [await_checks]
+  - id: delivery
+    type: delivery
+    prompt: Package the run's artifacts into a delivery manifest.
+    dependsOn: [merge]

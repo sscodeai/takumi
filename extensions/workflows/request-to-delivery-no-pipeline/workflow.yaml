@@ -1,0 +1,32 @@
+name: request-to-delivery-no-pipeline
+version: 0.1.0
+description: >
+  The same chain as `request-to-delivery`, for a host that has no pipeline runner yet. The difference is ONE
+  step and it is named in the workflow's name, because it is a real difference in what the run proved: there is
+  no `await_checks`, so this run did NOT wait for a pipeline and did NOT see a green one. Everything else is
+  identical — the delivery is attempted and repaired (ADR-034), published as exactly one pull request carrying
+  the confirmed requirement and its digest (ADR-037), and LANDED by `merge`, which merges only the head the
+  acceptance judged (ADR-040). The delivery's own pipeline file is still written into the commit by the
+  attempt's `ci_config` step, so the host runs it as soon as a runner exists; nothing in this variant reads its
+  result.
+runtime: pi
+steps:
+  - id: delivery_attempt
+    type: repair
+    repairRef: request-to-delivery-attempt
+    maxRounds: 2
+  - id: publish
+    type: publish
+    dependsOn: [delivery_attempt]
+  - id: merge
+    # The LAST MILE (ADR-040): land only the head the acceptance judged. Both guards still apply — the host is
+    # handed the reviewed head as `expectedHeadSha`, and the pull request's current head is compared to it
+    # before any merge is attempted. What is absent here is the pipeline WAIT, not the pipeline: the commit
+    # still carries `.forgejo/workflows/ci.yml`.
+    type: merge
+    mergeMethod: merge
+    dependsOn: [publish]
+  - id: delivery
+    type: delivery
+    prompt: Package the run's artifacts into a delivery manifest.
+    dependsOn: [merge]

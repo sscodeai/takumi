@@ -1,0 +1,119 @@
+name: blackbox-acceptance
+version: 0.1.0
+description: >
+  Black-box acceptance PoC-1 (zero core change). A natural-language request
+  becomes a structured, human-confirmed requirement document; the AI chooses
+  language/architecture/stack and implements; the human never reads the design
+  or the code; the run ends with a behavioural acceptance harness and a
+  delivery manifest.
+runtime: fake
+requiredSkills:
+  - req-intake
+steps:
+  - id: req_intake
+    type: agent
+    skill: req-intake
+    # First prompt key in extensions/skills/req-intake/manifest.yaml is `intake`.
+    # {input} is the request text the CLI was given.
+    prompt: "{input}"
+  - id: ambiguity_confirmation
+    type: approval
+    prompt: |
+      CONFIRM THE REQUIREMENT DOCUMENT, NOT A STEP NAME.
+
+      The document under confirmation is docs/requirements/poc-blackbox-acceptance.yaml. It carries
+      every requirement (REQ-nnn) and every decision the intake found open (AMB-nnn), each with 2-4
+      bounded options and, in `chosen`, the option a human decided.
+
+      How the confirmation is recorded (ADR-025): run
+
+        takumi requirement digest docs/requirements/poc-blackbox-acceptance.yaml
+
+      and approve that token. The token is the digest of the document's text, and the acceptance
+      step refuses any document that does not hash to it -- so an edit after this confirmation is
+      caught by name instead of being accepted quietly.
+
+      Before approving, check:
+      1. Every AMB-nnn entry has a `chosen` option that is one of its own listed `options`. The
+         acceptance harness FAILS on a document that still carries an undecided decision, so an
+         approval of one is an approval of something nobody settled.
+      2. Every REQ-nnn has at least one acceptance criterion a third party could check without
+         reading the implementation.
+      3. The document is the requirement you want built.
+
+      LIMITATION, stated rather than worked around (PoC-2): the engine does not interpolate
+      {placeholders} into an approval prompt, and the approval callback returns a boolean over
+      three hard-coded options (approve/reject/view). A per-ambiguity bounded-choice UI -- one
+      question at a time, with the chosen option written back into the document -- is design
+      change 8 and is not in this slice. Today the human decides the options in the document and
+      approves its digest.
+    dependsOn: [req_intake]
+  - id: implementation
+    type: agent
+    prompt: |
+      You are the implementer. The confirmed requirement document is the
+      approved content above and the intake artifact at
+      .takumi/artifacts/req/req_intake.md. You choose the language,
+      architecture and stack. No human will read your design or your code.
+
+      Implement the request end to end in this project directory, following the
+      confirmed requirement document and the chosen options for every AMB-nnn
+      entry. Write the real source files, not a plan. When done, summarise the
+      files you created, the stack you chose and why, and how each acceptance
+      criterion is met.
+    dependsOn: [ambiguity_confirmation]
+  - id: unit_and_integration_tests
+    type: agent
+    prompt: |
+      Write and run unit and integration tests for the implementation from the
+      previous step. Cover every acceptance criterion in the confirmed
+      requirement document, including the error and boundary behaviour chosen
+      for each AMB-nnn entry. Report the exact test command and its result.
+    dependsOn: [implementation]
+  - id: quality_gate
+    type: quality_gate
+    # The project's own test command, run in the WORKTREE (the implementation). It is a SMOKE gate,
+    # not the evidence: a green suite only says the implementer's own tests pass, and the
+    # implementer's tests share the implementer's blind spot — which is what the forged judge
+    # (ADR-026) exists for. It fails closed when the project has no test command at all.
+    prompt: |
+      if [ -f package.json ]; then pnpm test 2>&1 | tail -60;
+      elif ls *.test.mjs >/dev/null 2>&1; then node --test *.test.mjs 2>&1 | tail -60;
+      else echo "no test command found in this project" >&2; exit 1; fi
+    dependsOn: [unit_and_integration_tests]
+    timeoutMs: 600000
+  - id: rule_review
+    type: rule_review
+    # baseRef is required by validateWorkflowManifest. HEAD~1 keeps the change
+    # set non-empty; the engine resolves both refs to SHAs before judging.
+    baseRef: HEAD~1
+    prompt: |
+      Deterministic rule review of the delivered change set. Fail closed on a
+      block finding, on a human decision, or on a change set that cannot be
+      reviewed.
+    dependsOn: [quality_gate]
+  - id: judge_forge
+    # ADR-026: the judge is produced HERE — outside the implementation worktree, from the CONFIRMED
+    # requirement's deliverable contract, and without reading the implementation. It runs after the
+    # implementation so the implementer cannot read it (the manifest refuses any other step whose
+    # prompt references {judge…}). What is frozen before the implementation is the confirmed
+    # document — its digest is the human's token — and the judge is a deterministic function of it.
+    type: judge_forge
+    requirementRef: docs/requirements/poc-blackbox-acceptance.yaml
+    forgeRef: extensions/judges/metamorphic-forge.sh
+    dependsOn: [rule_review]
+    timeoutMs: 120000
+  - id: artifact_acceptance
+    # ADR-025 + ADR-026: the acceptance runs the FORGED judge ({judgePath}), from the judge's own
+    # directory, and refuses any other harness. It fails closed on an edited requirement, on a
+    # missing confirmation, on a judge that could not be forged, and on a missing or failing
+    # ACCEPT_VERDICT marker; only a passing verdict writes the ACCEPT artifact.
+    type: acceptance
+    requirementRef: docs/requirements/poc-blackbox-acceptance.yaml
+    acceptanceRef: "{judgePath}"
+    dependsOn: [judge_forge]
+    timeoutMs: 120000
+  - id: delivery
+    type: delivery
+    prompt: Package the run's artifacts into a delivery manifest.
+    dependsOn: [artifact_acceptance]

@@ -144,6 +144,34 @@ test('a protected path needs a HUMAN, and is never handed back to the agent to "
   }
 });
 
+test('a protected path the delivery CREATES is a note; changing one that existed stays a human call', () => {
+  // A black-box delivery's worktree starts empty and the implementer chooses the language and the stack;
+  // a manifest that was not there before IS the delivery (`package.json`, `go.mod`, `Cargo.toml`). Making
+  // that a human decision stops every delivery written in a language that has a manifest — so a creation
+  // is reported as a note inside the delivery, while the teeth stay where the path already existed.
+  const created = runReviewRules(
+    input(change('package.json', null, '{"name":"delivered"}', 'added'), change('go.mod', null, 'module delivered\n', 'added')),
+  );
+  const createdFindings = created.filter((finding) => finding.rule === 'protected-path');
+  assert.equal(createdFindings.length, 2, 'every created protected path is still reported');
+  for (const finding of createdFindings) {
+    assert.equal(finding.severity, 'note', `${finding.path}: creating a manifest is a note, not a human decision`);
+  }
+  assert.equal(hasHumanFinding(created), false);
+  assert.equal(hasBlockingFinding(created), false, 'and the agent is never told to revert the delivery');
+
+  for (const status of ['modified', 'deleted', 'renamed'] as const) {
+    const findings = runReviewRules(
+      input(change('package.json', '{"name":"app"}', status === 'deleted' ? null : '{"name":"app","scripts":{}}', status)),
+    );
+    assert.equal(
+      findings.find((finding) => finding.rule === 'protected-path')?.severity,
+      'human',
+      `${status}: a protected path that already existed is still a human's decision`,
+    );
+  }
+});
+
 test('an ordinary source file is not protected and raises nothing', () => {
   const findings = runReviewRules(input(change('src/calc.ts', 'a', 'b'), change('docs/README.md', 'a', 'b')));
   assert.deepEqual(findings, []);

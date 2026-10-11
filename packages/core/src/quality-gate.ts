@@ -6,7 +6,7 @@
 // which turned "unrecognised output" into "1 passing test" — is deliberately
 // gone, because it let jest/vitest/pytest/gradle runs pass vacuously.
 
-export type TestShape = 'tap' | 'jest' | 'pytest' | 'maven' | 'gradle';
+export type TestShape = 'tap' | 'jest' | 'pytest' | 'maven' | 'gradle' | 'ctrf' | 'unittest';
 
 export type TestReport =
   | { shape: TestShape; total: number; failed: number; skipped: number }
@@ -23,14 +23,84 @@ function counts(total: number, failed: number, skipped: number): Counts {
   return { total, failed, skipped };
 }
 
+/** Sum a run's several summary blocks (one per package, module or project). */
+function sum(list: Counts[]): Counts {
+  return list.reduce((acc, c) => counts(acc.total + c.total, acc.failed + c.failed, acc.skipped + c.skipped), counts(0, 0, 0));
+}
+
+/**
+ * A runner's own reporting lines: TAP test results (`ok N - …`, `not ok N - …`),
+ * TAP subtest names and diagnostics (`# …`).
+ *
+ * These carry the TEST NAMES, and a suite that tests this very detection names
+ * the marker in a test name — `quality gate: Maven BUILD FAILURE is a hard fail`
+ * is a real subtest in this repository. A detector that reads those lines fails a
+ * green suite: the repository's own 606-test run could never pass its own quality
+ * gate. The markers that matter are printed by the build itself (`[ERROR] BUILD
+ * FAILURE`, `BUILD FAILED in 2s`), which are not TAP reporting lines.
+ */
+const RUNNER_REPORTING_LINE = /^[ \t]*(?:#.*|ok\b.*|not ok\b.*)$/gm;
+
+/**
+ * A JSON string literal element of a test name inside a MACHINE-READABLE report (CTRF records every test's
+ * name, and the name may contain anything — `"kind": "BUILD FAILURE"` in a name is a name).
+ *
+ * The TAP scrubber above cannot see this: with the whole report on ONE line, the line does not start with
+ * `ok`, so the strip leaves the JSON intact and the detector reads the names inside it. The repository's own
+ * `acceptance-gate-delivery.test.ts` writes a CTRF-ish report on a single line — which is why this was
+ * invisible until a test aimed at it existed (docs/bugs-fixed.md #40).
+ *
+ * The escaping is handled one level at a time — `\\` before `\"` — so a name ending in a backslash cannot
+ * swallow the closing quote. What is removed is only the string ELEMENT (`"name": "…"` and its value);
+ * `"summary": {"failed": 1}` stays, so a report that really says a test failed is still read.
+ */
+const REPORT_TEST_NAME = /"(?:name|fullName|suite|title|testName)"\s*:\s*"(?:[^"\\]|\\.)*"/g;
+
+/**
+ * The MESSAGE of a failing test, on the other hand, is the BUILD speaking: a CTRF suite whose only failing
+ * test says `FATAL: the toolchain refused to start` is reporting a hard failure, and a scrubber that deleted
+ * messages would make the detector blind exactly where it was just taught to look. Messages survive; NAMES
+ * do not.
+ */
+const REPORT_TEST_MESSAGE = /"message"\s*:\s*"(?:[^"\\]|\\.)*"/g;
+
+/**
+ * Remove the test NAMES carried inside a JSON report, so a hard-failure marker that appears in a name is
+ * not mistaken for the build failing.
+ */
+function withoutReportTestNames(out: string): string {
+  // Names first (they are what a suite testing this detector writes), then messages restored verbatim:
+  // removing names only would already leave messages alone, but making the two explicit keeps the next
+  // reader from "simplifying" the message case away.
+  return out.replace(REPORT_TEST_NAME, '""').replace(REPORT_TEST_MESSAGE, (hit) => hit);
+}
+
+/**
+ * Whether the output carries a hard failure of the BUILD (not of a test): a
+ * compile error, a toolchain that refused to start, a build that gave up before
+ * the tests ran. Judged on the build's own output, with the runner's reporting
+ * lines removed.
+ */
+export function detectHardFailure(out: string): boolean {
+  const build = out.replace(RUNNER_REPORTING_LINE, '');
+  return /BUILD FAILURE|BUILD FAILED|FATAL/i.test(withoutReportTestNames(build));
+}
+
 /**
  * Parse the test outcome out of raw runner output.
  *
  * Recognised shapes: TAP (`# tests N` / `# fail N` / `# skip N` / `not ok`),
- * jest and vitest (`Tests: ... total` / `Tests  N passed (N)`), pytest
- * (`= 1 failed, 2 passed in 0.4s` and the bare `N passed` form), Maven
- * (`Tests run: N, Failures: N, Errors: N, Skipped: N`) and gradle/JUnit
- * (`N tests completed, M failed`). Everything else is `unrecognised`.
+ * jest and vitest (`Tests: ... total` / `Tests  N passed (N)`), Python's
+ * standard library `unittest` (`Ran N tests in 0.4s` + `OK` / `FAILED
+ * (failures=N, errors=N)`), pytest (`= 1 failed, 2 passed in 0.4s` and the bare
+ * `N passed` form), Maven (`Tests run: N, Failures: N, Errors: N, Skipped: N`),
+ * gradle/JUnit (`N tests completed, M failed`) and CTRF (Common Test Report
+ * Format, the JSON test-result interchange standard). Everything else is
+ * `unrecognised`.
+ *
+ * Every summary block in the output is counted, not just the first one: a
+ * monorepo prints one block per package, and reporting only the first block
+ * claims fewer tests ran than really did.
  */
 export function parseTestReport(out: string): TestReport {
   const maven = parseMaven(out);
@@ -42,46 +112,85 @@ export function parseTestReport(out: string): TestReport {
   const jest = parseJest(out);
   if (jest) return { shape: 'jest', ...jest };
 
+  // `unittest` is tried here, after jest and BEFORE pytest: pytest's matcher is
+  // the loosest in this file, and a unittest traceback can carry exactly the
+  // text pytest reads (`AssertionError: '2 passed' != '1 failed'`), so pytest
+  // first would claim a unittest run and report its counts. No real pytest run
+  // carries the `Ran N tests in …` line, so the stricter shape is tried first
+  // and cannot steal one.
+  const unittest = parseUnittest(out);
+  if (unittest === 'failed-without-counts') {
+    return {
+      shape: 'unrecognised',
+      reason: `${UNITTEST_UNREADABLE_FAILURE} (${unittestLine(out)})`,
+    };
+  }
+  if (unittest) return { shape: 'unittest', ...unittest };
+
   const pytest = parsePytest(out);
   if (pytest) return { shape: 'pytest', ...pytest };
 
   const gradle = parseGradle(out);
   if (gradle) return { shape: 'gradle', ...gradle };
 
+  const ctrf = parseCtrf(out);
+  if (ctrf) return { shape: 'ctrf', ...ctrf };
+
   return {
     shape: 'unrecognised',
     reason:
-      'no known test summary was found in the output (recognised: TAP, jest/vitest, pytest, Maven, gradle/JUnit)',
+      'the test output could not be read as any known report: no known test summary was found in the output (tried: TAP, jest/vitest, unittest, pytest, Maven, gradle/JUnit, CTRF)',
   };
 }
 
-/** Maven surefire: `Tests run: 2, Failures: 0, Errors: 1, Skipped: 0`. */
+/**
+ * Maven surefire: `Tests run: 2, Failures: 0, Errors: 1, Skipped: 0`.
+ *
+ * Surefire prints one line per test CLASS (`… Time elapsed: 0.05 s - in
+ * com.foo.BarTest`) and then a summary line per module. Summing both would count
+ * every module twice, so the per-class lines win when they are present; otherwise
+ * the module summary lines are summed (a reactor prints one per module).
+ */
 function parseMaven(out: string): Counts | undefined {
-  const m = out.match(/Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)(?:,\s*Skipped:\s*(\d+))?/);
-  if (!m) return undefined;
-  return counts(
-    parseInt(m[1] ?? '0', 10),
-    parseInt(m[2] ?? '0', 10) + parseInt(m[3] ?? '0', 10),
-    parseInt(m[4] ?? '0', 10),
-  );
+  const re = /Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)(?:,\s*Skipped:\s*(\d+))?[^\n]*/g;
+  const perClass: Counts[] = [];
+  const summaries: Counts[] = [];
+  for (const m of out.matchAll(re)) {
+    const c = counts(
+      parseInt(m[1] ?? '0', 10),
+      parseInt(m[2] ?? '0', 10) + parseInt(m[3] ?? '0', 10),
+      parseInt(m[4] ?? '0', 10),
+    );
+    if (/Time elapsed| - in /i.test(m[0])) perClass.push(c);
+    else summaries.push(c);
+  }
+  if (perClass.length > 0) return sum(perClass);
+  if (summaries.length > 0) return sum(summaries);
+  return undefined;
 }
 
 /**
  * TAP (`node --test`): `# tests N`, `# fail N`, `# skip N`, `not ok N`.
  * A `not ok` line without a `# tests` summary still counts as a failure.
+ *
+ * A monorepo prints one block per package: EVERY block is read. Reading only the
+ * first one vetted 289 of this repository's 606 tests and reported the rest as
+ * absent — a summary that hid what actually ran.
  */
 function parseTap(out: string): Counts | undefined {
-  const testLine = out.match(/^#\s*tests\s*:?\s*(\d+)/m);
-  const failLine = out.match(/^#\s*fail\s*:?\s*(\d+)/m);
-  const skipLine = out.match(/^#\s*skip\s*:?\s*(\d+)/m);
+  const total_ = (re: RegExp) => [...out.matchAll(re)].reduce((n, m) => n + parseInt(m[1] ?? '0', 10), 0);
+  const has = (re: RegExp) => re.test(out);
+  const testLine = /^#\s*tests\s*:?\s*\d+/m;
+  const failLine = /^#\s*fail\s*:?\s*\d+/m;
+  const skipLine = /^#\s*skip\s*:?\s*\d+/m;
   const notOk = (out.match(/^not ok\b/gm) ?? []).length;
-  if (!testLine && !failLine && !skipLine && notOk === 0) return undefined;
+  if (!has(testLine) && !has(failLine) && !has(skipLine) && notOk === 0) return undefined;
 
-  const failed = failLine ? parseInt(failLine[1] ?? '0', 10) : notOk;
-  const skipped = skipLine ? parseInt(skipLine[1] ?? '0', 10) : 0;
+  const failed = has(failLine) ? total_(/^#\s*fail\s*:?\s*(\d+)/gm) : notOk;
+  const skipped = has(skipLine) ? total_(/^#\s*skip\s*:?\s*(\d+)/gm) : 0;
   // Without a `# tests` line, a failing TAP run reports no usable total; use the
   // failure count so `failed > 0` still drives the verdict.
-  const total = testLine ? parseInt(testLine[1] ?? '0', 10) : failed;
+  const total = has(testLine) ? total_(/^#\s*tests\s*:?\s*(\d+)/gm) : failed;
   return counts(total, failed, skipped);
 }
 
@@ -89,33 +198,94 @@ function parseTap(out: string): Counts | undefined {
  * jest (`Tests: 1 failed, 2 skipped, 3 passed, 6 total`) and vitest
  * (`Tests  1 failed | 5 passed (6)`). `Test Suites:` / `Test Files:` lines are
  * ignored by construction — they do not start with `Tests`.
+ *
+ * A workspace prints one `Tests` line per project: every line is summed, so a
+ * later project's failures are not invisible.
  */
 function parseJest(out: string): Counts | undefined {
-  const line = out.match(/^\s*Tests:\s*(.+)$/m) ?? out.match(/^\s*Tests\s{2,}(.+)$/m);
-  if (!line) return undefined;
-  const body = line[1] ?? '';
+  const bodies = [
+    ...[...out.matchAll(/^\s*Tests:\s*(.+)$/gm)].map((m) => m[1] ?? ''),
+    ...[...out.matchAll(/^\s*Tests\s{2,}(.+)$/gm)].map((m) => m[1] ?? ''),
+  ];
+  if (bodies.length === 0) return undefined;
 
   let failed = 0;
   let skipped = 0;
   let passed = 0;
-  for (const m of body.matchAll(/(\d+)\s+(failed|skipped|passed|todo)/g)) {
-    const n = parseInt(m[1] ?? '0', 10);
-    switch (m[2]) {
-      case 'failed':
-        failed += n;
-        break;
-      case 'skipped':
-      case 'todo':
-        skipped += n;
-        break;
-      case 'passed':
-        passed += n;
-        break;
+  let total = 0;
+  for (const body of bodies) {
+    for (const m of body.matchAll(/(\d+)\s+(failed|skipped|passed|todo)/g)) {
+      const n = parseInt(m[1] ?? '0', 10);
+      switch (m[2]) {
+        case 'failed':
+          failed += n;
+          break;
+        case 'skipped':
+        case 'todo':
+          skipped += n;
+          break;
+        case 'passed':
+          passed += n;
+          break;
+      }
     }
+    const totalMatch = body.match(/(\d+)\s+total/) ?? body.match(/\((\d+)\)/);
+    total += totalMatch ? parseInt(totalMatch[1] ?? '0', 10) : 0;
   }
-  const totalMatch = body.match(/(\d+)\s+total/) ?? body.match(/\((\d+)\)/);
-  const total = totalMatch ? parseInt(totalMatch[1] ?? '0', 10) : failed + skipped + passed;
+  if (total === 0) total = failed + skipped + passed;
   return counts(total, failed, skipped);
+}
+
+/**
+ * Python's standard library `unittest` (`python3 -m unittest discover -v`, the
+ * runner a delivered project's own `run-tests.sh` may use): one line per test in
+ * verbose mode, then `Ran N tests in 0.003s`, then either a bare `OK` (clean
+ * run) or `FAILED (failures=1, errors=2)`.
+ *
+ * The `Ran N tests in …` line is the ANCHOR, and it is MANDATORY: `OK` is an
+ * ordinary English word that unrelated output can carry on a line of its own,
+ * and reading a stray `OK` as a green test run is exactly the vacuous pass this
+ * gate exists to stop. Both lines must be present, so a real TAP/jest/pytest/
+ * Maven/gradle/CTRF run — none of which prints `Ran N tests in …` — can never be
+ * re-read as unittest.
+ *
+ * `failing` is `failures=` PLUS `errors=`: an ERROR is a failing test, not a
+ * pass. The parenthetical may hold only one of the two, in either order.
+ *
+ * A `FAILED` line with NEITHER count says the run failed but not how many tests
+ * failed. That is `failed-without-counts`: the caller reports it as unreadable so
+ * the gate fails closed and says what it read, rather than inventing `0` failing
+ * tests out of a line that says the opposite.
+ */
+function parseUnittest(out: string): Counts | 'failed-without-counts' | undefined {
+  const ran = /^Ran\s+(\d+)\s+tests?\s+in\s+[\d.]+s\b/m.exec(out);
+  if (!ran) return undefined;
+  const failedLine = /^FAILED\b[^\n]*/m.exec(out);
+  const okLine = /^OK\b[^\n]*/m.exec(out);
+  if (!failedLine && !okLine) return undefined;
+
+  const total = parseInt(ran[1] ?? '0', 10);
+  if (failedLine) {
+    const body = failedLine[0];
+    const failures = /failures\s*=\s*(\d+)/.exec(body);
+    const errors = /errors\s*=\s*(\d+)/.exec(body);
+    if (!failures && !errors) return 'failed-without-counts';
+    return counts(total, parseInt(failures?.[1] ?? '0', 10) + parseInt(errors?.[1] ?? '0', 10), 0);
+  }
+  // A clean run: `OK`, optionally `OK (skipped=N)`. The skips are read so an
+  // all-skipped unittest run is not reported as a green one (judgeGate already
+  // refuses a run where `skipped === total`).
+  const skipped = /skipped\s*=\s*(\d+)/.exec(okLine?.[0] ?? '');
+  return counts(total, 0, parseInt(skipped?.[1] ?? '0', 10));
+}
+
+/** Why a unittest run that reported `FAILED` without a count is unreadable — it says what it read. */
+const UNITTEST_UNREADABLE_FAILURE =
+  'the output is a Python unittest report whose FAILED line named neither failures= nor errors=, so the number of failing tests could not be read';
+
+/** The `Ran N tests in …` line of a unittest run, verbatim, for the message above. */
+function unittestLine(out: string): string {
+  return /^Ran\s+\d+\s+tests?\s+in\s+[\d.]+s\b[^\n]*/m.exec(out)?.[0] ?? 'no Ran line';
 }
 
 /**
@@ -143,11 +313,109 @@ function parsePytest(out: string): Counts | undefined {
   return counts(passed + failed + skipped, failed, skipped);
 }
 
-/** gradle / JUnit XML console summary: `N tests completed, M failed`. */
+/**
+ * gradle / JUnit XML console summary: `N tests completed, M failed`.
+ * A multi-project build prints one line per subproject: every line is summed.
+ */
 function parseGradle(out: string): Counts | undefined {
-  const m = out.match(/(\d+)\s+tests? completed,\s*(\d+)\s+failed(?:,\s*(\d+)\s+skipped)?/i);
-  if (!m) return undefined;
-  return counts(parseInt(m[1] ?? '0', 10), parseInt(m[2] ?? '0', 10), parseInt(m[3] ?? '0', 10));
+  const blocks: Counts[] = [];
+  for (const m of out.matchAll(/(\d+)\s+tests? completed,\s*(\d+)\s+failed(?:,\s*(\d+)\s+skipped)?/gi)) {
+    blocks.push(counts(parseInt(m[1] ?? '0', 10), parseInt(m[2] ?? '0', 10), parseInt(m[3] ?? '0', 10)));
+  }
+  return blocks.length > 0 ? sum(blocks) : undefined;
+}
+
+/**
+ * CTRF (Common Test Report Format): an open MIT standard for JSON test-result
+ * interchange, so any external E2E tool that emits a CTRF document can be the
+ * evidence of a gate run without a per-tool adapter.
+ *
+ * A CTRF document is a JSON object with `reportFormat: "CTRF"`, a `specVersion`
+ * and a `results` object holding `tool`, `summary` and `tests` (spec v0.1.0,
+ * 2026-10-03; the JSON Schema in Appendix A is normative). `summary.tests` is
+ * the total, `summary.failed` the failures and `summary.skipped` the skips;
+ * each `tests[]` entry carries `name`, `status` (passed|failed|skipped|pending
+ * |other) and `duration`.
+ *
+ * Where the document is malformed, is a JSON array, or carries none of those
+ * markers, it is NOT a CTRF report: returning `unrecognised` keeps the gate
+ * failing closed. A report claiming `tests > 0` is evidence even when nothing
+ * else in the output is parseable, which is why CTRF is tried after the
+ * text shapes.
+ *
+ * A summary that disagrees with its own test list must not under-report, so the
+ * failure and skip counts are the larger of the summary count and the number of
+ * entries the list itself marks `failed` / `skipped`. The spec says
+ * `summary.tests` SHOULD equal the length of the `tests` array, so the array
+ * length may raise the total but never lower it. `pending` and `other` are
+ * unresolved outcomes, not evidence of a pass, so they are counted as skipped.
+ */
+function parseCtrf(out: string): Counts | undefined {
+  const doc = parseCtrfDocument(out);
+  if (!doc) return undefined;
+
+  const entries = doc.results.tests;
+  const summary = doc.results.summary;
+  const marked = (status: string) => entries.filter((t) => t?.status === status).length;
+
+  const total = Math.max(summary.tests, entries.length);
+  const failed = Math.max(summary.failed, marked('failed'));
+  const skipped = Math.max(summary.skipped + summary.pending + summary.other, marked('skipped') + marked('pending') + marked('other'));
+  return counts(total, failed, skipped);
+}
+
+/** The minimal, well-typed view of a CTRF document this gate needs. */
+interface CtrfDocument {
+  results: {
+    summary: { tests: number; failed: number; skipped: number; pending: number; other: number };
+    tests: Array<{ status?: unknown }>;
+  };
+}
+
+/**
+ * Recognise a CTRF document and read its summary and test list. Returns
+ * `undefined` for anything that is not a CTRF document: malformed or
+ * non-object JSON, a JSON array, `reportFormat` other than "CTRF", a missing
+ * or non-integer `summary`, or a `tests` value that is not an array.
+ */
+function parseCtrfDocument(out: string): CtrfDocument | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+
+  const doc = parsed as Record<string, unknown>;
+  if (doc.reportFormat !== 'CTRF') return undefined;
+  // CTRF is pre-1.0; only the schema's "MAJOR.MINOR.PATCH" shape is required.
+  if (typeof doc.specVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(doc.specVersion)) return undefined;
+
+  const results = doc.results;
+  if (typeof results !== 'object' || results === null || Array.isArray(results)) return undefined;
+  const { summary, tests } = results as Record<string, unknown>;
+  if (typeof summary !== 'object' || summary === null || Array.isArray(summary)) return undefined;
+  if (!Array.isArray(tests)) return undefined;
+
+  const s = summary as Record<string, unknown>;
+  return {
+    results: {
+      summary: {
+        tests: num(s.tests),
+        failed: num(s.failed),
+        skipped: num(s.skipped),
+        pending: num(s.pending),
+        other: num(s.other),
+      },
+      tests: tests as Array<{ status?: unknown }>,
+    },
+  };
+}
+
+/** A summary counter, or 0 when it is absent or not a non-negative integer. */
+function num(v: unknown): number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0;
 }
 
 /**

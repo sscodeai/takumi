@@ -13,9 +13,11 @@ import {
   validateCapabilities,
 } from './index.js';
 import { groupByLevel } from './workflow.js';
-import { judgeGate, parseTestReport } from './quality-gate.js';
+import { detectHardFailure, judgeGate, parseTestReport } from './quality-gate.js';
 import { createGitRunner, type GitRunner } from './git-runner.js';
 import { ProviderError } from './provider-error.js';
+import type { CheckSummary, DeliveryMergeMethod, DeliveryProvider, MergeOutcome, PullRequestRef, PullRequestStatus } from './delivery.js';
+import { executeCiConfigStep, executeAwaitChecksStep } from './ci-pipeline.js';
 import { collectReviewInput, verdictFromFindings } from './review.js';
 import {
   describeFindings,
@@ -24,9 +26,41 @@ import {
   type ReviewFinding,
 } from './review-rules.js';
 import { randomUUID } from 'node:crypto';
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { requirementDigest, shortDigest } from './review-digest.js';
+import { appendFeedback, parseFeedback } from './requirement-feedback.js';
+import { parse as parseYamlText } from 'yaml';
 const execAsync = promisify(exec);
+/** Runs a harness FILE without a shell, so a path in a manifest is never a shell string. */
+const execFileAsync = promisify(execFile);
+
+/**
+ * What the next delivery attempt is told (ADR-034). The judge's own `not ok` lines, verbatim, plus the
+ * decisions they touch — and NOTHING else: the fixtures, the expectations and the judge's source stay
+ * outside the implementer's context, because an implementer that could read them could fit them (ADR-026).
+ */
+export function failureLinesOf(acceptanceSummary: string): string {
+  const failing = acceptanceSummary
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => /^not ok\b/.test(line) || /^# decisions declared here/.test(line));
+  if (failing.length === 0) {
+    return 'the acceptance failed without naming a failing check the engine could read: treat the run log as the brief, and note that a judge which reported nothing has told you nothing';
+  }
+  return failing.slice(0, 40).join('\n');
+}
+
+/**
+ * One line per check that is not green, for the host issue and the pull-request comment. The list is
+ * what the failure IS: a check that passed is not part of it, and a check's URL travels with it so a
+ * reader can open the failing run.
+ */
+function renderNotGreenChecks(checks: readonly CheckSummary[]): string[] {
+  return checks
+    .filter((c) => c.conclusion !== 'success')
+    .map((c) => `- ${c.name}: ${c.conclusion}${c.url !== undefined && c.url.length > 0 ? ` (${c.url})` : ''}`);
+}
 
 export interface WorkflowExecutionContext {
   /** Project working directory (steps run here). */
@@ -48,6 +82,23 @@ export interface WorkflowExecutionContext {
    * git itself, so a test can inject a runner that refuses.
    */
   git?: GitRunner;
+  /**
+   * The requirement digest a human CONFIRMED for this run, and the ref it covers (ADR-025).
+   *
+   * An `acceptance` step refuses to run when the document at its `requirementRef` does not hash to
+   * this digest: the confirmation and the acceptance must be about the same document, and a document
+   * edited after the confirmation fails the step by name. Absent means no confirmation is on record,
+   * which fails the step — an acceptance nobody confirmed is a machine grading its own work.
+   */
+  confirmedRequirement?: { ref: string; digest: string };
+  /**
+   * Where the IMPLEMENTATION is produced, when that is not the run's own directory (ADR-026).
+   *
+   * Defaults to `cwd`. The point of naming it is that the judge must live OUTSIDE it: a judge the
+   * implementer can read is a judge the implementer can fit, and with a separate worktree that
+   * separation is a path property a test can assert rather than a promise in a comment.
+   */
+  worktree?: string;
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
   /**
@@ -57,6 +108,41 @@ export interface WorkflowExecutionContext {
    * behavior, not just artifact folder naming (acceptance Gate 8).
    */
   skillsRoot?: string;
+  /**
+   * Loads a workflow by ref, for a `repair` step's sub-workflow (ADR-034). Injected rather than imported:
+   * the engine has no opinion about where a project keeps its workflows, and a test can hand it a
+   * definition. Absent means a `repair` step fails closed, saying so.
+   */
+  loadWorkflow?: (ref: string) => Promise<WorkflowDefinition>;
+  /**
+   * The host this run may publish to (ADR-037): the delivery port, injected by the caller exactly like the
+   * workflow loader. The engine never talks to a code host on its own — an unattended run that can push
+   * wherever it likes is a run nobody can reason about — so a `publish` step with no provider FAILS rather
+   * than quietly producing a local bundle and calling it delivered.
+   *
+   * `openIssue` is optional on the seam because the port itself is pull-request shaped: a host that cannot
+   * record an issue says so in the step summary instead of the run pretending one exists.
+   */
+  delivery?: DeliveryProvider & {
+    openIssue?: (req: { title: string; body: string; labels?: string[] }) => Promise<{ number: string; url: string }>;
+    // The return value is not used by the engine (only the host's identity is, when the call
+    // succeeds), so it is `unknown` rather than `void`: a real provider answers with the comment's
+    // id/url, and `Promise<{id,url}>` is not assignable to `Promise<void>`.
+    commentOnPullRequest?: (ref: PullRequestRef, body: string) => Promise<unknown>;
+  };
+  /**
+   * Defaults a `publish` step falls back to when the step does not declare them, taken from the
+   * project's `delivery:` configuration. A step's own `baseBranch`/`remote` still wins. Without this
+   * a base branch named once in `takumi.yaml` would reach no step, which is the "config with no
+   * reader" defect in a new costume.
+   */
+  deliveryDefaults?: { baseBranch?: string; remote?: string };
+  /**
+   * Set by the repair loop on every round that is NOT the last: the failure being handled is going to be
+   * retried, so the requirement document must not be edited per attempt (ADR-034). Exactly one `FB-nnn`
+   * comes out of a run, whatever it spends its rounds on.
+   */
+  withholdAcceptanceFeedback?: boolean;
   /**
    * Durable resume (P2): previously-completed steps to skip.
    * `completed` maps stepId → its recorded result; any step in `completed`
@@ -82,6 +168,14 @@ export interface WorkflowRunResult {
   run: WorkflowRun;
   steps: WorkflowStepResult[];
   status: 'completed' | 'failed' | 'cancelled';
+  /**
+   * The run's final variable table. A step that learns a fact later steps need writes it here (a
+   * `publish` sets `deliveryRef`, an `acceptance` sets `acceptedHead`, a `merge` sets `deliveryMerged`),
+   * and a caller that runs a workflow WITHIN a workflow — the `repair` step — reads it back so a fact the
+   * sub-run established (which commit the judge accepted) reaches the run that invoked it. Without this a
+   * `merge` after a `repair` could not say which commit it was landing.
+   */
+  vars: Record<string, string>;
 }
 
 const RUNNING = new Set<string>();
@@ -146,6 +240,50 @@ export function parseReviewVerdict(text: string): ParsedReviewVerdict {
   const unique = [...new Set(seen)];
   if (unique.length > 1) {
     return { error: `ambiguous REVIEW_VERDICT: the review emitted both ${unique.join(' and ')}` };
+  }
+  return { verdict: unique[0] };
+}
+
+/** The values an acceptance harness may report. */
+export const ACCEPT_VERDICT_VALUES = ['pass', 'fail'] as const;
+export type AcceptVerdict = (typeof ACCEPT_VERDICT_VALUES)[number];
+
+export interface ParsedAcceptVerdict {
+  verdict?: AcceptVerdict;
+  error?: string;
+}
+
+/**
+ * Read the acceptance harness's verdict from a STRUCTURED marker (ADR-025), never from its prose.
+ *
+ * The harness is written by the same side that wants the delivery accepted, so its sentences are
+ * not evidence. `ACCEPT_VERDICT: pass` is the only thing that makes the step pass, and fail-closed
+ * is the rule the rest of this engine already follows: a missing marker, an unknown value, or two
+ * conflicting markers all produce an error and NO verdict — which fails the step.
+ */
+export function parseAcceptVerdict(text: string): ParsedAcceptVerdict {
+  const seen: AcceptVerdict[] = [];
+  let unknown: string | undefined;
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*ACCEPT_VERDICT\s*[:=]\s*(\S+)\s*$/i.exec(line);
+    if (!match) continue;
+    const raw = normaliseVerdictToken(match[1] ?? '');
+    const value = raw.toLowerCase();
+    if ((ACCEPT_VERDICT_VALUES as readonly string[]).includes(value)) {
+      seen.push(value as AcceptVerdict);
+    } else if (unknown === undefined) {
+      unknown = raw;
+    }
+  }
+  if (unknown !== undefined) {
+    return { error: `unrecognised ACCEPT_VERDICT value "${unknown}" (expected pass or fail)` };
+  }
+  if (seen.length === 0) {
+    return { error: 'the acceptance verdict marker "ACCEPT_VERDICT: <pass|fail>" was missing' };
+  }
+  const unique = [...new Set(seen)];
+  if (unique.length > 1) {
+    return { error: `ambiguous ACCEPT_VERDICT: the harness emitted both ${unique.join(' and ')}` };
   }
   return { verdict: unique[0] };
 }
@@ -292,10 +430,76 @@ export async function executeWorkflow(
   };
   const stepResults: WorkflowStepResult[] = [];
   const vars: Record<string, string> = { ...inputVars };
+  /**
+   * The document THIS RUN was confirmed against (ADR-025). Every step that names `{requirement}` —
+   * in a `requirementRef` or in a prompt — means THAT document, so the name is filled once, here,
+   * for the whole run.
+   *
+   * This used to be filled only for steps that carry a `requirementRef`, and NOT for the ones that
+   * carry a prompt. The implementer's prompt therefore kept the literal text `{requirement}`: the
+   * agent was told to read a document whose path had never been substituted, went looking for a
+   * requirement on its own, found a different document in the repository and implemented THAT — with
+   * its own tests passing, because a green suite only says the implementer agrees with the
+   * implementer. A run confirmed against one document delivered another (docs/bugs-fixed.md, 34).
+   * A placeholder the run cannot fill is a prompt that lies, so the workflow is refused before any
+   * step runs rather than after an agent has been paid to guess.
+   */
+  const confirmedRef = ctx.confirmedRequirement?.ref ?? '';
+  vars['requirement'] = confirmedRef;
+  if (confirmedRef.length === 0) {
+    const namesRequirement = workflow.steps.filter((s) =>
+      [s.prompt ?? '', s.requirementRef ?? '', s.acceptanceRef ?? '', s.forgeRef ?? ''].some((t) =>
+        t.includes('{requirement}'),
+      ),
+    );
+    if (namesRequirement.length > 0) {
+      throw new Error(
+        `workflow "${workflow.name}" names {requirement} in step(s) [${namesRequirement
+          .map((s) => s.id)
+          .join(', ')}] — the document the run was confirmed against — but this run has no confirmed requirement on record (pass --requirement and --confirmed-requirement)`,
+      );
+    }
+  }
+
+  /**
+   * A step may say `requirementRef: "{requirement}"`: the document THIS RUN was confirmed against
+   * (ADR-025). It is the difference between a workflow that can only ever run on one file and one that
+   * runs on whatever a human confirmed — and it fails closed when there is no confirmation to point at,
+   * rather than resolving to a path nobody confirmed.
+   */
+  const requirementRefOf = (raw: string | undefined): { ref: string; error?: string } => {
+    const ref = renderPrompt(raw ?? '', vars).trim();
+    if (raw !== undefined && raw.includes('{requirement}') && confirmedRef.length === 0) {
+      return {
+        ref,
+        error:
+          'this workflow points at {requirement} — the document the run was confirmed against — but this run has no confirmed requirement on record (pass --requirement and --confirmed-requirement)',
+      };
+    }
+    return { ref };
+  };
 
   const byId = new Map(workflow.steps.map((s) => [s.id, s]));
   const done = new Set<string>();
   const failedIds = new Set<string>();
+  // Steps that did not run because their own dependencies were unmet. A skipped
+  // step must propagate: it is not evidence that its dependency succeeded.
+  const skippedIds = new Set<string>();
+  // Per-run sequential ids for ACCEPT artifacts, in manifest order (ACCEPT-001, ...). An acceptance
+  // is identified by the requirement it is about, so several in one workflow stay distinguishable.
+  const acceptanceIds = new Map<string, string>();
+  for (const s of workflow.steps) {
+    if (s.type === 'acceptance') acceptanceIds.set(s.id, `ACCEPT-${String(acceptanceIds.size + 1).padStart(3, '0')}`);
+  }
+  // Rejections are numbered in the order they happen: a run may hold several acceptances.
+  let rejectSeq = 0;
+  /**
+   * At most ONE pipeline-failure issue per run (ADR-037). A host issue is a record of a failure;
+   * a second `await_checks` step failing for the same run must not file a second one. The flag is
+   * set BEFORE the attempt, so a create that actually succeeded but whose response was lost cannot
+   * produce a duplicate on the next step.
+   */
+  let pipelineIssueFiled = false;
 
   try {
     // P2 parallel: pre-execute all no-dependency AGENT steps concurrently.
@@ -313,7 +517,7 @@ export async function executeWorkflow(
           const task: AgentTask = {
             id: `${runId}:${stepId}:1`,
             prompt: await resolveStepPrompt(step, ctx.skillsRoot, vars),
-            cwd: ctx.cwd,
+            cwd: ctx.worktree ?? ctx.cwd,
             trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
             context: { workflowStep: stepId, workflow: workflow.name, ...vars },
           };
@@ -352,16 +556,25 @@ export async function executeWorkflow(
         run.stepStatus[stepId] = pre.status;
         stepResults.push(pre);
         if (pre.status === 'completed') done.add(stepId);
+        else if (pre.status === 'skipped') skippedIds.add(stepId);
         else failedIds.add(stepId);
         ctx.onEvent?.(stepId, `parallel result: ${pre.status}`);
         continue;
       }
 
-      // Skip a step whose dependencies failed.
+      // Skip a step whose dependencies failed OR were themselves skipped: a step
+      // that did not run cannot be a satisfied dependency. Checking only the
+      // failed set let a failure stop its DIRECT children while the rest of the
+      // pipeline still ran — observed with a failed quality_gate whose dependent
+      // rule_review was skipped, after which artifact_acceptance and delivery both
+      // executed and reported success.
       const deps = step.dependsOn ?? [];
-      if (deps.some((d) => failedIds.has(d))) {
+      const unmet = deps.filter((d) => failedIds.has(d) || skippedIds.has(d));
+      if (unmet.length > 0) {
+        const because = unmet.some((d) => failedIds.has(d)) ? 'dependency failed' : 'dependency skipped';
         run.stepStatus[stepId] = 'skipped';
-        stepResults.push({ stepId, status: 'skipped', summary: 'skipped (dependency failed)', artifacts: [], tests: [] });
+        skippedIds.add(stepId);
+        stepResults.push({ stepId, status: 'skipped', summary: `skipped (${because}: ${unmet.join(', ')})`, artifacts: [], tests: [] });
         continue;
       }
 
@@ -398,7 +611,7 @@ export async function executeWorkflow(
           run.stepStatus[stepId] = 'failed';
           run.status = 'cancelled';
           stepResults.push({ stepId, status: 'failed', summary: 'rejected by approver', artifacts: [], tests: [] });
-          return { run, steps: stepResults, status: 'cancelled' };
+          return { run, steps: stepResults, status: 'cancelled', vars };
         }
         run.stepStatus[stepId] = 'completed';
         stepResults.push({ stepId, status: 'completed', summary: 'approved', artifacts: [], tests: [] });
@@ -415,7 +628,7 @@ export async function executeWorkflow(
         const cmd = renderPrompt(step.prompt ?? '', vars);
         try {
           ctx.onEvent?.(stepId, `tool run: ${cmd}`);
-          const { stdout, stderr } = await execAsync(cmd, { cwd: ctx.cwd, timeout: step.timeoutMs ?? 120000 });
+          const { stdout, stderr } = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 120000 });
           const out = (stdout?.trim() || stderr?.trim() || '(no output)').slice(0, 4000);
           const kind = step.id.split('_')[0] ?? 'tool';
           const artifact = await ctx.artifacts.write({
@@ -452,7 +665,7 @@ export async function executeWorkflow(
         let out = '';
         let exitOk = true;
         try {
-          const r = await execAsync(cmd, { cwd: ctx.cwd, timeout: step.timeoutMs ?? 300000 });
+          const r = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 300000 });
           out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
         } catch (e) {
           exitOk = false;
@@ -465,10 +678,11 @@ export async function executeWorkflow(
         // `fails > 0 ? fails : 1` fallback: no known summary = no evidence).
         // A gate with ZERO tests is NOT green (Quality Gate must be enforced:
         // no tests at all = the gate has nothing to vouch for → ABORT).
-        const allOut = out.toUpperCase();
         const report = parseTestReport(out);
-        // Maven BUILD FAILURE (e.g. compile error before any test runs) is a hard fail.
-        const hardFail = /BUILD FAILURE|BUILD FAILED|FATAL/i.test(allOut);
+        // A build that gave up (compile error, toolchain refusal) is a hard fail.
+        // Judged on the BUILD's output, not on the runner's reporting lines: a
+        // test name mentioning a build failure is not a build failure.
+        const hardFail = detectHardFailure(out);
         const verdict = judgeGate(report, { exitOk, hardFail });
         const gatePassed = verdict.passed;
         const fails = report.shape === 'unrecognised' ? 0 : report.failed;
@@ -491,6 +705,126 @@ export async function executeWorkflow(
           stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
           ctx.onEvent?.(stepId, `quality gate FAILED (${fails} failing) — workflow aborted`);
         }
+        done.add(stepId);
+        continue;
+      }
+
+      // Repair step (ADR-034): the delivery attempt, and the rounds that follow a refusal. The
+      // sub-workflow is the chain that produces evidence (implementation → tests → gate → review → forge
+      // → acceptance). This step runs it, and on a refusal hands the FAILING CHECKS to the next attempt
+      // as `{repairFailures}` — the implementer sees what failed, never the judge's fixtures, its
+      // expectations or its source. Every round re-runs the whole chain: a repair is a delivery like any
+      // other, so an agent that "fixes" a failing relation by weakening the test that covers it is caught
+      // by rule_review in the same round, not after the fact. Only the LAST round writes the failure back
+      // into the requirement document (ctx.withholdAcceptanceFeedback), so a run that repairs itself
+      // leaves the human's document untouched.
+      if (step.type === 'repair') {
+        run.stepStatus[stepId] = 'running';
+        const repairRef = (step.repairRef ?? '').trim();
+        const maxRounds = step.maxRounds ?? 1;
+        const failStep = (summary: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `repair FAILED: ${summary.split('\n')[0]}`);
+        };
+        if (ctx.loadWorkflow === undefined) {
+          failStep(
+            `a repair step needs a workflow loader to read "${repairRef}" and this run has none (ctx.loadWorkflow): the sub-workflow could not be read, so no delivery attempt was made`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        let sub: WorkflowDefinition;
+        try {
+          sub = await ctx.loadWorkflow(repairRef);
+        } catch (e) {
+          failStep(
+            `the repair sub-workflow "${repairRef}" could not be loaded (${e instanceof Error ? e.message : String(e)}): a repair loop with nothing to run is not a repair`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        if (!sub.steps.some((s) => s.type === 'acceptance')) {
+          failStep(
+            `the repair sub-workflow "${repairRef}" declares no acceptance step: a repair loop with nothing to judge it cannot know when to stop`,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        const roundSummaries: string[] = [];
+        const subArtifacts: string[] = [];
+        const subTests: WorkflowStepResult['tests'] = [];
+        let failures = '';
+        let accepted = false;
+        let spent = 0;
+        let abort: string | undefined;
+        for (let attempt = 1; attempt <= maxRounds; attempt += 1) {
+          spent = attempt;
+          const lastRound = attempt === maxRounds;
+          const label = attempt === 1 ? `attempt 1 of ${maxRounds}` : `repair round ${attempt} of ${maxRounds}`;
+          vars['repairRound'] = `${attempt} of ${maxRounds}`;
+          vars['repairFailures'] = failures;
+          ctx.onEvent?.(
+            stepId,
+            attempt === 1
+              ? `delivery ${label}`
+              : `${label}: the previous attempt was refused, so this one is told exactly which checks failed${lastRound ? ' — this is the last round, and its failure is the one that comes back to the document' : ''}`,
+          );
+          let res: WorkflowRunResult;
+          try {
+            res = await executeWorkflow(sub, { ...ctx, withholdAcceptanceFeedback: !lastRound }, vars);
+          } catch (e) {
+            abort = `delivery ${label} could not be run (${e instanceof Error ? e.message : String(e)})`;
+            break;
+          }
+          const acceptance = res.steps.find((s) => sub.steps.find((d) => d.id === s.stepId)?.type === 'acceptance');
+          for (const s of res.steps) {
+            subArtifacts.push(...s.artifacts);
+            subTests.push(...s.tests);
+          }
+          const passed = res.status === 'completed' && acceptance?.status === 'completed';
+          roundSummaries.push(
+            `--- ${label}: ${passed ? 'accepted' : 'refused'} ---\n${acceptance?.summary ?? '(the acceptance step did not run)'}`,
+          );
+          if (passed) {
+            accepted = true;
+            // The head the sub-run's acceptance JUDGED is carried up into this run's vars (ADR-040): a
+            // `merge` in the workflow that invoked this repair must land that commit, and it can only name
+            // it if the fact crosses the sub-run boundary. The repair loop is the one place a sub-workflow's
+            // facts reach the run that started it.
+            if (res.vars['acceptedHead'] !== undefined) vars['acceptedHead'] = res.vars['acceptedHead'];
+            break;
+          }
+          failures = failureLinesOf(acceptance?.summary ?? '');
+        }
+
+        const summary = [
+          accepted
+            ? `delivery accepted on ${spent === 1 ? 'the first attempt' : `attempt ${spent} of ${maxRounds}`}`
+            : abort !== undefined
+              ? `delivery reached no verdict: ${abort}`
+              : `delivery refused after ${spent} of ${maxRounds} attempt(s): the last failure was written back to the requirement document`,
+          ...roundSummaries,
+        ].join('\n');
+        run.stepStatus[stepId] = accepted ? 'completed' : 'failed';
+        if (!accepted) run.status = 'failed';
+        if (!accepted) failedIds.add(stepId);
+        stepResults.push({
+          stepId,
+          status: accepted ? 'completed' : 'failed',
+          summary,
+          artifacts: subArtifacts,
+          tests: subTests,
+        });
+        ctx.onEvent?.(
+          stepId,
+          accepted
+            ? `delivery accepted after ${spent} attempt(s)`
+            : `delivery refused after ${spent} attempt(s) — the delivery step is skipped`,
+        );
         done.add(stepId);
         continue;
       }
@@ -539,13 +873,39 @@ export async function executeWorkflow(
           ctx.onEvent?.(stepId, `rule review FAILED: ${summary.split('\n')[0]}`);
         };
 
+        /**
+         * The repository the change set lives in. With a delivery worktree that is the WORKTREE, not
+         * the project: the two are separate repositories with no shared objects, so resolving `HEAD`
+         * in the project repo and diffing it in the worktree exits 128 ("bad object") — a review that
+         * could not run, for a change set that was right there (docs/bugs-fixed.md, 35).
+         */
+        const reviewCwd = ctx.worktree ?? ctx.cwd;
+
         /** Resolve a ref to a commit sha through the git seam; undefined = could not. */
         const resolveSha = async (ref: string): Promise<string | undefined> => {
           try {
-            const resolved = await git.run(['rev-parse', '--verify', `${ref}^{commit}`], { cwd: ctx.cwd });
+            const resolved = await git.run(['rev-parse', '--verify', `${ref}^{commit}`], { cwd: reviewCwd });
             if (resolved.exitCode !== 0) return undefined;
             const sha = resolved.stdout.trim().split('\n')[0]?.trim() ?? '';
             return /^[0-9a-f]{40}$/i.test(sha) ? sha : undefined;
+          } catch {
+            return undefined;
+          }
+        };
+
+        /**
+         * `baseRef: root` is the root commit of the repository under review — the point the delivery
+         * started from. `HEAD~1` is the wrong question for a delivery worktree: it names the parent of
+         * whatever happens to be on top, so a delivery with two commits (implementation, then tests)
+         * silently reviews only the last one. Reviewing everything the delivery added is what the
+         * step claims to do, so it is said as `root` rather than inferred from a distance.
+         */
+        const rootOf = async (sha: string): Promise<string | undefined> => {
+          try {
+            const listed = await git.run(['rev-list', '--max-parents=0', sha], { cwd: reviewCwd });
+            if (listed.exitCode !== 0) return undefined;
+            const sha0 = listed.stdout.trim().split('\n').pop()?.trim() ?? '';
+            return /^[0-9a-f]{40}$/i.test(sha0) ? sha0 : undefined;
           } catch {
             return undefined;
           }
@@ -558,18 +918,29 @@ export async function executeWorkflow(
           done.add(stepId);
           continue;
         }
-        const baseSha = await resolveSha(baseRef);
-        if (baseSha === undefined) {
+        const headSha = await resolveSha(headRef);
+        if (headSha === undefined) {
           await failRuleReview(
-            `rule_review precondition failed: baseRef "${baseRef}" could not be resolved to a commit in ${ctx.cwd}`,
+            `rule_review precondition failed: headRef "${headRef}" could not be resolved to a commit in ${reviewCwd}`,
           );
           done.add(stepId);
           continue;
         }
-        const headSha = await resolveSha(headRef);
-        if (headSha === undefined) {
+        const baseSha = baseRef === 'root' ? await rootOf(headSha) : await resolveSha(baseRef);
+        if (baseSha === undefined) {
           await failRuleReview(
-            `rule_review precondition failed: headRef "${headRef}" could not be resolved to a commit in ${ctx.cwd}`,
+            `rule_review precondition failed: baseRef "${baseRef}" could not be resolved to a commit in ${reviewCwd}`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        // Fail closed on a range that is not a change set of this repository. Resolving the two refs
+        // in one repository and diffing them in another used to be possible; so was a base that is
+        // not an ancestor of the head, which `git diff` happily renders as a change set.
+        const ancestry = await git.run(['merge-base', '--is-ancestor', baseSha, headSha], { cwd: reviewCwd });
+        if (ancestry.exitCode !== 0) {
+          await failRuleReview(
+            `rule_review precondition failed: base ${baseSha.slice(0, 12)} is not an ancestor of head ${headSha.slice(0, 12)} in ${reviewCwd}, so ${baseSha.slice(0, 12)}..${headSha.slice(0, 12)} is not a change set of the repository under review`,
           );
           done.add(stepId);
           continue;
@@ -578,7 +949,7 @@ export async function executeWorkflow(
         let findings: ReviewFinding[] = [];
         try {
           const input = await collectReviewInput(git, {
-            worktree: ctx.cwd,
+            worktree: ctx.worktree ?? ctx.cwd,
             baseSha,
             headSha,
             // Only test files need their CONTENT read; the rules that judge
@@ -699,21 +1070,882 @@ export async function executeWorkflow(
         continue;
       }
 
+      // Judge forge (ADR-026): produce the judge for this run OUTSIDE the implementation worktree and
+      // OUT OF the implementer's context, from the requirement document rather than from the
+      // implementation. The generator gets the requirement's ref and digest and the worktree path —
+      // it must not need the implementation to describe how the requirement could be checked.
+      //
+      // Fail-closed like every other evidence step: no generator, no readable requirement, no
+      // `JUDGE_FORGE: ok` marker, no `JUDGE_PATH`, a path outside the judge directory, a stale judge
+      // from a previous run, or no judge file at all all fail the step — and the acceptance behind it
+      // is then skipped, so an unverifiable delivery produces no ACCEPT artifact.
+      if (step.type === 'judge_forge') {
+        run.stepStatus[stepId] = 'running';
+        const resolved = requirementRefOf(step.requirementRef);
+        const requirementRef = resolved.ref;
+        const forgeRef = step.forgeRef?.trim() ?? '';
+        if (resolved.error !== undefined) {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary: resolved.error, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `judge forge FAILED: ${resolved.error}`);
+          done.add(stepId);
+          continue;
+        }
+        const reject = (message: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary: message, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `judge forge FAILED: ${message.split('\n')[0] ?? message}`);
+        };
+        if (requirementRef.length === 0 || forgeRef.length === 0) {
+          reject(`a judge_forge requires a requirementRef and a forgeRef (got "${requirementRef}" / "${forgeRef}")`);
+          done.add(stepId);
+          continue;
+        }
+        const path = await import('node:path');
+        const fsPromises = await import('node:fs/promises');
+        const fsMod = await import('node:fs');
+        const worktreePath = path.resolve(ctx.worktree ?? ctx.cwd);
+        let requirementText: string;
+        try {
+          requirementText = fsMod.readFileSync(path.join(ctx.cwd, requirementRef), 'utf8');
+        } catch (e) {
+          reject(`the requirement document "${requirementRef}" could not be read (${e instanceof Error ? e.message : String(e)})`);
+          done.add(stepId);
+          continue;
+        }
+        const reqDigest = requirementDigest(requirementText);
+        // The judge directory is run-scoped and recreated, so a judge from an earlier run can never be
+        // reused as this run's evidence.
+        const judgeDir = path.join(ctx.cwd, '.takumi', 'acceptance', stepId);
+        try {
+          await fsPromises.rm(judgeDir, { recursive: true, force: true });
+          await fsPromises.mkdir(judgeDir, { recursive: true });
+        } catch (e) {
+          reject(`the judge directory ${judgeDir} could not be prepared (${e instanceof Error ? e.message : String(e)})`);
+          done.add(stepId);
+          continue;
+        }
+        let out = '';
+        let exitOk = true;
+        try {
+          const r = await execFileAsync('bash', [path.resolve(ctx.cwd, forgeRef)], {
+            cwd: judgeDir,
+            timeout: step.timeoutMs ?? 300000,
+            env: {
+              ...process.env,
+              TAKUMI_REQUIREMENT: requirementRef,
+              TAKUMI_REQUIREMENT_DIGEST: `sha256:${reqDigest}`,
+              TAKUMI_WORKTREE: worktreePath,
+              TAKUMI_PROJECT: ctx.cwd,
+              TAKUMI_JUDGE_DIR: judgeDir,
+            },
+          });
+          out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+        } catch (e) {
+          exitOk = false;
+          const shell = e as { stdout?: string; stderr?: string };
+          out = `${shell.stdout ?? ''}${shell.stderr ?? ''}` || (e instanceof Error ? e.message : String(e));
+        }
+        const forged = /^\s*JUDGE_FORGE\s*[:=]\s*ok\s*$/im.test(out);
+        const declared = /^\s*JUDGE_PATH\s*[:=]\s*(.+?)\s*$/im.exec(out)?.[1]?.replace(/^[*`"']|[*`"']$/g, '');
+        const summaryLines = [`judge forge for ${requirementRef} sha256:${shortDigest(reqDigest)}`, `generator: ${forgeRef}`, `exit: ${exitOk ? 0 : '!0'}`, `judge dir: ${judgeDir}`, out.slice(0, 1200)].join('\n');
+        if (!exitOk || !forged) {
+          reject(`the judge forge did not report success (${forged ? 'non-zero exit' : 'no "JUDGE_FORGE: ok" marker'})\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        if (declared === undefined || declared.length === 0) {
+          reject(`the judge forge reported ok but declared no JUDGE_PATH\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        // The judge must be a file the generator wrote INSIDE its own directory: a generator that
+        // points somewhere else (the worktree, a source file) is pointing at the implementation.
+        const judgePath = path.resolve(judgeDir, declared);
+        const inDir = judgePath === judgeDir || judgePath.startsWith(`${judgeDir}${path.sep}`);
+        if (!inDir) {
+          reject(`the forged judge "${declared}" resolves to ${judgePath}, which is outside the judge directory ${judgeDir}: the judge is produced here and nowhere else\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        if (judgePath.startsWith(`${worktreePath}${path.sep}`) && worktreePath !== path.resolve(ctx.cwd)) {
+          reject(`the forged judge ${judgePath} is inside the implementation worktree ${worktreePath}: the implementer could read it, and a judge the implementer can read is a judge the implementer can fit\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        let judgeText = '';
+        try {
+          judgeText = fsMod.readFileSync(judgePath, 'utf8');
+        } catch (e) {
+          reject(`the judge forge declared "${declared}" but that file could not be read (${e instanceof Error ? e.message : String(e)})\n${summaryLines}`);
+          done.add(stepId);
+          continue;
+        }
+        const judgeDigest = requirementDigest(judgeText);
+        vars['judgePath'] = judgePath;
+        vars['judgeDigest'] = judgeDigest;
+        vars['judgeDir'] = judgeDir;
+        const forgeSummary = `judge forged: ${judgePath} sha256:${shortDigest(judgeDigest)} (outside ${worktreePath})\n${summaryLines}`;
+        run.stepStatus[stepId] = 'completed';
+        stepResults.push({ stepId, status: 'completed', summary: forgeSummary, artifacts: [], tests: [] });
+        done.add(stepId);
+        ctx.onEvent?.(stepId, `judge forged: ${judgePath} sha256:${shortDigest(judgeDigest)}`);
+        continue;
+      }
+
+      // Acceptance step (ADR-025): a verdict about ONE confirmed requirement document, produced by a
+      // harness that is NOT the implementation's own test.
+      //
+      // Three things make the verdict mean something, and each has its own refusal: the document at
+      // `requirementRef` must hash to the digest a human confirmed (an edited requirement fails by
+      // name), the harness must report a structured `ACCEPT_VERDICT` marker (prose decides nothing,
+      // and a missing marker fails), and the harness file is executed without a shell. Only a
+      // passing verdict writes an ACCEPT artifact — a failure writes none, so an artifact named
+      // ACCEPT cannot exist for a run that was not accepted.
+      if (step.type === 'acceptance') {
+        run.stepStatus[stepId] = 'running';
+        const resolvedRef = requirementRefOf(step.requirementRef);
+        const requirementRef = resolvedRef.ref;
+        // A forged judge arrives as {judgePath}; a literal path is still allowed (a workflow without a
+        // forge), but when this run forged a judge the acceptance MUST use it — checked below.
+        const acceptanceRef = renderPrompt(step.acceptanceRef ?? '', vars).trim();
+        const forgedJudgePath = vars['judgePath'];
+        const forgedJudgeDigest = vars['judgeDigest'] ?? '';
+        const reject = (message: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary: message, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `acceptance FAILED: ${message.split('\n')[0] ?? message}`);
+        };
+
+        if (resolvedRef.error !== undefined) {
+          reject(resolvedRef.error);
+          done.add(stepId);
+          continue;
+        }
+        // Defence in depth: the manifest validator already refuses both absences at load time.
+        if (requirementRef.length === 0 || acceptanceRef.length === 0) {
+          reject(`an acceptance requires a requirementRef and an acceptanceRef (got "${requirementRef}" / "${acceptanceRef}")`);
+          done.add(stepId);
+          continue;
+        }
+        if (acceptanceRef.includes('{')) {
+          reject(
+            `the acceptance harness reference "${step.acceptanceRef ?? ''}" did not resolve to a path: {judgePath} needs a judge_forge step that ran before this one`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        if (forgedJudgePath !== undefined && acceptanceRef !== forgedJudgePath) {
+          reject(
+            `this run forged its judge at "${forgedJudgePath}" and this acceptance would run "${acceptanceRef}": a workflow that forges a judge must accept with that judge, not with a harness of its own choosing`,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        const path = await import('node:path');
+        const fsMod = await import('node:fs');
+        let requirementText: string;
+        try {
+          requirementText = fsMod.readFileSync(path.join(ctx.cwd, requirementRef), 'utf8');
+        } catch (e) {
+          reject(
+            `the requirement document "${requirementRef}" could not be read (${e instanceof Error ? e.message : String(e)})`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        const digest = requirementDigest(requirementText);
+        if (ctx.confirmedRequirement === undefined) {
+          reject(
+            `no confirmed requirement is on record for this run, so this acceptance cannot be bound to one (the document at "${requirementRef}" hashes to ${shortDigest(digest)})`,
+          );
+          done.add(stepId);
+          continue;
+        }
+        if (ctx.confirmedRequirement.digest !== digest) {
+          reject(
+            `the requirement document "${requirementRef}" is not the one that was confirmed (confirmed ${shortDigest(ctx.confirmedRequirement.digest)} at "${ctx.confirmedRequirement.ref}", the document now hashes to ${shortDigest(digest)}): re-confirm the edited document before it can be accepted`,
+          );
+          done.add(stepId);
+          continue;
+        }
+
+        // The judge runs from its OWN directory (its forged home), never from the implementation
+        // worktree: the cwd it gets is a fact of the run, and the ACCEPT artifact records it. A real
+        // judge reaches the artefact through TAKUMI_WORKTREE rather than by living inside it.
+        // Resolved, not passed through: the judge runs from ITS OWN directory, so a relative
+        // --worktree would have it `cd` to a path that does not exist there.
+        const worktreePath = (await import('node:path')).resolve(ctx.worktree ?? ctx.cwd);
+        const harnessCwd = forgedJudgePath === undefined ? ctx.cwd : (await import('node:path')).dirname(forgedJudgePath);
+        let out = '';
+        let exitOk = true;
+        try {
+          const r = await execFileAsync('bash', [acceptanceRef], {
+            cwd: harnessCwd,
+            timeout: step.timeoutMs ?? 300000,
+            env: {
+              ...process.env,
+              TAKUMI_WORKTREE: worktreePath,
+              TAKUMI_PROJECT: ctx.cwd,
+              ...(forgedJudgePath === undefined ? {} : { TAKUMI_JUDGE_DIR: harnessCwd }),
+            },
+          });
+          out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+        } catch (e) {
+          exitOk = false;
+          const shell = e as { stdout?: string; stderr?: string };
+          out = `${shell.stdout ?? ''}${shell.stderr ?? ''}` || (e instanceof Error ? e.message : String(e));
+        }
+        const verdict = parseAcceptVerdict(out);
+        const checks = [...out.matchAll(/^(ok|not ok)\s+\d+\s*-\s*(.+)$/gm)].map((m) => ({
+          result: m[1] === 'ok' ? 'pass' : 'fail',
+          check: (m[2] ?? '').trim(),
+        }));
+        // The verdict is about a COMMIT: the head of the repository the acceptance is about — the
+        // delivery worktree when there is one, else the project. Resolving it in the project repo recorded
+        // the wrong commit on a black-box run (the ACCEPT artifact named the project's HEAD, not the
+        // delivered tree it had just judged) — the same wrong-repository family as ledger #35.
+        const head = await (async (): Promise<string | undefined> => {
+          try {
+            const g = ctx.git ?? createGitRunner();
+            const r = await g.run(['rev-parse', 'HEAD'], { cwd: ctx.worktree ?? ctx.cwd });
+            return r.exitCode === 0 ? r.stdout.trim() : undefined;
+          } catch {
+            return undefined;
+          }
+        })();
+        const accepted = exitOk && verdict.verdict === 'pass';
+        const id = acceptanceIds.get(stepId) ?? 'ACCEPT-001';
+        const requirements = extractTraceIds(requirementText).filter((t) => t.startsWith('REQ-'));
+        const summary = [
+          `acceptance ${accepted ? 'PASSED' : 'FAILED'}: ${accepted ? 'the confirmed requirement is satisfied' : (verdict.error ?? 'the harness reported a failing verdict')}`,
+          `harness: ${acceptanceRef}`,
+          `judge: ${forgedJudgePath === undefined ? '(none forged; a literal harness)' : `${forgedJudgePath} sha256:${shortDigest(forgedJudgeDigest)}`}`,
+          `harness cwd: ${harnessCwd}`,
+          `worktree: ${worktreePath}`,
+          `accepted head: ${head ?? '(unknown — the judged repository had no resolvable HEAD)'}`,
+          `requirement: ${requirementRef} sha256:${shortDigest(digest)}`,
+          `confirmed: ${ctx.confirmedRequirement.ref} sha256:${shortDigest(ctx.confirmedRequirement.digest)}`,
+          `verdict: ${verdict.verdict ?? '(none)'}`,
+          `checks: ${checks.filter((c) => c.result === 'pass').length}/${checks.length} ok`,
+          `exit: ${exitOk ? 0 : '!0'}`,
+          out.slice(0, 1200),
+        ].join('\n');
+
+        if (accepted) {
+          // The head the judge ACCEPTED is the only head a later `merge` may land (ADR-040). It travels in
+          // the run's vars, exactly as `publish` records `deliveryRef`: the acceptance result is where "what
+          // was reviewed" is decided, and a merge that cannot name this commit is not a merge this project
+          // performs. Absent means the judged repository had no resolvable HEAD, and a later merge then
+          // refuses rather than merging a head it cannot name.
+          if (head !== undefined && head.length > 0) vars['acceptedHead'] = head;
+          const artifact = [
+            `# ${id}`,
+            '',
+            '```yaml',
+            `id: ${id}`,
+            'kind: acceptance',
+            'requirement:',
+            `  ref: ${requirementRef}`,
+            `  digest: sha256:${digest}`,
+            `  requirements: [${requirements.join(', ')}]`,
+            'artifact:',
+            `  head: ${head ?? 'unknown'}`,
+            `  worktree: ${worktreePath}`,
+            'acceptance:',
+            `  harness: ${acceptanceRef}`,
+            `  cwd: ${harnessCwd}`,
+            ...(forgedJudgePath === undefined
+              ? ['  judge: none']
+              : [`  judge: ${forgedJudgePath}`, `  judgeDigest: sha256:${forgedJudgeDigest}`]),
+            '  verdict: pass',
+            `  verdictMarker: "ACCEPT_VERDICT: ${verdict.verdict}"`,
+            ...(checks.length === 0 ? ['  checks: []'] : ['  checks:', ...checks.map((c) => `    - "${c.result}: ${c.check.replace(/"/g, "'")}"`)]),
+            'confirmed:',
+            `  ref: ${ctx.confirmedRequirement.ref}`,
+            `  digest: sha256:${ctx.confirmedRequirement.digest}`,
+            'invalidatedBy:',
+            '  - requirement-digest-change',
+            '  - head-move',
+            '```',
+            '',
+          ].join('\n');
+          let artifactPath: string | undefined;
+          try {
+            const art = await ctx.artifacts.write({
+              taskId: `${runId}:${stepId}`,
+              kind: 'acceptance',
+              fileName: `${id}.md`,
+              content: artifact,
+              contentType: 'text/markdown',
+              trace: requirements,
+            });
+            artifactPath = art.path;
+          } catch (e) {
+            ctx.onEvent?.(stepId, `artifact persist failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          run.stepStatus[stepId] = 'completed';
+          stepResults.push({
+            stepId,
+            status: 'completed',
+            summary,
+            artifacts: artifactPath === undefined ? [] : [artifactPath],
+            tests: [],
+          });
+          ctx.onEvent?.(stepId, `acceptance PASSED (${checks.length} check(s) ok) — ${id} written`);
+        } else {
+          // A FAILED acceptance is written back (ADR-029). Two things have to leave the run:
+          //
+          //   1. A REJECT artifact, because a failure that exists only in a terminal is a failure
+          //      nobody can cite. It records what was judged, by which judge, and which checks failed.
+          //   2. A `feedback:` entry in the requirement document itself, which changes the document's
+          //      digest — so the confirmation this run was made with no longer matches the document,
+          //      and the next run needs a re-confirmation in which the human answers the failure.
+          //
+          // Only a rejection the JUDGE PRODUCED is recorded: a refusal (a stale confirmation, a judge
+          // that could not be forged, an unreadable document) means the acceptance could not be made,
+          // and writing feedback for it would edit the human's document because of a run-configuration
+          // mistake.
+          const failing = checks.filter((c) => c.result === 'fail');
+          const notes: string[] = [];
+          if (checks.length === 0 || failing.length === 0) {
+            notes.push('reject: not recorded — no failing check came out of a judge that ran');
+          } else {
+            const rejectId = `REJECT-${String((rejectSeq += 1)).padStart(3, '0')}`;
+            let feedbackLine = 'feedback: not recorded';
+            let digestAfter = digest;
+            const feedbackInput = {
+              at: new Date().toISOString(),
+              run: runId,
+              requirementDigest: digest,
+              judgeDigest: `sha256:${forgedJudgeDigest}`,
+              checks: failing.map((c) => c.check),
+            };
+            let appended: { id: string; duplicate: boolean } | undefined;
+            let appendError: string | undefined;
+            // A round that is going to be RETRIED must not edit the human's document (ADR-034): a run
+            // writes exactly one failure back, and only the attempt that is not followed by another
+            // writes it. Intermediate rounds therefore leave the document — and its digest — untouched.
+            const withholdFeedback = ctx.withholdAcceptanceFeedback === true;
+            if (withholdFeedback) {
+              feedbackLine = 'feedback: withheld — this failure is being repaired, so only the last round writes it back (ADR-034)';
+            } else {
+              try {
+                const res = appendFeedback(requirementText, feedbackInput);
+                if (res.duplicate) {
+                  appended = { id: res.id, duplicate: true };
+                } else {
+                  parseYamlText(res.text);
+                  fsMod.writeFileSync(path.join(ctx.cwd, requirementRef), res.text, 'utf8');
+                  digestAfter = requirementDigest(res.text);
+                  appended = { id: res.id, duplicate: false };
+                }
+              } catch (e) {
+                appendError = e instanceof Error ? e.message : String(e);
+              }
+            }
+            if (withholdFeedback) {
+              // `feedbackLine` already says the write-back is withheld. Nothing was attempted, so the
+              // "could not be recorded" branch below must not claim a failure that never happened.
+            } else if (appended === undefined) {
+              feedbackLine = `feedback: COULD NOT be recorded in ${requirementRef} (${appendError ?? 'unknown error'}) — the rejection is recorded but the loop is not closed`;
+            } else if (appended.duplicate) {
+              feedbackLine = `feedback: ${appended.id} already records this run at ${shortDigest(digest)}`;
+            } else {
+              feedbackLine = `feedback: ${appended.id} written into ${requirementRef} (open) — the document now hashes to ${shortDigest(digestAfter)}, so its confirmation no longer matches it and the next run needs a re-confirmation`;
+            }
+            const open = parseFeedback(
+              (() => {
+                try {
+                  return fsMod.readFileSync(path.join(ctx.cwd, requirementRef), 'utf8');
+                } catch {
+                  return requirementText;
+                }
+              })(),
+            ).filter((e) => e.status === 'open');
+
+            const artifact = [
+              `# ${rejectId}`,
+              '',
+              '```yaml',
+              `id: ${rejectId}`,
+              'kind: acceptance-reject',
+              'requirement:',
+              `  ref: ${requirementRef}`,
+              `  digest: sha256:${digest}`,
+              `  digestAfterFeedback: sha256:${digestAfter}`,
+              `  requirements: [${requirements.join(', ')}]`,
+              'artifact:',
+              `  head: ${head ?? 'unknown'}`,
+              `  worktree: ${worktreePath}`,
+              'acceptance:',
+              `  harness: ${acceptanceRef}`,
+              `  cwd: ${harnessCwd}`,
+              ...(forgedJudgePath === undefined
+                ? ['  judge: none']
+                : [`  judge: ${forgedJudgePath}`, `  judgeDigest: sha256:${forgedJudgeDigest}`]),
+              `  verdict: ${verdict.verdict ?? 'none'}`,
+              `  verdictMarker: ${verdict.verdict === undefined ? 'none' : `"ACCEPT_VERDICT: ${verdict.verdict}"`}`,
+              ...(checks.length === 0 ? ['  checks: []'] : ['  checks:', ...checks.map((c) => `    - "${c.result}: ${c.check.replace(/"/g, "'")}"`)]),
+              'rejected:',
+              `  failing: [${failing.map((c) => `"${c.check.replace(/"/g, "'")}"`).join(', ')}]`,
+              `  feedback: ${appended === undefined ? (withholdFeedback ? 'withheld (this failure is being repaired)' : 'none') : appended.id}`,
+              `  feedbackOpen: [${open.map((e) => e.id).join(', ')}]`,
+              `  documentChanged: ${digestAfter === digest ? 'false' : 'true'}`,
+              'confirmed:',
+              `  ref: ${ctx.confirmedRequirement.ref}`,
+              `  digest: sha256:${ctx.confirmedRequirement.digest}`,
+              // The judge's own words, so the rejection can be argued with rather than taken on trust.
+              'output: |',
+              ...out.slice(0, 1200).split('\n').map((line) => `  ${line}`),
+              '```',
+              '',
+            ].join('\n');
+            try {
+              const art = await ctx.artifacts.write({
+                taskId: `${runId}:${stepId}`,
+                kind: 'acceptance',
+                fileName: `${rejectId}.md`,
+                content: artifact,
+                contentType: 'text/markdown',
+                trace: requirements,
+              });
+              notes.push(`rejection: ${rejectId} written (${art.path})`);
+            } catch (e) {
+              notes.push(`rejection: ${rejectId} could not be persisted (${e instanceof Error ? e.message : String(e)})`);
+            }
+            notes.push(feedbackLine);
+            notes.push(`failing checks: ${failing.map((c) => c.check.split(' ')[0]).join(', ')}`);
+          }
+          reject([summary, ...notes].join('\n'));
+        }
+        done.add(stepId);
+        continue;
+      }
+
+      // CI config step (ADR-037): write the host's pipeline into the delivery, derived from the
+      // requirement document's `deliverable.run` and the delivered project's own test command. Refused
+      // when the step declares no test command, and refused when the named document cannot be read.
+      if (step.type === 'ci_config') {
+        run.stepStatus[stepId] = 'running';
+        const resolvedRef = requirementRefOf(step.requirementRef);
+        const ciWorktree = (await import('node:path')).resolve(ctx.worktree ?? ctx.cwd);
+        const ciResult = await executeCiConfigStep({
+          stepId,
+          runId,
+          projectDir: ctx.cwd,
+          worktree: ciWorktree,
+          ...(step.testCommand === undefined ? {} : { testCommand: step.testCommand }),
+          ...(step.dialect === undefined ? {} : { dialect: step.dialect }),
+          ...(resolvedRef.ref.length === 0 ? {} : { requirementRef: resolvedRef.ref }),
+          artifacts: ctx.artifacts,
+          trace: taskTraceFor(step, vars),
+        });
+        run.stepStatus[stepId] = ciResult.status;
+        if (ciResult.status === 'failed') {
+          run.status = 'failed';
+          failedIds.add(stepId);
+        }
+        stepResults.push({ stepId, status: ciResult.status, summary: ciResult.summary, artifacts: ciResult.artifacts, tests: [] });
+        ctx.onEvent?.(stepId, ciResult.summary.split('\n')[0] ?? ciResult.summary);
+        done.add(stepId);
+        continue;
+      }
+
+      // Await checks step (ADR-037): wait for the host's pipeline on the delivered head. `success` for
+      // every check is the only pass; a missing provider, a host without the checks capability, a host
+      // that throws, a host that reports nothing, a red check and a pending check at the timeout all fail
+      // the run CLOSED — the step never reports a green pipeline it did not actually read.
+      if (step.type === 'await_checks') {
+        run.stepStatus[stepId] = 'running';
+        const declaredRef = ((step as WorkflowStep & { ref?: string }).ref ?? vars['deliveryRef'] ?? '').trim();
+        let checksRef: PullRequestRef | undefined;
+        if (declaredRef.length > 0) {
+          checksRef = { number: declaredRef, url: /^https?:/i.test(declaredRef) ? declaredRef : '', headSha: '', baseSha: '' };
+        } else if (ctx.worktree !== undefined) {
+          const git = ctx.git ?? createGitRunner();
+          const branchRun = await git.run(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: ctx.worktree });
+          const headRun = await git.run(['rev-parse', 'HEAD'], { cwd: ctx.worktree });
+          const branch = branchRun.stdout.trim();
+          const head = headRun.stdout.trim();
+          if (branchRun.exitCode === 0 && branch.length > 0 && branch !== 'HEAD' && head.length > 0) {
+            checksRef = { number: branch, url: '', headSha: head, baseSha: '' };
+          }
+        }
+        const awaitResult = await executeAwaitChecksStep({
+          stepId,
+          ...(ctx.delivery === undefined ? {} : { delivery: ctx.delivery }),
+          ...(checksRef === undefined ? {} : { ref: checksRef }),
+          ...(step.waitSeconds === undefined ? {} : { waitSeconds: step.waitSeconds }),
+          onEvent: (message) => ctx.onEvent?.(stepId, message),
+        });
+        run.stepStatus[stepId] = awaitResult.status;
+        if (awaitResult.status === 'failed') {
+          run.status = 'failed';
+          failedIds.add(stepId);
+        }
+        let awaitSummary = awaitResult.summary;
+        // REPORT a GENUINE pipeline failure to the host (ADR-037). "Genuine" is decided by one fact:
+        // the host actually REPORTED checks. Every case with nothing to report — no provider, a host
+        // without the checks capability, a checks() that threw, a host that reported nothing — leaves
+        // `checks` empty, so none of those is ever reported. Reporting also needs a published
+        // reference (`vars.deliveryRef`, set by the `publish` step): with no pull request there is no
+        // host surface to carry the failure, and an issue about nothing is worse than no issue.
+        if (awaitResult.status === 'failed' && awaitResult.checks.length > 0) {
+          const deliveryRef = (vars['deliveryRef'] ?? '').trim();
+          const reporter = ctx.delivery;
+          if (
+            deliveryRef.length > 0 &&
+            reporter !== undefined &&
+            (reporter.openIssue !== undefined || reporter.commentOnPullRequest !== undefined)
+          ) {
+            const notGreen = renderNotGreenChecks(awaitResult.checks);
+            const reportBody = [
+              `Pipeline not green on pull request ${deliveryRef} (run ${runId}, workflow ${workflow.name}).`,
+              '',
+              'Checks that are not green:',
+              ...notGreen,
+              '',
+              awaitResult.summary,
+            ].join('\n');
+            const reportTitle = `Pipeline not green on pull request ${deliveryRef}: ${notGreen.length} check(s)`;
+            const reportNotes: string[] = [];
+            // The comment goes on the pull request FIRST: that is the surface the reviewer reads, and
+            // the failure is ABOUT this pull request. A failure to comment is loud and never changes
+            // the run's outcome.
+            if (reporter.commentOnPullRequest !== undefined) {
+              try {
+                await reporter.commentOnPullRequest({ number: deliveryRef, url: '', headSha: '', baseSha: '' }, reportBody);
+                reportNotes.push(`commented on pull request ${deliveryRef}`);
+              } catch (e) {
+                reportNotes.push(
+                  `COULD NOT comment on pull request ${deliveryRef} (${e instanceof Error ? e.message : String(e)}): the failure is still named in this summary`,
+                );
+              }
+            }
+            // Exactly ONE issue per run. A failure to open it is LOUD, and it NEVER turns an
+            // already-red run into a different kind of failure: the run was failed by the pipeline,
+            // and it stays failed by the pipeline.
+            if (reporter.openIssue !== undefined && !pipelineIssueFiled) {
+              pipelineIssueFiled = true;
+              try {
+                const issue = await reporter.openIssue({ title: reportTitle, body: reportBody });
+                reportNotes.push(`issue ${issue.number} opened (${issue.url})`);
+              } catch (e) {
+                reportNotes.push(
+                  `issue COULD NOT be opened (${e instanceof Error ? e.message : String(e)}) — the pull request exists; the failure record does not`,
+                );
+              }
+            } else if (reporter.openIssue !== undefined) {
+              reportNotes.push('issue not opened (one pipeline-failure issue per run was already filed)');
+            }
+            awaitSummary = [awaitSummary, '', 'host report:', ...reportNotes.map((n) => `- ${n}`)].join('\n');
+            ctx.onEvent?.(stepId, `pipeline failure reported: ${reportNotes.join('; ')}`);
+          }
+        }
+        stepResults.push({ stepId, status: awaitResult.status, summary: awaitSummary, artifacts: [], tests: [] });
+        ctx.onEvent?.(stepId, awaitSummary.split('\n')[0] ?? awaitSummary);
+        done.add(stepId);
+        continue;
+      }
+
       // Delivery step: package the run's artifacts into a delivery bundle.
       // Produces a delivery manifest + a ZIP-able summary of all artifacts.
+      // Publish step (ADR-037): the host-side half of a delivery. Everything up to here happened in a
+      // worktree nobody else can see; this is the one place a run is allowed to write to a code host, and it
+      // is deliberately narrow: push the committed branch (never a force), open EXACTLY ONE pull request
+      // whose body carries the confirmed requirement and its digest, and — when the host can record one —
+      // an issue that says what was asked for. A host that cannot do the first part fails the run.
+      if (step.type === 'publish') {
+        run.stepStatus[stepId] = 'running';
+        const failPublish = (summary: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `publish FAILED: ${summary.split('\n')[0]}`);
+        };
+        const provider = ctx.delivery;
+        const worktree = ctx.worktree;
+        if (provider === undefined) {
+          failPublish('this run has no delivery provider (ctx.delivery), so there is no host to publish to: a local bundle is not a delivery');
+          done.add(stepId);
+          continue;
+        }
+        if (worktree === undefined) {
+          failPublish('a publish step needs a delivery worktree (--worktree): there is nothing to push');
+          done.add(stepId);
+          continue;
+        }
+        const git = ctx.git ?? createGitRunner();
+        const branchRun = await git.run(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: worktree });
+        const branch = branchRun.stdout.trim();
+        const baseBranch = step.baseBranch ?? ctx.deliveryDefaults?.baseBranch ?? 'main';
+        const remote = step.remote ?? ctx.deliveryDefaults?.remote ?? 'origin';
+        if (branchRun.exitCode !== 0 || branch.length === 0 || branch === 'HEAD') {
+          failPublish(`the delivery worktree is not on a branch (git said "${branch}"): a detached head cannot be published`);
+          done.add(stepId);
+          continue;
+        }
+        const baseRun = await git.run(['rev-parse', '--verify', `${remote}/${baseBranch}^{commit}`], { cwd: worktree });
+        const baseSha = baseRun.exitCode === 0 ? baseRun.stdout.trim() : '';
+        const headRun = await git.run(['rev-parse', 'HEAD'], { cwd: worktree });
+        const headSha = headRun.stdout.trim();
+        if (baseSha.length === 0) {
+          failPublish(`the base branch ${remote}/${baseBranch} could not be resolved in the delivery worktree: a pull request with no base is not a pull request`);
+          done.add(stepId);
+          continue;
+        }
+        const confirmed = ctx.confirmedRequirement;
+        const itemId = confirmed?.ref ?? workflow.name;
+        const requirementLine =
+          confirmed === undefined
+            ? 'Requirement: (this run was not bound to a confirmed requirement)'
+            : `Requirement: \`${confirmed.ref}\` at \`sha256:${confirmed.digest}\``;
+        const body = [
+          `Run: ${runId}`,
+          requirementLine,
+          `Item: ${itemId}`,
+          '',
+          'This pull request was produced by a black-box delivery run: the requirement above is the document a',
+          'human confirmed, the acceptance artifact records the judge that accepted this commit, and the',
+          'commit boundary is the implementer\'s own.',
+        ].join('\n');
+        try {
+          const outcome = await provider.deliver(
+            {
+              worktree,
+              branch,
+              baseBranch,
+              remote,
+              itemId,
+              runId,
+              ...(step.prTitle === undefined ? {} : { title: step.prTitle }),
+              body,
+            },
+            { baseSha },
+          );
+          // `pr` is optional in the port: a bare git remote has a pushed branch and nothing to review. That
+          // is reported as what it is — never as a pull request that does not exist.
+          const pr = outcome.pr;
+          const lines = [
+            pr === undefined
+              ? `published ${branch} -> ${baseBranch}: the branch is pushed and this host has no review surface`
+              : `published ${branch} -> ${baseBranch} as pull request ${pr.number}`,
+            ...(pr === undefined ? [] : [`  url: ${pr.url}`, `  head: ${pr.headSha}`, `  base: ${pr.baseSha} (${baseSha})`]),
+            `  push: ${outcome.push.mode} (${outcome.push.branch} at ${outcome.push.head})`,
+            `  ${requirementLine}`,
+            ...outcome.notes.map((note) => `  note: ${note}`),
+          ];
+          if (outcome.push.mode === 'force') {
+            // The port says a forced push is a contract violation; a provider that reports one has broken the
+            // boundary this layer exists to keep, so the run refuses to treat the delivery as published.
+            failPublish([`the provider pushed with a FORCE, which the port forbids: the reviewed history is gone`, ...lines].join('\n'));
+            done.add(stepId);
+            continue;
+          }
+          // The issue is a RECORD, not a gate: a host that cannot record one is reported, never silent, and
+          // never allowed to undo a pull request that already exists (the same rule the board mirror keeps).
+          let issueLine = 'issue: not opened (the provider cannot record issues)';
+          if (provider.openIssue !== undefined) {
+            try {
+              const issue = await provider.openIssue({
+                title: step.issueTitle ?? `${itemId}: ${branch}`,
+                body: [
+                  requirementLine,
+                  ...(pr === undefined ? [`Branch: \`${branch}\``] : [`Pull request: ${pr.url}`]),
+                  '',
+                  'Opened by a black-box delivery run as the record of this work.',
+                ].join('\n'),
+              });
+              issueLine = `issue: ${issue.number} opened (${issue.url})`;
+            } catch (e) {
+              issueLine = `issue: COULD NOT be opened (${e instanceof Error ? e.message : String(e)}) — the pull request exists; the record does not`;
+            }
+          }
+          lines.push(`  ${issueLine}`);
+          run.stepStatus[stepId] = 'completed';
+          stepResults.push({ stepId, status: 'completed', summary: lines.join('\n'), artifacts: [], tests: [] });
+          // The pipeline step judges the head the HOST has, so the reference travels with the run: a later
+          // `await_checks` reads the checks of the pull request this step opened rather than guessing.
+          if (pr !== undefined) vars['deliveryRef'] = pr.number;
+          ctx.onEvent?.(
+            stepId,
+            pr === undefined
+              ? `publish: ${branch} pushed (this host has no review surface)`
+              : `publish: pull request ${pr.number} opened (${pr.url})`,
+          );
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e);
+          failPublish(`the host refused the delivery: ${detail}`);
+        }
+        done.add(stepId);
+        continue;
+      }
+
+      // Merge step (ADR-040): the LAST MILE. Everything up to here produced an OPEN pull request; this is the
+      // one step that LANDS it, and it lands EXACTLY the commit the acceptance judged. Two independent
+      // guards, both required:
+      //
+      //   1. the reviewed head is passed to the port as `expectedHeadSha`, so the HOST refuses a moved head
+      //      (the port's own rule, proven live against a real Forgejo: a stale head got `409 head out of
+      //      date` — a guard a client bug cannot bypass);
+      //   2. the pull request's CURRENT head is read from `status(ref)` and compared to the reviewed head
+      //      BEFORE any merge is attempted, naming both SHAs when they differ — because a green pipeline on
+      //      one commit says nothing about another, and a merge of a different head is exactly the failure
+      //      this whole layer exists to prevent.
+      //
+      // The reference and the head are NOT manifest fields (ADR-040): the pull request is the one this run
+      // published (`vars.deliveryRef`) and the commit is the one the acceptance judged (`vars.acceptedHead`).
+      if (step.type === 'merge') {
+        run.stepStatus[stepId] = 'running';
+        const failMerge = (summary: string): void => {
+          run.stepStatus[stepId] = 'failed';
+          run.status = 'failed';
+          failedIds.add(stepId);
+          stepResults.push({ stepId, status: 'failed', summary, artifacts: [], tests: [] });
+          ctx.onEvent?.(stepId, `merge FAILED: ${summary.split('\n')[0] ?? summary}`);
+        };
+        const provider = ctx.delivery;
+        if (provider === undefined) {
+          failMerge('this run has no delivery provider (ctx.delivery), so there is no host to merge on: an open pull request is not a landed delivery');
+          done.add(stepId);
+          continue;
+        }
+        // The reference is the run's OWN published pull request, never a manifest-named one: landing a pull
+        // request this run did not publish is not this run's delivery.
+        const deliveryRef = (vars['deliveryRef'] ?? '').trim();
+        if (deliveryRef.length === 0) {
+          failMerge('the run has no published reference (vars.deliveryRef, set by a publish step), so there is no pull request to land');
+          done.add(stepId);
+          continue;
+        }
+        // The REVIEWED head — the commit the acceptance judged — is the only head this step may merge.
+        const reviewedHead = (vars['acceptedHead'] ?? '').trim();
+        if (reviewedHead.length === 0) {
+          failMerge('the reviewed head could not be determined (no acceptance recorded the head it judged, vars.acceptedHead), so this merge cannot say which commit it is landing: refusing');
+          done.add(stepId);
+          continue;
+        }
+        const ref: PullRequestRef = {
+          number: deliveryRef,
+          url: /^https?:/i.test(deliveryRef) ? deliveryRef : '',
+          headSha: '',
+          baseSha: '',
+        };
+        // Guard 2: read the CURRENT head and refuse BEFORE calling merge when it differs from the reviewed
+        // head. Naming both SHAs is the point: a reader must be able to see which commit was judged and which
+        // one the pull request now points at.
+        let current: PullRequestStatus;
+        try {
+          current = await provider.status(ref);
+        } catch (e) {
+          failMerge(`the host could not report the state of pull request ${deliveryRef} (${e instanceof Error ? e.message : String(e)}), so the head that would be merged could not be read`);
+          done.add(stepId);
+          continue;
+        }
+        const currentHead = (current.headSha ?? '').trim();
+        if (currentHead !== reviewedHead) {
+          failMerge(`pull request ${deliveryRef} now points at ${currentHead.length > 0 ? currentHead : '(unknown)'}, but the reviewed and accepted head is ${reviewedHead}: refusing to merge a head that was not the one judged (a green pipeline on one commit says nothing about another)`);
+          done.add(stepId);
+          continue;
+        }
+        const method: DeliveryMergeMethod = step.mergeMethod ?? 'merge';
+        // Guard 1: hand the reviewed head to the port. The HOST refuses a moved head.
+        let outcome: MergeOutcome;
+        try {
+          outcome = await provider.merge(ref, { expectedHeadSha: reviewedHead, method });
+        } catch (e) {
+          failMerge(`the host refused the merge of ${reviewedHead} on pull request ${deliveryRef}: ${e instanceof Error ? e.message : String(e)}`);
+          done.add(stepId);
+          continue;
+        }
+        // `merged: false` is a FAILURE, never a note: a merge that did not happen is not a landed delivery.
+        if (outcome.merged !== true) {
+          failMerge(`the host reported merged=${String(outcome.merged)} for pull request ${deliveryRef} (head ${reviewedHead}): a merge that did not happen is not a landed delivery`);
+          done.add(stepId);
+          continue;
+        }
+        // The port requires the merged commit to BE the reviewed head; a provider that reports another one
+        // has broken the boundary this layer keeps.
+        if (outcome.headSha !== reviewedHead) {
+          failMerge(`the host reported it merged ${outcome.headSha}, but the reviewed and accepted head is ${reviewedHead}: the port requires the merged commit to be the reviewed head`);
+          done.add(stepId);
+          continue;
+        }
+        const summaryLines = [
+          `merged pull request ${deliveryRef}: method ${outcome.method}, head ${outcome.headSha}, url ${outcome.url}`,
+          `  reviewed head: ${reviewedHead} (the commit the acceptance judged)`,
+          `  host head before merge: ${currentHead} (${current.state})`,
+        ];
+        const artifactPaths: string[] = [];
+        try {
+          const art = await ctx.artifacts.write({
+            taskId: `${runId}:${stepId}`,
+            kind: 'merge',
+            fileName: `${stepId}.md`,
+            content: [
+              `# ${stepId} (merge)`,
+              '',
+              'merged: true',
+              `pull request: ${deliveryRef}`,
+              `method: ${outcome.method}`,
+              `head: ${outcome.headSha}`,
+              `url: ${outcome.url}`,
+              `reviewedHead: ${reviewedHead}`,
+              '',
+            ].join('\n'),
+            contentType: 'text/markdown',
+            trace: taskTraceFor(step, vars),
+          });
+          artifactPaths.push(art.path);
+        } catch (e) {
+          summaryLines.push(`  note: the merge artifact could not be persisted (${e instanceof Error ? e.message : String(e)}) — the merge happened and is named here`);
+        }
+        run.stepStatus[stepId] = 'completed';
+        stepResults.push({ stepId, status: 'completed', summary: summaryLines.join('\n'), artifacts: artifactPaths, tests: [] });
+        // What a later step needs to know the delivery LANDED: the flag, the commit that landed and the
+        // reference it landed on. A step after this one must not have to infer a merge from prose.
+        vars['deliveryMerged'] = 'true';
+        vars['mergedHead'] = outcome.headSha;
+        vars['mergedRef'] = deliveryRef;
+        ctx.onEvent?.(stepId, `merge: pull request ${deliveryRef} merged (method ${outcome.method}, head ${outcome.headSha})`);
+        done.add(stepId);
+        continue;
+      }
+
       if (step.type === 'delivery') {
         run.stepStatus[stepId] = 'running';
         const fsx3 = await import('node:fs/promises');
         const path3 = await import('node:path');
+        // The bundle is THIS RUN's artifacts, taken from the step results that produced them, not
+        // everything the store happens to hold: listing the store shipped a stale `REJECT-001.md` from an
+        // earlier, refused run inside the manifest of a delivery that had passed (docs/bugs-fixed.md #38).
+        const mine = new Set(stepResults.flatMap((s) => s.artifacts));
         const all = await ctx.artifacts.list();
+        const runArtifacts = all.filter((a) => mine.has(a.path));
         const lines = [
-          `# 納品物一覧 (Delivery Manifest)`,
+          `# Delivery Manifest`,
           `workflow: ${workflow.name}  |  run: ${runId}`,
           `generated: ${new Date().toISOString()}`,
           ``,
-          `## artifacts (${all.length})`,
+          `## artifacts (${runArtifacts.length})`,
         ];
-        for (const a of all) lines.push(`- ${a.path}  (kind=${a.kind}, trace=[${(a.trace ?? []).join(', ')}])`);
+        for (const a of runArtifacts) lines.push(`- ${a.path}  (kind=${a.kind}, trace=[${(a.trace ?? []).join(', ')}])`);
+        if (all.length > runArtifacts.length) {
+          lines.push(
+            ``,
+            `${all.length - runArtifacts.length} artifact(s) in the store belong to OTHER runs and are not part`,
+            `of this delivery: a bundle that cannot say which run it is from is a bundle nobody can trust.`,
+          );
+        }
         const manifest = lines.join('\n');
         const deliveryArtifact = await ctx.artifacts.write({
           taskId: `${runId}:${stepId}`,
@@ -723,9 +1955,9 @@ export async function executeWorkflow(
           contentType: 'text/markdown',
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
         });
-        stepResults.push({ stepId, status: 'completed', summary: `delivery bundle ready (${all.length} artifacts)`, artifacts: [deliveryArtifact.path], tests: [] });
+        stepResults.push({ stepId, status: 'completed', summary: `delivery bundle ready (${runArtifacts.length} artifacts)`, artifacts: [deliveryArtifact.path], tests: [] });
         run.stepStatus[stepId] = 'completed';
-        ctx.onEvent?.(stepId, `delivery manifest written (${all.length} artifacts)`);
+        ctx.onEvent?.(stepId, `delivery manifest written (${runArtifacts.length} artifacts)`);
         done.add(stepId);
         continue;
       }
@@ -745,7 +1977,7 @@ export async function executeWorkflow(
           // Resolve the prompt from the step's skill template when configured,
           // else the in-workflow prompt (acceptance Gate 8: skills drive behavior).
           prompt: await resolveStepPrompt(step, ctx.skillsRoot, vars),
-          cwd: ctx.cwd,
+          cwd: ctx.worktree ?? ctx.cwd,
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
           context: { workflowStep: stepId, workflow: workflow.name, ...vars },
         };
@@ -835,7 +2067,7 @@ export async function executeWorkflow(
 
     run.status = failedIds.size > 0 ? 'failed' : 'completed';
     run.finishedAt = Date.now();
-    return { run, steps: stepResults, status: run.status };
+    return { run, steps: stepResults, status: run.status, vars };
   } catch (e) {
     run.status = 'failed';
     run.finishedAt = Date.now();

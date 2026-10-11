@@ -875,6 +875,7 @@ export async function runTaskBoardProviderContractSuite(
           policy: 'd'.repeat(64),
           ruleset: 'e'.repeat(64),
           reviewer: 'reviewer:fixture',
+          requirement: 'f'.repeat(64),
           at: new Date().toISOString(),
         },
       });
