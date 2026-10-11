@@ -110,6 +110,38 @@ export type {
 } from './requirement-decisions.js';
 export { FEEDBACK_BRIEF_MARKER, analyseFeedback, failuresWithoutDecision, renderFeedbackBrief } from './feedback-brief.js';
 export type { AnalysedFailure, AnalysedFeedback, FailureKind } from './feedback-brief.js';
+
+// A standing authorization (ADR-045): a signed grant that lets a requirement document be confirmed by
+// its OWN defaults, non-interactively, and says so in the record. The scope is SELECTABLE — a `pin` (one
+// revision of one document) or a `scope` (a family of documents by glob) — and either way it may only
+// NARROW the licensable set (a widening field is refused at load, by name), and the confirmation it
+// produces is the same digest-bound token an interactive one produces (ADR-025).
+export {
+  AUTHORIZATION_CLASSES,
+  AUTHORIZATION_FAILURE_CLASSES,
+  AUTHORIZATION_POLICIES,
+  SCOPE_FORMS,
+  UNMECHANISED_CLASS,
+  authorizationDigest,
+  decisionClass,
+  documentMatchesScope,
+  licenseStandingConfirmation,
+  parseStandingAuthorization,
+  readRequirementConfirmation,
+} from './standing-authorization.js';
+export type {
+  AuthorizationFailureGrant,
+  AuthorizationGrant,
+  AuthorizationLoad,
+  AuthorizationPin,
+  AuthorizationScope,
+  ConfirmedAuthorization,
+  DefaultedDecision,
+  RequirementConfirmation,
+  StandingAuthorization,
+  StandingLicence,
+  StandingLicenceInput,
+} from './standing-authorization.js';
 export { carryStateRecordForward } from './board-state-record.js';
 export {
   NO_REQUIREMENT,
@@ -236,6 +268,29 @@ export { createGitRunner, unconfiguredGitRunner, gitFailure } from './git-runner
 export type { GitRunner, GitResult, GitRunnerOptions } from './git-runner.js';
 export { renderRunMarker, parseRunMarkers, hasRunMarker } from './run-marker.js';
 export { createKeyOf, hasCreateMarker, parseCreateMarkers, renderCreateMarker } from './create-marker.js';
+
+// The run record: one machine-readable file per run, so cost / success rate / the
+// most-failing step are answered from data rather than by reading logs (see run-record.ts).
+export {
+  RUN_RECORD_DIR,
+  formatDuration,
+  readRunRecords,
+  renderRunAggregate,
+  runRecordPath,
+  summarizeRuns,
+  writeRunRecord,
+} from './run-record.js';
+export type {
+  RunAggregate,
+  RunCostAggregate,
+  RunRecord,
+  RunRecordCost,
+  RunRecordPublished,
+  RunRecordStep,
+  RunRecordUnreadable,
+  RunStepFailureCount,
+  RunStepStatus,
+} from './run-record.js';
 
 // Pilot metrics: counters a scheduler's monitoring can scrape.
 export {

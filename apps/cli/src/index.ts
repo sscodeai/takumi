@@ -3,6 +3,7 @@ import { listExtensions, loadConfig, runTask, workflowExitCode } from './command
 import { runRequirementCommand } from './requirement-command.js';
 import { initProject } from './init.js';
 import { createBoardProvider, runBoardCommand } from './board-command.js';
+import { runRunsCommand } from './runs-command.js';
 import { eventLogFor, runOnce, type PilotConfig } from './run-command.js';
 import { join } from 'node:path';
 import type { DeliveryProvider, TaskBoardProvider } from '@takumi/core';
@@ -62,6 +63,10 @@ async function main(argv: string[]): Promise<number> {
 
     case 'board': {
       return await runBoardCommand(rest);
+    }
+
+    case 'runs': {
+      return runRunsCommand(cwd, rest);
     }
 
     case 'pilot': {
@@ -217,6 +222,9 @@ Usage:
   takumi board [--provider github --repo owner/name]
                                        Read-only view of a task board (ADR-006)
   takumi board --check | --bootstrap    Report or create the board's states (ADR-008)
+  takumi runs [--dir <path>] [--json]   Aggregate the run records in .takumi/runs/: run count,
+                                       success rate, median/worst duration, the most-failing step,
+                                       and the total cost the runtimes reported
   takumi pilot --once                  One tick of the unattended runner (ADR-009)
   takumi extension list                List discovered extensions
   takumi requirement digest <ref>      Print the confirmation token for a requirement document

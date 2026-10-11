@@ -126,6 +126,11 @@ const DEFAULT_PROTECTED_PATTERNS: readonly string[] = [
   '(^|/)Cargo\\.(toml|lock)$',
   '(^|/)takumi\\.ya?ml$',
   '(^|/)\\.takumi/',
+  // ADR-045: a run may never author, edit or revoke its OWN authorization. The grant that lets a
+  // document be defaulted non-interactively is a human's artefact, and a machine that could rewrite it
+  // would be widening its own reach — so `docs/authorizations/` is a protected path like CI config or a
+  // dependency manifest, and a change to it is a `human` finding (ADR-032).
+  '(^|/)docs/authorizations/',
 ];
 
 /** Markers that silence a test rather than fix it, across the harnesses we have seen. */
