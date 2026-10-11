@@ -244,8 +244,21 @@ test('service: the forge carries the same floor and default the front door does'
   assert.equal(Number(floor[1]), MIN_RUN_TIMEOUT_MS, 'the forge floor matches MIN_RUN_TIMEOUT_MS');
   assert.equal(Number(fallback[1]), DEFAULT_RUN_TIMEOUT_MS, 'the forge default matches DEFAULT_RUN_TIMEOUT_MS');
 
-  // And the forge actually applies the bound to the invocation of the deliverable.
-  assert.match(forge, /RUN_OUT=\$\( \( cd "\$WORKTREE" && timeout "\$RUN_TIMEOUT_S" sh -c "\$cmd" \) 2>&1 \)/, 'run_tool runs the deliverable under `timeout`');
+  // And the forge actually applies the bound to BOTH shapes of the invocation. The script shape starts
+  // the deliverable in its OWN process group and tears that group down, because a deliverable may
+  // background a surface before it returns and that surface used to outlive the invocation (measured:
+  // a `station_service.py` still bound to 8787 after the run ended).
+  assert.match(
+    forge,
+    /start_scenario_surface "deliverable-script" "\$cmd"/,
+    'run_tool starts the script-shaped deliverable as a surface of its own, so nothing it backgrounds outlives it',
+  );
+  assert.match(
+    forge,
+    /timeout "\$RUN_TIMEOUT_S" sh -c "\$read_cmd"/,
+    'the read of a service-shaped deliverable stays under `timeout`',
+  );
+  assert.match(forge, /RUN_STATUS=124/, 'a bound that was hit stays a FAILURE, never a pass');
 });
 
 // --- the forge is a second gate, not a second opinion ------------------------------------------

@@ -895,11 +895,34 @@ alloc_port() {
 # same bound, and the surface is killed on EVERY path — a leaked service answers the NEXT fixture, which
 # is how a check turns into one that always passes.
 run_tool() { # $1 = absolute csv path; leaves the report in RUN_OUT, its status in RUN_STATUS
-  local csv="$1" cmd port url start_cmd read_cmd
+  local csv="$1" cmd port url start_cmd read_cmd p waited_ms
   if [ -z "$READ_TEMPLATE" ]; then
     cmd=$(subst "$RUN_TEMPLATE" "$csv" "" "$DELIV_URL")
     RUN_CMD="$cmd"
-    RUN_OUT=$( ( cd "$WORKTREE" && timeout "$RUN_TIMEOUT_S" sh -c "$cmd" ) 2>&1 ); RUN_STATUS=$?
+    # THE SCRIPT SHAPE, with the SAME teardown a surface gets. One invocation, report on stdout — but a
+    # deliverable may BACKGROUND a surface before it returns (the spike's own `serve.sh` does exactly
+    # that, so a pipe-reading judge finishes instead of hanging on a long-running server), and that
+    # surface outlives the invocation. Observed live: a `station_service.py` still bound to 8787 after
+    # the run ended, and a leaked listener answers the NEXT fixture, which is how a check turns into one
+    # that always passes (bug #57). So the invocation is a started surface like any other: its OWN
+    # process group, bounded, and the group torn down on EVERY path. A bound that was hit stays a
+    # FAILURE (status 124) that names the command, exactly as the `timeout` it replaces did.
+    start_scenario_surface "deliverable-script" "$cmd"
+    p="$SCENARIO_PID"
+    waited_ms=0
+    while kill -0 "$p" 2>/dev/null; do
+      [ "$waited_ms" -ge "$((RUN_TIMEOUT_S * 1000))" ] && break
+      sleep 0.2
+      waited_ms=$((waited_ms + 200))
+    done
+    RUN_OUT=$(cat "$JUDGE_DIR/deliverable-script-surface.log" 2>/dev/null || true)
+    if kill -0 "$p" 2>/dev/null; then
+      RUN_STATUS=124
+    else
+      RUN_STATUS=0
+      wait "$p" 2>/dev/null || RUN_STATUS=$?
+    fi
+    kill_scenario_surfaces
     return 0
   fi
   port=$(alloc_port) || { RUN_OUT=""; RUN_STATUS=1; printf '# the judge found no free port to start the deliverable on, so this fixture produced no report\n' >&2; return 0; }

@@ -332,3 +332,135 @@ test('service: a single-quoted expect_body resolves to the INNER string (the out
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// (e) the SCRIPT shape, and the surface it leaves behind — measured live, 2026-10-11
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A document that declares no `read` takes the SCRIPT path: the deliverable is invoked once per
+ * fixture and the report is its stdout. That path had no process-group teardown, and a deliverable is
+ * free to BACKGROUND a surface before it returns — the spike's own `serve.sh` does exactly that, so
+ * that a pipe-reading judge finishes instead of hanging on a long-running server. The judge then left
+ * that surface LISTENING: observed live as a `station_service.py` still bound to 8787 after the run
+ * ended (bug #57's hazard) — a leaked listener answers the NEXT fixture, and a check that reads it
+ * passes for the wrong reason.
+ *
+ * The surface below is a real HTTP listener in its own file, so the assertion is about a process that
+ * is really listening and the cleanup can find it by name.
+ */
+const LEAK_PORT = 20177;
+
+const SURFACE_PY = [
+  'import http.server, sys',
+  'port = int(sys.argv[1])',
+  'body = b\'{"total": 5}\'',
+  'class H(http.server.BaseHTTPRequestHandler):',
+  '    def do_GET(self):',
+  '        self.send_response(200)',
+  '        self.send_header("Content-Length", str(len(body)))',
+  '        self.end_headers()',
+  '        self.wfile.write(body)',
+  '    def log_message(self, *a): pass',
+  'http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()',
+  '',
+].join('\n');
+
+/** The report on stdout, THEN a surface left listening: the exact shape that leaked. */
+const SCRIPT_SERVICE = [
+  '#!/usr/bin/env bash',
+  'set -eu',
+  'python3 - "$1" <<\'PY\'',
+  'import csv, sys',
+  'from decimal import Decimal, ROUND_HALF_UP',
+  'rows, skipped = {}, 0',
+  'with open(sys.argv[1], newline="") as f:',
+  '    for rec in csv.reader(f):',
+  '        if len(rec) != 3:',
+  '            skipped += 1',
+  '            continue',
+  '        date, station, temp = rec[0].strip(), rec[1].strip(), rec[2].strip()',
+  '        try:',
+  '            v = Decimal(temp)',
+  '        except Exception:',
+  '            skipped += 1',
+  '            continue',
+  '        if not station or not date:',
+  '            skipped += 1',
+  '            continue',
+  '        rows.setdefault(station, []).append(v)',
+  'def q(x):',
+  '    return str(Decimal(x).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))',
+  'lines = []',
+  'for station in sorted(rows):',
+  '    vals = rows[station]',
+  '    lines.append(f"{station} {len(vals)} {q(min(vals))} {q(max(vals))} {q(sum(vals) / len(vals))}")',
+  'lines.append(f"TOTAL {sum(len(v) for v in rows.values())}")',
+  'print("\\n".join(lines))',
+  'PY',
+  '# ... and the surface it started keeps answering after this script returns (the leak).',
+  `python3 "$(cd "$(dirname "$0")" && pwd)/surface.py" ${LEAK_PORT} >/dev/null 2>&1 &`,
+  'exit 0',
+  '',
+].join('\n');
+
+/** Forge a judge for a SCRIPT-shaped document (no `read`) whose deliverable leaves a surface behind. */
+function scriptFixture(serve: string): Fixture {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-script-'));
+  const worktree = join(dir, 'worktree');
+  const judgeDir = join(dir, 'judge');
+  mkdirSync(join(dir, 'docs/requirements'), { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  mkdirSync(judgeDir, { recursive: true });
+  const doc = DOC('bash serve.sh {csv}', 0)
+    .replace('  read: "curl -fsS {url}"\n', '')
+    .replace('  url: "http://127.0.0.1:{port}/summary"\n', '');
+  writeFileSync(join(dir, 'docs/requirements/poc.yaml'), doc);
+  writeFileSync(join(worktree, 'serve.sh'), serve);
+  writeFileSync(join(worktree, 'surface.py'), SURFACE_PY);
+  chmodSync(join(worktree, 'serve.sh'), 0o755);
+  const env = {
+    ...process.env,
+    TAKUMI_REQUIREMENT: 'docs/requirements/poc.yaml',
+    TAKUMI_PROJECT: dir,
+    TAKUMI_WORKTREE: worktree,
+    TAKUMI_JUDGE_DIR: judgeDir,
+  };
+  const forge = run('bash', [FORGE], env, dir);
+  return {
+    dir,
+    env,
+    forge,
+    judge: () => run('bash', [join(judgeDir, 'judge.sh')], env, judgeDir),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+const listenersOn = (port: number): string =>
+  execFileSync('bash', ['-c', `ss -ltn 2>/dev/null | grep -c ':${port} ' || true`], { encoding: 'utf8' }).trim();
+
+test('service: a SCRIPT-shaped deliverable that backgrounds a surface leaves NOTHING listening', () => {
+  // The surface this fixture leaves behind is the one bug #57 is about: it answers the next fixture.
+  assert.equal(listenersOn(LEAK_PORT), '0', `port ${LEAK_PORT} has to be free before the test starts`);
+  const f = scriptFixture(SCRIPT_SERVICE);
+  try {
+    assert.equal(f.forge.status, 0, `the forge builds for a script-shaped document (${f.forge.out})`);
+    const r = f.judge();
+    // The report came from stdout, so the relations ARE exercised — this is the script path, working.
+    assert.match(r.out, /^ok \d+ - REL-001 row-order-invariance/m, r.out);
+    assert.match(r.out, /^ok \d+ - REL-002 additivity/m, r.out);
+    assert.match(r.out, /ACCEPT_VERDICT: pass/, r.out);
+
+    // And what the deliverable backgrounded is GONE: the judge tears the invocation's own process
+    // group down on every path, so a surface the deliverable leaves behind cannot answer anything.
+    assert.equal(
+      listenersOn(LEAK_PORT),
+      '0',
+      'the judge left the deliverable\'s own surface listening: a leaked listener answers the next fixture',
+    );
+  } finally {
+    // If the assertion above is RED, do not poison the rest of the suite.
+    execFileSync('bash', ['-c', 'pkill -f surface[.]py || true'], { encoding: 'utf8' });
+    f.cleanup();
+  }
+});
