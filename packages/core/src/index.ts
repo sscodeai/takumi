@@ -90,6 +90,8 @@ export {
   JUDGE_SCENARIO_REPORTS,
   JUDGE_RELATION_VOCABULARY,
   MIN_MUTATION_TIMEOUT_MS,
+  MIN_RUN_TIMEOUT_MS,
+  DEFAULT_RUN_TIMEOUT_MS,
   decisionModesFor,
   parseDeliverableBlock,
   parseInputFormat,

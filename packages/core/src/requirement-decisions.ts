@@ -37,6 +37,25 @@ export const JUDGE_SCENARIO_REPORTS = ['ctrf', 'junit', 'tap'] as const;
 export const JUDGE_MUTATION_FORMATS = ['survivors-json'] as const;
 
 /**
+ * The smallest honest bound on ONE invocation of the deliverable (ADR-046). A run gets at least a
+ * second, or the bound is a refusal nobody sees. The forge carries the same floor on its own
+ * `RUN_MIN_TIMEOUT_MS` line; the two are kept honest by a test that parses the shell.
+ */
+export const MIN_RUN_TIMEOUT_MS = 1000;
+
+/**
+ * The bound applied to one invocation of the deliverable when the document declares none (ADR-046).
+ *
+ * WHY A BOUND EXISTS AT ALL, AND WHY IT IS A DEFAULT RATHER THAN AN OPTION. `deliverable.run` is
+ * invoked once per fixture, and a SERVICE-shaped run is a start-and-serve command that NEVER exits:
+ * without a bound the judge waits for ever and a generated CI job waits out the host's own job limit
+ * (GitHub's default is six hours). The bound is therefore unconditional — the document may tighten it
+ * (`deliverable.timeoutMs`) but cannot remove it, because an unbounded invocation is not a check, it is
+ * a hang that eventually reads as a failure for the wrong reason.
+ */
+export const DEFAULT_RUN_TIMEOUT_MS = 120000;
+
+/**
  * The smallest honest bound for a mutation run (ADR-039). A mutation tool executes the delivered suite
  * once per mutant, so a bound below five seconds cannot contain even a two-mutant pass; scenarios get one
  * second because they run one command once. This is a FLOOR, not a recommendation — a real suite should
@@ -125,11 +144,40 @@ export interface Scenario {
   reportPath?: string;
   /** Required: the criterion in the human's words, so a failure reads as a requirement, not a script. */
   expect: string;
+  /**
+   * The HTTP status the surface must answer with (ADR-046). Declaring it (or `expectBody`) is what makes
+   * a service scenario LOOK AT THE RESPONSE: without one, a scenario whose `run` merely reaches the
+   * surface passes whatever the surface said, which is the vacuous green this project treats as the worst
+   * kind of defect.
+   */
+  expectStatus?: number;
+  /** A substring the response body must contain (ADR-046), the body half of the same assertion. */
+  expectBody?: string;
   timeoutMs?: number;
 }
 
 export interface DeliverableBlock {
   run?: string;
+  /**
+   * The bound on ONE invocation of the deliverable (ADR-046), in milliseconds. Optional in the document;
+   * the bound itself is not — the forge and the generated CI job apply `DEFAULT_RUN_TIMEOUT_MS` when the
+   * document declares none, because a start-and-serve `run` never exits on its own.
+   */
+  timeoutMs?: number;
+  /**
+   * How a JUDGE reads the report of ONE fixture (ADR-047). A script prints its report on stdout, so this
+   * is absent and `run` is the whole story. A SERVICE starts and serves: `run` prints NOTHING, so a judge
+   * that reads stdout finds no report at all and every output-shape relation reports "the judge did not
+   * exercise the deliverable". `read` is the command that FETCHES the report for the fixture `run` was
+   * started with; `{csv}`, `{port}` and `{url}` are resolved by the judge.
+   */
+  read?: string;
+  /**
+   * The surface a judge waits for before it runs `read` (ADR-047), with `{port}` for a port the judge
+   * ALLOCATES. `read` and `url` go together: a service whose report no judge can fetch is a delivery
+   * judged on nothing, and both are refused when declared alone.
+   */
+  url?: string;
   /** The declared scenarios, in document order (ADR-035). */
   scenarios: Scenario[];
   /** The mutation tool configuration a `mutation-detection` relation runs (ADR-039), when declared. */
@@ -195,6 +243,7 @@ export function parseScenarios(text: string): Scenario[] {
     const id = stringOf(entry['id']);
     if (id === undefined) continue;
     const number = entry['timeoutMs'];
+    const status = entry['expect_status'];
     scenarios.push({
       id,
       run: stringOf(entry['run']) ?? '',
@@ -204,6 +253,8 @@ export function parseScenarios(text: string): Scenario[] {
       ...(stringOf(entry['url']) === undefined ? {} : { url: stringOf(entry['url']) }),
       ...(stringOf(entry['report']) === undefined ? {} : { report: stringOf(entry['report']) }),
       ...(stringOf(entry['report_path']) === undefined ? {} : { reportPath: stringOf(entry['report_path']) }),
+      ...(typeof status === 'number' && Number.isFinite(status) ? { expectStatus: status } : {}),
+      ...(stringOf(entry['expect_body']) === undefined ? {} : { expectBody: stringOf(entry['expect_body']) }),
       ...(typeof number === 'number' && Number.isFinite(number) ? { timeoutMs: number } : {}),
     });
   }
@@ -412,8 +463,14 @@ export function parseDeliverableBlock(text: string): DeliverableBlock | undefine
   const run = stringOf(block['run']);
   const input = parseInputFormat(text);
   const mutation = parseMutation(text);
+  const timeout = block['timeoutMs'];
+  const read = stringOf(block['read']);
+  const url = stringOf(block['url']);
   return {
     ...(run === undefined ? {} : { run }),
+    ...(typeof timeout === 'number' && Number.isFinite(timeout) ? { timeoutMs: timeout } : {}),
+    ...(read === undefined ? {} : { read }),
+    ...(url === undefined ? {} : { url }),
     ...(block['output_format'] === undefined ? {} : { outputFormat: block['output_format'] }),
     ...(input === undefined ? {} : { input }),
     ...(mutation === undefined ? {} : { mutation }),
@@ -471,6 +528,50 @@ export function validateRequirementDocument(text: string): string[] {
   if (block !== undefined) {
     if (block.run === undefined || block.run.trim().length === 0) {
       issues.push('the deliverable block declares no run: a judge with no way to invoke the thing cannot check anything');
+    }
+    // ADR-046: `deliverable.build` and `deliverable.tests` are DEAD TEXT. Nothing in the chain reads
+    // either one: the delivered project's own tests are run from the WORKFLOW's `testCommand` (the
+    // `ci_config` step and the quality gate), not from the document, and no install/build step exists in
+    // `request-to-delivery{,-attempt}/workflow.yaml` at all. Before this refusal they were neither
+    // executed nor refused, so a document that declared them READ as compliance while nothing ran — the
+    // same defect class as a key inherited through a merge (docs/bugs-fixed.md #47). A silent declaration
+    // is worse than a refusal, so the front door names the key and refuses.
+    for (const deadKey of ['build', 'tests'] as const) {
+      if (!objectHasKey(text, deadKey)) continue;
+      issues.push(
+        `the deliverable block declares ${deadKey}, which nothing in the chain reads or runs: a declaration that is never executed reads as compliance, which is worse than a refusal — either wire it as a real step or remove it (the delivered project's own tests are run from the workflow's testCommand, not from deliverable.tests)`,
+      );
+    }
+    // ADR-047: `read` and `url` go together. A service's `run` starts and serves, so the judge needs a
+    // command that FETCHES the report (`read`) and a surface to wait for first (`url`); declaring one
+    // without the other is a delivery a judge cannot read, which is worse than a refusal.
+    const declRead = deliverableOf(text)?.['read'];
+    const declUrl = deliverableOf(text)?.['url'];
+    const hasRead = typeof declRead === 'string' && declRead.trim().length > 0;
+    const hasUrl = typeof declUrl === 'string' && declUrl.trim().length > 0;
+    if (declRead !== undefined && !hasRead) {
+      issues.push('the deliverable block declares an empty read: a judge told to fetch the report with nothing is told nothing');
+    }
+    if (declUrl !== undefined && !hasUrl) {
+      issues.push('the deliverable block declares an empty url: a judge told to wait for nothing waits for ever');
+    }
+    if (hasRead && !hasUrl) {
+      issues.push('the deliverable block declares read but no url: a judge that has to fetch the report must know which surface to wait for before it fetches');
+    }
+    if (hasUrl && !hasRead) {
+      issues.push('the deliverable block declares url but no read: a service whose report the judge cannot fetch is judged on nothing — declare how one fixture\'s report is read (read: "curl -fsS {url}")');
+    }
+    // ADR-046: the bound on ONE invocation of the deliverable. Optional in the document (the forge and the
+    // generated CI job apply DEFAULT_RUN_TIMEOUT_MS), but a declared one has to be a bound a judge can
+    // apply: a whole number of milliseconds at or above the floor. A bound below the floor is a refusal
+    // nobody sees; a non-number is a bound nobody can apply.
+    const declaredRunTimeout = deliverableOf(text)?.['timeoutMs'];
+    if (declaredRunTimeout !== undefined) {
+      if (typeof declaredRunTimeout !== 'number' || !Number.isFinite(declaredRunTimeout) || declaredRunTimeout < MIN_RUN_TIMEOUT_MS) {
+        issues.push(
+          `the deliverable block declares timeoutMs ${JSON.stringify(declaredRunTimeout)}: the bound on one invocation of the deliverable must be a whole number of milliseconds at or above ${MIN_RUN_TIMEOUT_MS}, or the timeout is a refusal nobody sees (omit it to take the default of ${DEFAULT_RUN_TIMEOUT_MS})`,
+        );
+      }
     }
     const implemented = JUDGE_RELATION_VOCABULARY.join(', ');
     for (const binding of block.bindings) {
@@ -592,6 +693,20 @@ export function validateRequirementDocument(text: string): string[] {
       issues.push('the deliverable block declares an empty scenarios list: a scenario block that declares nothing is a document claiming a check it does not have');
     }
     const relationIds = new Set(block.bindings.filter((b) => b.kind !== 'scenario').map((b) => b.checkId));
+    // The RAW scenario entries, so a value the parser had to drop (a non-numeric `expect_status`, a blank
+    // `expect_body`) can be named in a refusal instead of vanishing into "declares no assertion".
+    const rawScenarios = new Map<string, Record<string, unknown>>();
+    {
+      const list = deliverableOf(text)?.['scenarios'];
+      if (Array.isArray(list)) {
+        for (const raw of list) {
+          if (raw === null || typeof raw !== 'object') continue;
+          const entry = raw as Record<string, unknown>;
+          const id = stringOf(entry['id']);
+          if (id !== undefined) rawScenarios.set(id, entry);
+        }
+      }
+    }
     for (const scenario of block.scenarios) {
       if (relationIds.has(scenario.id)) {
         issues.push(`${scenario.id} is declared twice (as a scenario and as a relation): a check id has to identify one check`);
@@ -614,6 +729,31 @@ export function validateRequirementDocument(text: string): string[] {
       }
       if (scenario.url !== undefined && scenario.start === undefined) {
         issues.push(`${scenario.id} declares a url but nothing to start: the judge waits for a surface it was never told how to bring up`);
+      }
+      // ADR-046: a scenario that reaches an HTTP surface has to SAY WHAT IT ASSERTS about the response.
+      // Without this the check is vacuous by construction — the `run` command only has to exit 0, and a
+      // command that reaches the surface but never looks at the status or the body passes whatever the
+      // surface said. That is the vacuous green this project treats as the worst kind of defect, so the
+      // document has to declare `expect_status` and/or `expect_body`, and a url/start with neither is
+      // REFUSED.
+      const rawEntry = rawScenarios.get(scenario.id);
+      const declaresAssertion = rawEntry?.['expect_status'] !== undefined || rawEntry?.['expect_body'] !== undefined;
+      if ((scenario.url !== undefined || scenario.start !== undefined) && !declaresAssertion) {
+        issues.push(
+          `${scenario.id} declares a url/start but neither expect_status nor expect_body: a scenario that reaches a surface without asserting anything about the response passes without ever looking at it, so the check is vacuous — declare expect_status: <100-599> and/or expect_body: <substring of the response body>`,
+        );
+      }
+      const rawStatus = rawEntry?.['expect_status'];
+      if (rawStatus !== undefined && (typeof rawStatus !== 'number' || !Number.isInteger(rawStatus) || rawStatus < 100 || rawStatus > 599)) {
+        issues.push(
+          `${scenario.id} declares expect_status ${JSON.stringify(rawStatus)}, which is not an HTTP status code (an integer from 100 to 599): the judge would compare the surface's answer against a number it cannot mean`,
+        );
+      }
+      const rawBody = rawEntry?.['expect_body'];
+      if (rawBody !== undefined && (typeof rawBody !== 'string' || rawBody.trim().length === 0)) {
+        issues.push(
+          `${scenario.id} declares expect_body ${JSON.stringify(rawBody)}, which is not a non-empty string: a body assertion the judge cannot search for asserts nothing`,
+        );
       }
       if (scenario.timeoutMs !== undefined && scenario.timeoutMs < 1000) {
         issues.push(`${scenario.id} declares timeoutMs ${scenario.timeoutMs}: a scenario is given at least a second, or the timeout is a refusal nobody sees`);

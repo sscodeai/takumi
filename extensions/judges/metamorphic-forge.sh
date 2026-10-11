@@ -70,10 +70,87 @@ refuse() { echo "$1" >&2; exit 1; }
 
 # --- read the deliverable contract out of the requirement document -----------------------------
 
-RUN_TEMPLATE=$(awk '/^[[:space:]]*run:[[:space:]]*/ { sub(/^[[:space:]]*run:[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' "$DOC")
+# The DIRECT child of `deliverable:` named $1, or empty. "Direct" is the indent rule this forge uses
+# everywhere: the value has to sit exactly one indent step deeper than the `deliverable:` key, so a
+# scenario's `run`/`url` or the mutation block's `timeoutMs` is never mistaken for the deliverable's.
+# The OUTER quote pair (either kind) is the YAML quoting, not the value — `'"total"'` is the substring
+# `"total"`, and reading it as `'"total"'` is how a body assertion searched for a string no response
+# contains. A single quote cannot be written literally inside a shell-quoted awk program, so it is built
+# from its byte code.
+deliv_child() {
+  awk -v k="$1" '
+    function ind(s) { match(s, /^[ ]*/); return RLENGTH }
+    function strip_outer(s,   c, n, SQ) {
+      SQ = sprintf("%c", 39); n = length(s)
+      if (n >= 2) { c = substr(s, 1, 1); if ((c == "\"" || c == SQ) && substr(s, n, 1) == c) return substr(s, 2, n - 2) }
+      return s
+    }
+    /^[[:space:]]*deliverable:[[:space:]]*$/ { ind_d = 1; di = ind($0); next }
+    ind_d && $0 ~ /^[[:space:]]*[a-zA-Z_]+:[[:space:]]*$/ && ind($0) <= di { ind_d = 0; next }
+    ind_d && ind($0) == di + 2 && $0 ~ ("^[[:space:]]*" k ":[[:space:]]*") {
+      v = $0; sub("^[[:space:]]*" k ":[[:space:]]*", "", v); print strip_outer(v); exit
+    }
+  ' "$DOC"
+}
+
+RUN_TEMPLATE=$(deliv_child run)
 if [ -z "$RUN_TEMPLATE" ]; then
   refuse "the requirement document declares no deliverable.run, so there is no way to run the thing"
 fi
+
+# --- how a judge READS the report (ADR-047) -------------------------------------------------------
+# A SCRIPT prints its report on stdout, so `run` alone is enough and this is empty. A SERVICE starts and
+# serves: `run` prints NOTHING, so a judge that reads stdout finds no report at all and every
+# output-shape relation reports "the judge did not exercise the deliverable" — the service shape could
+# never pass, however correct it was. `read` is the command that FETCHES the report for the fixture
+# `run` was started with, and `url` is the surface the judge waits for before it runs it. They go
+# together, and one without the other is refused: a service whose report no judge can fetch is a
+# delivery judged on nothing.
+DELIV_READ=$(deliv_child read)
+DELIV_URL=$(deliv_child url)
+if [ -n "$DELIV_READ" ] && [ -z "$DELIV_URL" ]; then
+  refuse "the deliverable block declares read but no url: a judge that has to fetch the report must know which surface to wait for before it fetches"
+fi
+if [ -n "$DELIV_URL" ] && [ -z "$DELIV_READ" ]; then
+  refuse "the deliverable block declares url but no read: a service whose report the judge cannot fetch is judged on nothing — declare how one fixture's report is read (read: \"curl -fsS {url}\")"
+fi
+
+# --- the bound on ONE invocation of the deliverable (ADR-046) -------------------------------------
+# A SERVICE-shaped `run` is a start-and-serve command that NEVER exits: without a bound the judge waits
+# for ever. The bound is therefore unconditional — and it applies to the `read` that fetches the report
+# as well, because a fetch that never returns is the same hang one step later. The floor and default live
+# on their own lines so the TypeScript front door and this shell are kept honest by a test that parses
+# both.
+RUN_MIN_TIMEOUT_MS=1000
+DEFAULT_RUN_TIMEOUT_MS=120000
+RUN_TIMEOUT_MS=$(deliv_child timeoutMs)
+if [ -n "$RUN_TIMEOUT_MS" ]; then
+  case "$RUN_TIMEOUT_MS" in
+    ''|*[!0-9]*) refuse "the deliverable block declares timeoutMs \"$RUN_TIMEOUT_MS\", which is not a whole number of milliseconds" ;;
+  esac
+  [ "$RUN_TIMEOUT_MS" -ge "$RUN_MIN_TIMEOUT_MS" ] || refuse "the deliverable block declares timeoutMs $RUN_TIMEOUT_MS, below the honest floor of ${RUN_MIN_TIMEOUT_MS}ms for one invocation of the deliverable"
+fi
+[ -n "$RUN_TIMEOUT_MS" ] || RUN_TIMEOUT_MS=$DEFAULT_RUN_TIMEOUT_MS
+RUN_TIMEOUT_S=$(( RUN_TIMEOUT_MS / 1000 ))
+[ "$RUN_TIMEOUT_S" -ge 1 ] || RUN_TIMEOUT_S=1
+
+# --- the deliverable keys nothing reads (ADR-046) ------------------------------------------------
+# `deliverable.build` and `deliverable.tests` are DEAD TEXT: the delivered project's own tests are run
+# from the WORKFLOW's `testCommand`, and no install/build step exists anywhere in the chain. The front
+# door refuses both; the forge refuses them too, so a document that reached a judge WITHOUT passing the
+# front door cannot have a key silently ignored — a declaration that is never executed reads as
+# compliance, which is the defect this refusal removes.
+for deadkey in build tests; do
+  if awk -v k="$deadkey" '
+    function ind(s) { match(s, /^[ ]*/); return RLENGTH }
+    /^[[:space:]]*deliverable:[[:space:]]*$/ { ind_d = 1; di = ind($0); next }
+    ind_d && $0 ~ /^[[:space:]]*[a-zA-Z_]+:[[:space:]]*$/ && ind($0) <= di { ind_d = 0; next }
+    ind_d && ind($0) == di + 2 && $0 ~ ("^[[:space:]]*" k ":[[:space:]]*") { f = 1 }
+    END { exit f ? 0 : 1 }
+  ' "$DOC"; then
+    refuse "the deliverable block declares $deadkey, which nothing in the chain reads or runs: a declaration that is never executed reads as compliance, which is worse than a refusal — either wire it as a real step or remove it (the delivered project's own tests are run from the workflow's testCommand, not from deliverable.tests)"
+  fi
+done
 
 # relations / anchors: `id relation` (the check ids, and what kind each one is) and, separately,
 # `id decides` (which decision that check exercises).
@@ -98,16 +175,17 @@ if [ -z "$RELATIONS" ]; then
 fi
 
 # --- the declared scenarios (ADR-035) -----------------------------------------------------------
-# Flat, line-wise: `id|run|expect|start|url|report|report_path|timeoutMs|decides`, one record per
-# scenario, values joined with the unit separator so a command containing spaces survives.
+# Flat, line-wise: `id|run|expect|start|url|report|report_path|timeoutMs|decides|expect_status|
+# expect_body`, one record per scenario, values joined with the unit separator so a command containing
+# spaces survives.
 SCENARIOS=$(awk '
   function flush() {
     if (id == "") return
     # TAB-separated, one scenario per line: `read -r` splits it back without treating the separator as a
     # regular expression, which is how the first attempt lost every field after the fourth.
     sep = "\t"
-    print id sep run sep expect sep start sep url sep report sep rpath sep tmo sep decides
-    id = ""; run = ""; expect = ""; start = ""; url = ""; report = ""; rpath = ""; tmo = ""; decides = ""
+    print id sep run sep expect sep start sep url sep report sep rpath sep tmo sep decides sep status sep body
+    id = ""; run = ""; expect = ""; start = ""; url = ""; report = ""; rpath = ""; tmo = ""; decides = ""; status = ""; body = ""
   }
   # The value of `key:` — with the YAML list marker stripped first. A scenario id is the one field that
   # arrives as `- id: SCN-001`, and `sub("^[[:space:]]*id:…")` cannot match it (the `- ` is not
@@ -115,7 +193,17 @@ SCENARIOS=$(awk '
   # (docs/bugs-fixed.md #41).
   function ind(s) { match(s, /^[ ]*/); return RLENGTH }
   function unmark(s) { sub(/^[[:space:]]*-[[:space:]]*/, "", s); return s }
-  function val(s, k) { s = unmark(s); sub("^[[:space:]]*" k ":[[:space:]]*", "", s); gsub(/^"|"$/, "", s); return s }
+  # The OUTER quote pair, whichever kind YAML used, is the quoting and not part of the value:
+  # `expect_body: '"total"'` means the substring `"total"`, and `"station"` means `station`. Stripping
+  # only double quotes read the first as `'"total"'` (single quotes included) and searched for a
+  # substring no response contains — a check that fails for a reason the document never said.
+  # A single quote cannot be written literally inside this shell-quoted awk program, so it is built.
+  function strip_outer(s,   c, n, SQ) {
+    SQ = sprintf("%c", 39); n = length(s)
+    if (n >= 2) { c = substr(s, 1, 1); if ((c == "\"" || c == SQ) && substr(s, n, 1) == c) return substr(s, 2, n - 2) }
+    return s
+  }
+  function val(s, k) { s = unmark(s); sub("^[[:space:]]*" k ":[[:space:]]*", "", s); return strip_outer(s) }
   /^[[:space:]]*scenarios:[[:space:]]*$/ { ins = 1; si = 2; next }
   # The section ends at the next key INDENTED NO FURTHER than the scenarios key itself. The previous
   # terminator only matched an unindented key, so a document declaring scenarios under deliverable never
@@ -133,6 +221,8 @@ SCENARIOS=$(awk '
   ins && /^[[:space:]]*report_path:[[:space:]]*/ { rpath = val($0, "report_path"); next }
   ins && /^[[:space:]]*timeoutMs:[[:space:]]*/ { tmo = val($0, "timeoutMs"); next }
   ins && /^[[:space:]]*decides:[[:space:]]*/ { decides = val($0, "decides"); next }
+  ins && /^[[:space:]]*expect_status:[[:space:]]*/ { status = val($0, "expect_status"); next }
+  ins && /^[[:space:]]*expect_body:[[:space:]]*/ { body = val($0, "expect_body"); next }
   END { flush() }
 ' "$DOC")
 
@@ -174,6 +264,30 @@ while read -r sid; do
       *) refuse "the scenario $sid declares the report format \"$sreport\", which no judge can read (implemented: $SCENARIO_REPORT_MODES)" ;;
     esac
   fi
+  # ADR-046: a scenario that reaches an HTTP surface (a `url` to wait for, a `start` to bring up) has to
+  # SAY WHAT IT ASSERTS about the response. Without an assertion the scenario's `run` only has to exit 0,
+  # so a command that reaches the surface but never looks at it passes whatever the surface said — the
+  # vacuous green this project treats as the worst kind of defect. A service scenario with neither
+  # `expect_status` nor `expect_body` is REFUSED, and a declared assertion has to be one the judge can
+  # apply: an HTTP status 100..599, or a non-empty substring of the body.
+  sstart=$(scenario_field "$sid" 4)
+  surl=$(scenario_field "$sid" 5)
+  sstatus=$(scenario_field "$sid" 10)
+  sbody=$(scenario_field "$sid" 11)
+  if [ -n "$surl" ] || [ -n "$sstart" ]; then
+    if [ -z "$sstatus" ] && [ -z "$sbody" ]; then
+      refuse "the scenario $sid declares a url/start but neither expect_status nor expect_body: a scenario that reaches a surface without asserting anything about the response passes without ever looking at it, so the check is vacuous — declare expect_status: <100-599> and/or expect_body: <substring of the response body>"
+    fi
+  fi
+  if [ -n "$sstatus" ]; then
+    case "$sstatus" in
+      ''|*[!0-9]*) refuse "the scenario $sid declares expect_status \"$sstatus\", which is not an HTTP status code (an integer from 100 to 599): the judge would compare the surface's answer against a number it cannot mean" ;;
+    esac
+    [ "$sstatus" -ge 100 ] && [ "$sstatus" -le 599 ] || refuse "the scenario $sid declares expect_status $sstatus, which is not an HTTP status code (an integer from 100 to 599): the judge would compare the surface's answer against a number it cannot mean"
+  fi
+  if [ -n "$sbody" ]; then
+    [ -n "$(printf '%s' "$sbody" | tr -d '[:space:]')" ] || refuse "the scenario $sid declares expect_body \"$sbody\", which is not a non-empty string: a body assertion the judge cannot search for asserts nothing"
+  fi
 done <<EOF
 $SCENARIO_IDS
 EOF
@@ -187,7 +301,14 @@ EOF
 MUTATION=$(awk '
   function ind(s) { match(s, /^[ ]*/); return RLENGTH }
   function unmark(s) { sub(/^[[:space:]]*-[[:space:]]*/, "", s); return s }
-  function val(s, k) { s = unmark(s); sub("^[[:space:]]*" k ":[[:space:]]*", "", s); gsub(/^"|"$/, "", s); return s }
+  # The outer quote pair is the quoting, not the value (see the scenarios parser): a single quote is
+  # built from its byte code because it cannot be written inside this shell-quoted program.
+  function strip_outer(s,   c, n, SQ) {
+    SQ = sprintf("%c", 39); n = length(s)
+    if (n >= 2) { c = substr(s, 1, 1); if ((c == "\"" || c == SQ) && substr(s, n, 1) == c) return substr(s, 2, n - 2) }
+    return s
+  }
+  function val(s, k) { s = unmark(s); sub("^[[:space:]]*" k ":[[:space:]]*", "", s); return strip_outer(s) }
   /^[[:space:]]*mutation:[[:space:]]*$/ { inm = 1; mi = ind($0); next }
   inm && ind($0) <= mi && $0 ~ /^[[:space:]]*[a-zA-Z_]+:[[:space:]]*$/ { inm = 0; next }
   inm && /^[[:space:]]*run:[[:space:]]*/ { mrun = val($0, "run"); next }
@@ -748,19 +869,95 @@ decide() { # $1 relation id, $2 decision id, $3 line id, $4 the chosen option
   fi
 }
 
-RUN_OUT=""; RUN_STATUS=0
-run_tool() { # $1 = absolute csv path; leaves the tool's combined output in RUN_OUT and its status in RUN_STATUS
-  local csv="$1" cmd
-  cmd=$(printf '%s' "$RUN_TEMPLATE" | sed "s|{csv}|$csv|g")
-  RUN_OUT=$( ( cd "$WORKTREE" && sh -c "$cmd" ) 2>&1 ); RUN_STATUS=$?
+RUN_OUT=""; RUN_STATUS=0; RUN_CMD=""
+
+# --- reading the report of ONE fixture (ADR-046 + ADR-047) ---------------------------------------
+# Three placeholders are resolved EVERYWHERE the document declares a command to run — `run`, `read`, and
+# a scenario's `start`/`url`/`run`: `{csv}` is the fixture, `{port}` is a port the JUDGE allocated for
+# this invocation, and `{url}` is the document's url with `{port}` resolved. So no document hard-codes a
+# port, and two runs (or two fixtures) cannot answer for each other.
+subst() { # $1 template, $2 csv, $3 port, $4 url
+  printf '%s' "$1" | sed -e "s|{csv}|$2|g" -e "s|{port}|$3|g" -e "s|{url}|$4|g"
+}
+# A port allocated by PROBING, never assumed: the first port in a range nothing answers on. Pure bash
+# (`/dev/tcp`), because the judge deliberately depends on awk + curl only.
+alloc_port() {
+  local p
+  for p in $(seq 20000 20100); do
+    if ! (exec 3<>/dev/tcp/127.0.0.1/"$p") 2>/dev/null; then printf '%s' "$p"; return 0; fi
+  done
+  return 1
+}
+
+# The report for ONE fixture, however the document says the deliverable produces it. A SCRIPT: `run`
+# prints the report and the bound catches a run that never returns. A SERVICE (`read` declared): `run`
+# STARTS the thing on this fixture, the declared url is health-gated, `read` FETCHES the report under the
+# same bound, and the surface is killed on EVERY path — a leaked service answers the NEXT fixture, which
+# is how a check turns into one that always passes.
+run_tool() { # $1 = absolute csv path; leaves the report in RUN_OUT, its status in RUN_STATUS
+  local csv="$1" cmd port url start_cmd read_cmd p waited_ms
+  if [ -z "$READ_TEMPLATE" ]; then
+    cmd=$(subst "$RUN_TEMPLATE" "$csv" "" "$DELIV_URL")
+    RUN_CMD="$cmd"
+    # THE SCRIPT SHAPE, with the SAME teardown a surface gets. One invocation, report on stdout — but a
+    # deliverable may BACKGROUND a surface before it returns (the spike's own `serve.sh` does exactly
+    # that, so a pipe-reading judge finishes instead of hanging on a long-running server), and that
+    # surface outlives the invocation. Observed live: a `station_service.py` still bound to 8787 after
+    # the run ended, and a leaked listener answers the NEXT fixture, which is how a check turns into one
+    # that always passes (bug #57). So the invocation is a started surface like any other: its OWN
+    # process group, bounded, and the group torn down on EVERY path. A bound that was hit stays a
+    # FAILURE (status 124) that names the command, exactly as the `timeout` it replaces did.
+    start_scenario_surface "deliverable-script" "$cmd"
+    p="$SCENARIO_PID"
+    waited_ms=0
+    while kill -0 "$p" 2>/dev/null; do
+      [ "$waited_ms" -ge "$((RUN_TIMEOUT_S * 1000))" ] && break
+      sleep 0.2
+      waited_ms=$((waited_ms + 200))
+    done
+    RUN_OUT=$(cat "$JUDGE_DIR/deliverable-script-surface.log" 2>/dev/null || true)
+    if kill -0 "$p" 2>/dev/null; then
+      RUN_STATUS=124
+    else
+      RUN_STATUS=0
+      wait "$p" 2>/dev/null || RUN_STATUS=$?
+    fi
+    kill_scenario_surfaces
+    return 0
+  fi
+  port=$(alloc_port) || { RUN_OUT=""; RUN_STATUS=1; printf '# the judge found no free port to start the deliverable on, so this fixture produced no report\n' >&2; return 0; }
+  url=$(subst "$DELIV_URL" "$csv" "$port" "$DELIV_URL")
+  start_cmd=$(subst "$RUN_TEMPLATE" "$csv" "$port" "$url")
+  read_cmd=$(subst "$READ_TEMPLATE" "$csv" "$port" "$url")
+  RUN_CMD="$read_cmd"
+  start_scenario_surface "deliverable" "$start_cmd"
+  if ! wait_for_url "$url" 20; then
+    kill_scenario_surfaces
+    RUN_OUT=""; RUN_STATUS=1
+    printf '# the deliverable did not answer on %s within 20s of starting (%s), so this fixture produced no report\n' "$url" "$start_cmd" >&2
+    return 0
+  fi
+  RUN_OUT=$( ( cd "$WORKTREE" && timeout "$RUN_TIMEOUT_S" sh -c "$read_cmd" ) 2>&1 ); RUN_STATUS=$?
+  kill_scenario_surfaces
 }
 
 # --- declared scenarios (ADR-035) ---------------------------------------------------------------
 # The judge runs the document's OWN commands: it starts what the document says to start, waits for the
-# surface the document names, runs the scenario command, reads the report the document names, and ALWAYS
-# kills what it started — on success, on failure and on the report path. No browser, no framework and no
-# network assumption lives here: an unreadable report is a failure, never a pass.
+# surface the document names, ASSERTS what the document declares about the response, runs the scenario
+# command, reads the report the document names, and ALWAYS kills what it started — on success, on
+# failure and on the report path. No browser, no framework and no network assumption lives here: an
+# unreadable report is a failure, never a pass.
+#
+# The listening-process model is deliberately minimal: the judge ALLOCATES the port for every surface it
+# starts (`{port}`), `start` brings the process up in its own process group, the url is health-gated, the
+# declared response assertion is applied, and the process is torn down on every path. A document that
+# hard-codes a port instead of `{port}` gives that isolation up (ADR-047), and no sandboxing is modelled.
 SCENARIO_PIDS=""
+# `{csv}`, `{port}` and `{url}` in a scenario's commands resolve through the same `subst` the deliverable
+# uses: `{csv}` to the judge's own base fixture (the world the relations run against), `{port}` to a port
+# the judge allocated for THIS scenario's surface. Before this a `start: "bash serve.sh {csv}"` tried to
+# serve a file literally named `{csv}`, and a hard-coded port let one run answer for another.
+SCENARIO_CSV=""
 start_scenario_surface() { # $1 scenario id, $2 command -> pid in SCENARIO_PID (its own process group leader)
   SCENARIO_PID=""
   [ -n "$2" ] || return 0
@@ -782,10 +979,17 @@ kill_scenario_surfaces() {
   done
   SCENARIO_PIDS=""
 }
-wait_for_url() { # $1 url, $2 seconds -> 0 when it answered
-  local i=0 max="$2"
+wait_for_url() { # $1 url, $2 seconds -> 0 when the surface ANSWERED (any HTTP status)
+  local i=0 max="$2" code rc
   while [ "$i" -lt "$max" ]; do
-    if curl -fsS -o /dev/null --max-time 2 "$1" 2>/dev/null; then return 0; fi
+    # ADR-046: the health gate waits for the surface to ANSWER, not for it to answer 2xx. `curl -f`
+    # treated a 4xx/5xx as "not up", so a surface that answers 500 was reported as "did not answer
+    # within 20s" — a failure for the wrong reason, and one that would have hidden the declared
+    # `expect_status` behind a timeout. Whether the answer is the RIGHT one is the assertion's job.
+    # `curl` still PRINTS `000` when it cannot connect, so the exit status is what decides: a non-zero
+    # status is "not yet", never "answered".
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$1" 2>/dev/null); rc=$?
+    [ "$rc" = 0 ] && [ "$code" != "000" ] && return 0
     i=$((i + 1)); sleep 1
   done
   return 1
@@ -934,6 +1138,14 @@ mutation_report_failures() { # $1 format, $2 path, $3 max_survivors -> a reason,
 HEADER
 
   printf '\nRUN_TEMPLATE=%s\n' "'$(sq "$RUN_TEMPLATE")'"
+  # ADR-047: how a judge READS the report of one fixture. Empty for a SCRIPT (stdout is the report); a
+  # command for a SERVICE, with `{csv}`/`{port}`/`{url}` resolved by the judge.
+  printf 'READ_TEMPLATE=%s\n' "'$(sq "$DELIV_READ")'"
+  printf 'DELIV_URL=%s\n' "'$(sq "$DELIV_URL")'"
+  # ADR-046: the bound on one invocation of the deliverable, as declared (or the default) and in whole
+  # seconds for `timeout`. Emitted as its own lines so the generated judge reads a number, never a guess.
+  printf 'RUN_TIMEOUT_MS=%s\n' "$RUN_TIMEOUT_MS"
+  printf 'RUN_TIMEOUT_S=%s\n' "$RUN_TIMEOUT_S"
   printf 'REQUIREMENT_REF=%s\n' "'$(sq "$TAKUMI_REQUIREMENT")'"
   printf 'DUPLICATE_MODE=%s\n' "'$(sq "$DUPLICATE_MODE")'"
   printf 'MALFORMED_MODE=%s\n' "'$(sq "$MALFORMED_MODE")'"
@@ -1194,9 +1406,21 @@ BODY
 trap 'kill_scenario_surfaces' EXIT INT TERM
 
 # --- the relations (one check per id the document declared) --------------------------------------
+# `{csv}` in a scenario's start/run resolves to the same base fixture the relations run against, so the
+# surface a scenario starts and the world the judge judges are one and the same file.
+SCENARIO_CSV="$FIX/base.csv"
 run_tool "$FIX/base.csv"
 base_output="$RUN_OUT"
 base_status="$RUN_STATUS"
+base_cmd="$RUN_CMD"
+# ADR-046: a bound that was hit is a FAILURE that names the command, never a pass and never a silent
+# "no output". The message mirrors the mutation relation's wording, so one kind of timeout reads the
+# same wherever it is hit.
+BASE_TIMEOUT_DETAIL=""
+if [ "$base_status" = 124 ]; then
+  BASE_TIMEOUT_DETAIL="the deliverable command timed out after ${RUN_TIMEOUT_MS}ms, so the deliverable was never exercised: ${base_cmd}"
+  printf '# %s\n' "$BASE_TIMEOUT_DETAIL"
+fi
 if [ -z "$base_output" ]; then
   printf '# the deliverable produced no output at all (exit %s)\n' "$base_status"
 fi
@@ -1208,9 +1432,14 @@ alive=0
 
 # The vacuous-green guard (ADR-013/ADR-033): if the deliverable produced nothing the declared shapes
 # can parse, then NO relation was exercised, so none of them may pass — a relation must never pass by
-# comparing two empty results.
+# comparing two empty results. A bound that was hit is reported as its own failure, naming the command,
+# because "exit 124" alone reads as a mystery rather than as a command that hung.
 guard_fail() { # $1 relation id, $2 text
-  relation not_ok "$1" "$2" "the judge did not exercise the deliverable: nothing in its output (exit ${base_status}) matched a declared output shape, so this relation is unproven"
+  if [ -n "$BASE_TIMEOUT_DETAIL" ]; then
+    relation not_ok "$1" "$2" "$BASE_TIMEOUT_DETAIL"
+  else
+    relation not_ok "$1" "$2" "the judge did not exercise the deliverable: nothing in its output (exit ${base_status}) matched a declared output shape, so this relation is unproven"
+  fi
 }
 RUNS
 
@@ -1348,40 +1577,58 @@ DIFF001
       browser-scenario)
         cat <<'SCN' | sed "s/@RID@/$rid/g"
 sid="@RID@"
-srun=$(scenario_field "$sid" 2)
+sport=$(alloc_port)
+surl=$(subst "$(scenario_field "$sid" 5)" "$SCENARIO_CSV" "$sport" "")
+srun=$(subst "$(scenario_field "$sid" 2)" "$SCENARIO_CSV" "$sport" "$surl")
 sexpect=$(scenario_field "$sid" 3)
-sstart=$(scenario_field "$sid" 4)
-surl=$(scenario_field "$sid" 5)
+sstart=$(subst "$(scenario_field "$sid" 4)" "$SCENARIO_CSV" "$sport" "$surl")
 sreport=$(scenario_field "$sid" 6)
 srpath=$(scenario_field "$sid" 7)
 stmo=$(scenario_field "$sid" 8)
+sstatus=$(scenario_field "$sid" 10)
+sbody=$(scenario_field "$sid" 11)
 [ -n "$stmo" ] || stmo=60
 if [ -z "$srun" ]; then
   relation not_ok "$sid" "browser-scenario: $sexpect" "the forged judge has no run for this scenario"
 else
+  reason=""
+  scn_out=""; scn_status=0
   start_scenario_surface "$sid" "$sstart"
   if [ -n "$surl" ]; then
     if ! wait_for_url "$surl" 20; then
-      relation not_ok "$sid" "$sexpect" "the surface the document declares ($surl) did not answer within 20s of starting \"$sstart\""
-      kill_scenario_surfaces
-      sid=""
+      reason="the surface the document declares ($surl) did not answer within 20s of starting \"$sstart\""
     fi
   fi
-  if [ -n "$sid" ]; then
+  if [ -z "$reason" ]; then
+    # ADR-046: LOOK AT THE RESPONSE. The document declares what the surface must answer with, and the
+    # judge applies that assertion ITSELF — so a scenario cannot pass by running a command that merely
+    # reaches the surface and exits 0 whatever the surface said. A url/start with neither assertion is
+    # refused before the judge is forged, so at least one of these is set for a service scenario.
+    sbody_file="$JUDGE_DIR/$sid-response.txt"
+    if [ -n "$sstatus" ] || [ -n "$sbody" ]; then
+      actual=$(curl -sS -o "$sbody_file" -w '%{http_code}' --max-time 5 "$surl" 2>/dev/null); curl_rc=$?
+      [ "$curl_rc" = 0 ] || actual="000"
+      if [ -n "$sstatus" ] && [ "$actual" != "$sstatus" ]; then
+        reason="the surface answered HTTP $actual where the document declares expect_status $sstatus"
+      elif [ -n "$sbody" ] && ! grep -qF -- "$sbody" "$sbody_file" 2>/dev/null; then
+        reason="the response body does not contain the declared expect_body \"$sbody\" (the surface answered HTTP $actual)"
+      fi
+    fi
     scn_out=$( ( cd "$WORKTREE" && timeout "$stmo" sh -c "$srun" ) 2>&1 )
     scn_status=$?
-    reason=""
-    if [ "$scn_status" != 0 ]; then
-      [ "$scn_status" = 124 ] && reason="the scenario command timed out after ${stmo}s" || reason="the scenario command exited $scn_status"
-    elif [ -n "$sreport" ]; then
-      reason=$(scenario_report_failures "$sreport" "$WORKTREE/$srpath")
-    fi
-    kill_scenario_surfaces
     if [ -z "$reason" ]; then
-      relation ok "$sid" "$sexpect"
-    else
-      relation not_ok "$sid" "$sexpect" "$reason: $(printf '%s' "$scn_out" | tail -3 | tr '\n' ' ')"
+      if [ "$scn_status" != 0 ]; then
+        [ "$scn_status" = 124 ] && reason="the scenario command timed out after ${stmo}s" || reason="the scenario command exited $scn_status"
+      elif [ -n "$sreport" ]; then
+        reason=$(scenario_report_failures "$sreport" "$WORKTREE/$srpath")
+      fi
     fi
+  fi
+  kill_scenario_surfaces
+  if [ -z "$reason" ]; then
+    relation ok "$sid" "$sexpect"
+  else
+    relation not_ok "$sid" "$sexpect" "$reason: $(printf '%s' "$scn_out" | tail -3 | tr '\n' ' ')"
   fi
 fi
 SCN

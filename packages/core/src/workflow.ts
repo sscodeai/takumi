@@ -41,6 +41,30 @@ export type StepType = (typeof WORKFLOW_STEP_TYPES)[number];
  */
 const MERGE_METHODS: readonly DeliveryMergeMethod[] = ['merge', 'squash', 'rebase'];
 
+/**
+ * The keys that READ as a gate a person must pass, and that NOTHING in the chain reads (the
+ * operator's decision, 2026-10-11: a GREEN delivery lands itself). Each is refused BY NAME rather
+ * than ignored as an unknown key, because the defect is not that the key is unrecognised — it is
+ * that a reader takes it for a gate that exists. That is the same class as `deliverable.build` /
+ * `deliverable.tests` (docs/bugs-fixed.md #54): a declaration that is never executed reads as
+ * compliance, which is worse than a refusal.
+ *
+ * Where the gates actually are: a landing is unlocked by `await_checks` on the host's own pipeline
+ * (a red or pending one skips `merge` structurally — ADR-040), and the one place a HUMAN gate may be
+ * declared is the pilot's `reviewMode: 'label'` (a board-driven wait, recorded as `awaiting_review`),
+ * which is configuration and not a step field.
+ */
+const APPROVAL_FIELDS: readonly string[] = [
+  'requiresApproval',
+  'requiresHuman',
+  'requireReview',
+  'approval',
+  'approvalLabel',
+  'approvedBy',
+  'human',
+  'awaitingHuman',
+];
+
 /** Is `value` one of the step types the engine can execute? */
 export function isWorkflowStepType(value: unknown): value is StepType {
   return typeof value === 'string' && (WORKFLOW_STEP_TYPES as readonly string[]).includes(value);
@@ -188,6 +212,15 @@ export function validateWorkflowManifest(def: WorkflowDefinition): WorkflowManif
     const step = steps[i] as Partial<WorkflowStep> | undefined;
     const stepId = typeof step?.id === 'string' && step.id.length > 0 ? step.id : `#${i + 1}`;
     if (stepId.startsWith('#')) issues.push({ stepId, message: `step ${stepId} has no id` });
+    // A gate a person must pass is not a step field (see APPROVAL_FIELDS): the chain reads no
+    // approval, so a step declaring one declares a gate that does not exist. Refused by name.
+    for (const key of Object.keys(step ?? {})) {
+      if (!APPROVAL_FIELDS.includes(key)) continue;
+      issues.push({
+        stepId,
+        message: `step ${stepId} declares "${key}", which reads as a gate a person must pass and is read by NOTHING in the chain: a declaration that is never executed reads as compliance, which is worse than a refusal — a green delivery lands itself (the gate that unlocks a landing is await_checks on the host's own pipeline, and a red or pending one skips the merge structurally), and the one place a HUMAN gate may be declared is the pilot's reviewMode: "label", which is configuration and not a field on a step`,
+      });
+    }
     if (!isWorkflowStepType(step?.type)) {
       issues.push({
         stepId,

@@ -1,0 +1,30 @@
+# A standing authorization (ADR-045), signed ONCE by a human, that lets a NON-INTERACTIVE
+# `takumi requirement confirm --authorization <this file>` produce the same digest-bound token from the
+# document's OWN `default:` answers. It only ever NARROWS the licensable set, fills blanks, and never
+# overwrites a recorded `chosen:`; it is all-or-nothing.
+#
+# SCOPE: the PIN form — exactly one revision of ONE document. The `digest` below is the sha256 of
+# docs/requirements/service-station-summary.yaml AS REVIEWED (before any `chosen:` line is written).
+# The pin is what binds the run to the text a human read: a byte changed after signing is refused.
+id: SA-001
+signedBy: "SS"
+signedAt: "2026-10-11T21:40:00Z"
+expiresAt: "2026-11-11T21:40:00Z"
+revoked: false
+reason: "unattended confirmation of the NON-SCRIPT (HTTP service) station-summary document"
+pin:
+  ref: "docs/requirements/service-station-summary.yaml"
+  digest: "fae9fe176e7d2e95e5426ebe6d3bd99222618fdbe4548c4352a051009278f91c"
+decisions:
+  - class: malformed-row-accounting
+    policy: document-default
+  - class: duplicate-resolution
+    policy: document-default
+  - class: independent-aggregation
+    policy: document-default
+  - class: additivity
+    policy: document-default
+  - class: unmechanised
+    policy: document-default
+failures:
+  - class: implementation-changes
