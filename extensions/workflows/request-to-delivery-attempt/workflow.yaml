@@ -22,7 +22,11 @@ steps:
       elif [ -f run-tests.sh ]; then bash run-tests.sh 2>&1 | tail -60;
       elif ls *.test.mjs >/dev/null 2>&1; then node --test *.test.mjs 2>&1 | tail -60;
       else echo "no test command found in this project" >&2; exit 1; fi
-    dialect: forgejo
+    # The dialect is the DELIVERY HOST's, not this repository's: a run whose `delivery:` section names
+    # `provider: github` must write `.github/workflows/ci.yml` or the host never runs it and `await_checks`
+    # fails closed. Recorded as a design gap: the dialect should be DERIVED from the delivery provider
+    # instead of being written into the workflow. For this run it is set by hand.
+    dialect: github
     requirementRef: "{requirement}"
   - id: implementation
     type: agent
@@ -33,9 +37,11 @@ steps:
       which decisions it settles. You choose the language, architecture and stack; no human will read
       your design or your code.
 
-      A pipeline file has already been written into this directory at `.forgejo/workflows/ci.yml`: keep it,
-      and make sure your commit includes it. takumi never commits — the host runs what YOU commit — so the
-      delivery must be one commit that contains your work AND that pipeline file.
+      A pipeline file has already been written into this directory by the `ci_config` step, in the
+      DELIVERY HOST's own dialect: `.github/workflows/ci.yml` for this run (a `provider: github`
+      section; a Forgejo/Gitea delivery would be `.forgejo/workflows/ci.yml`). Keep it, and make sure
+      your commit includes it. takumi never commits — the host runs what YOU commit — so the delivery
+      must be one commit that contains your work AND that pipeline file.
 
       This is delivery attempt {repairRound}. If the text between the markers below is empty, this is the
       FIRST attempt at this delivery and there is nothing to repair. If it is not empty, a previous
