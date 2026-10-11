@@ -12,9 +12,11 @@ import { loadConfig } from '../commands.js';
  * The committed `takumi.yaml` is the SHAREABLE example: its `delivery:` section names the
  * placeholder host `forgejo.internal.invalid`, never an operator's real endpoint. An operator
  * keeps the real one in `takumi.local.yaml` (gitignored), which is merged OVER the committed file
- * before the config is used — objects recursively, scalars and arrays replaced — and the loader
- * prints exactly one line naming the file. A local file that cannot be read as a mapping fails
- * LOUDLY, because silently ignoring it would run the whole thing against the placeholders.
+ * before the config is used — objects recursively, scalars and arrays replaced, and an explicit
+ * `null` CLEARING an inherited key (omitting it does NOT: the merge is per key, which is how two
+ * live runs inherited the placeholder host — docs/bugs-fixed.md #47). The loader prints exactly one
+ * line naming the file AND the keys the override set or cleared. A local file that cannot be read as
+ * a mapping fails LOUDLY, because silently ignoring it would run the whole thing against the placeholders.
  *
  * These tests drive the REAL loader (`loadConfig`), not a copy of its merge rule.
  */
@@ -118,6 +120,63 @@ test('a takumi.local.yaml that is not a mapping fails loudly', () => {
   const dir = project('just a scalar, not a mapping\n');
   try {
     assert.throws(() => loadConfig(dir), /must contain a YAML mapping/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an explicit null CLEARS an inherited key: it is gone, not merely shadowed', () => {
+  // The case that cost two live runs (docs/bugs-fixed.md #47): the operator switched the provider to
+  // github and meant to DROP the committed Forgejo placeholder `apiBase`. Writing a local file that
+  // omitted `apiBase` inherited the placeholder (per-key merge) and the clone went to the wrong host.
+  const dir = project(['delivery:', '  provider: github', '  apiBase: null', ''].join('\n'));
+  try {
+    const { value: cfg, lines } = captureStdout(() => loadConfig(dir));
+    assert.equal(cfg.delivery?.provider, 'github', 'the local provider wins');
+    assert.equal(cfg.delivery?.apiBase, undefined, 'the inherited placeholder apiBase is gone');
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(cfg.delivery ?? {}, 'apiBase'),
+      'the key is ABSENT, so no provider default is shadowed by a leftover placeholder',
+    );
+    // The per-key merge still keeps the rest of the committed section.
+    assert.equal(cfg.delivery?.repo, 'dev/takumi-delivery-selftest', 'repo survives the merge');
+    assert.equal(cfg.delivery?.baseBranch, 'main', 'baseBranch survives the merge');
+    assert.equal(cfg.delivery?.remote, 'origin', 'remote survives the merge');
+    // One line — and it NAMES the keys: the one set and the one cleared.
+    assert.equal(lines.length, 1, `exactly one line, got ${JSON.stringify(lines)}`);
+    assert.match(lines[0]!, /local override applied/);
+    assert.match(lines[0]!, /set delivery\.provider/);
+    assert.match(lines[0]!, /cleared delivery\.apiBase/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the printed line names EVERY key the override changed, sorted within each kind', () => {
+  const dir = project(['runtime: deepseek', 'delivery:', '  repo: sscodeai/other', '  apiBase: null', ''].join('\n'));
+  try {
+    const { value: cfg, lines } = captureStdout(() => loadConfig(dir));
+    assert.equal(lines.length, 1, `exactly one line, got ${JSON.stringify(lines)}`);
+    const line = lines[0]!;
+    assert.match(line, /set delivery\.repo, runtime/, 'the set keys are named, sorted');
+    assert.match(line, /cleared delivery\.apiBase/, 'the cleared key is named');
+    assert.equal(cfg.runtime, 'deepseek');
+    assert.equal(cfg.delivery?.repo, 'sscodeai/other');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a key the override does not mention keeps its committed value, and an empty override changes nothing', () => {
+  // Unchanged behaviour, stated as a test so the null rule cannot quietly grow teeth.
+  const dir = project('{}\n');
+  try {
+    const { value: cfg, lines } = captureStdout(() => loadConfig(dir));
+    assert.equal(cfg.runtime, 'fake');
+    assert.equal(cfg.delivery?.apiBase, 'http://forgejo.internal.invalid:3000/api/v1', 'nothing was touched');
+    assert.equal(cfg.delivery?.provider, 'forgejo');
+    assert.equal(lines.length, 1, `the file was applied, so one line, got ${JSON.stringify(lines)}`);
+    assert.match(lines[0]!, /no keys changed/, 'an override that changes nothing says so');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -165,23 +165,74 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** One key a local override changed: its dotted path, and whether it was set or cleared. */
+export interface ConfigOverrideChange {
+  path: string;
+  kind: 'set' | 'cleared';
+}
+
+/**
+ * Recursively merge a local override over the base config, recording what it changed.
+ *
+ * Objects merge key by key; every other value (a scalar, an array) is REPLACED by the local value, and an
+ * explicit `null` CLEARS the key — it is removed from the merged config entirely, so an inherited value
+ * cannot survive. That last rule exists because OMITTING a key does not clear it (the merge is PER KEY): an
+ * operator who wanted to drop the committed Forgejo placeholder `apiBase` wrote a local file without it,
+ * silently inherited the placeholder anyway, and live runs failed closed against it (docs/bugs-fixed.md
+ * #47). `apiBase: null` is now how one says "there is no apiBase" — and the change is reported, so the
+ * transcript names the keys rather than merely saying a local file was merged.
+ */
+export function mergeConfigWithChanges(
+  base: unknown,
+  override: unknown,
+): { merged: unknown; changes: ConfigOverrideChange[] } {
+  const changes: ConfigOverrideChange[] = [];
+  return { merged: mergeInto(base, override, '', changes), changes };
+}
+
+/** The recursion behind {@link mergeConfigWithChanges}; `prefix` is the dotted path so far. */
+function mergeInto(base: unknown, override: unknown, prefix: string, changes: ConfigOverrideChange[]): unknown {
+  if (!isPlainObject(base) || !isPlainObject(override)) return override;
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    const path = prefix.length === 0 ? key : `${prefix}.${key}`;
+    if (value === null) {
+      // An explicit null CLEARS the key: it leaves the merged config entirely, so an inherited value
+      // (the committed placeholder host, for one) cannot survive a local file that meant to drop it.
+      if (key in merged) {
+        delete merged[key];
+        changes.push({ path, kind: 'cleared' });
+      }
+      continue;
+    }
+    if (isPlainObject(base[key]) && isPlainObject(value)) {
+      merged[key] = mergeInto(base[key], value, path, changes);
+    } else {
+      merged[key] = value;
+      changes.push({ path, kind: 'set' });
+    }
+  }
+  return merged;
+}
+
 /**
  * Recursively merge a local override over the base config.
  *
- * Objects merge key by key; every other value (a scalar, an array, `null`) is REPLACED by the
- * local value. A local file that names only the one endpoint it wants to change therefore keeps
- * the rest of the committed section — while a local `registry.skills` or a local list replaces
- * the committed value outright, rather than appending to it.
+ * Kept as the plain entry point (its result is the merged config only); {@link mergeConfigWithChanges}
+ * additionally reports which keys the override set or cleared, which the loader prints.
  */
 export function mergeConfig(base: unknown, override: unknown): unknown {
-  if (isPlainObject(base) && isPlainObject(override)) {
-    const merged: Record<string, unknown> = { ...base };
-    for (const [key, value] of Object.entries(override)) {
-      merged[key] = key in base ? mergeConfig(base[key], value) : value;
-    }
-    return merged;
-  }
-  return override;
+  return mergeConfigWithChanges(base, override).merged;
+}
+
+/** `set a, b; cleared c` — the keys a local override changed, for the loader's one-line report. */
+function describeOverrideChanges(changes: ConfigOverrideChange[]): string {
+  const set = changes.filter((c) => c.kind === 'set').map((c) => c.path).sort();
+  const cleared = changes.filter((c) => c.kind === 'cleared').map((c) => c.path).sort();
+  const parts: string[] = [];
+  if (set.length > 0) parts.push(`set ${set.join(', ')}`);
+  if (cleared.length > 0) parts.push(`cleared ${cleared.join(', ')}`);
+  return parts.length === 0 ? 'no keys changed' : parts.join('; ');
 }
 
 /**
@@ -191,10 +242,12 @@ export function mergeConfig(base: unknown, override: unknown): unknown {
  * (`forgejo.internal.invalid`), never an operator's real endpoint. An operator who needs the real
  * one keeps it in `takumi.local.yaml` (gitignored), which is merged over the committed file before
  * the config is used: objects merge recursively, scalars and arrays are replaced by the local
- * value. Applying it prints exactly ONE line, naming the file, so a run's transcript records that
- * the effective config was not the committed one. A local file that exists but cannot be read as a
- * mapping fails LOUDLY: silently ignoring it would run the whole thing against the committed
- * placeholders while the operator believed their real endpoint was in use.
+ * value, and an explicit `null` CLEARS an inherited key (omitting it does NOT — the merge is per key).
+ * Applying it prints exactly ONE line, naming the file AND the keys the override set or cleared, so a
+ * run's transcript records that the effective config was not the committed one and WHICH parts of it
+ * came from where. A local file that exists but cannot be read as a mapping fails LOUDLY: silently
+ * ignoring it would run the whole thing against the committed placeholders while the operator believed
+ * their real endpoint was in use.
  */
 export function loadConfig(cwd: string): ProjectConfig {
   const p = join(cwd, 'takumi.yaml');
@@ -218,8 +271,11 @@ export function loadConfig(cwd: string): ProjectConfig {
         `${local === null ? 'null' : typeof local}`,
     );
   }
-  console.log(`  [config] local override applied: ${localPath} (merged over takumi.yaml)`);
-  return mergeConfig(base, local) as ProjectConfig;
+  const { merged, changes } = mergeConfigWithChanges(base, local);
+  console.log(
+    `  [config] local override applied: ${localPath} (merged over takumi.yaml): ${describeOverrideChanges(changes)}`,
+  );
+  return merged as ProjectConfig;
 }
 
 /**
