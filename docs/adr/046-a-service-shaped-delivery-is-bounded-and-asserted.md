@@ -113,7 +113,8 @@ exit status: `curl` still prints `000` when it cannot connect, and a printed `00
 **5. `deliverable.build` and `deliverable.tests` are REFUSED, naming the key.** Nothing in the chain reads
 or runs either one; the delivered project's own tests come from the workflow's `testCommand`, and no
 install/build step exists. Dead text that reads as compliance is worse than a refusal, so the front door
-names the key and says where the tests actually come from.
+names the key and says where the tests actually come from. The FORGE refuses the same two keys, so a
+document that reached a judge without passing the front door cannot have one silently ignored.
 
 ## What a service-shaped delivery now requires
 
@@ -150,10 +151,11 @@ names the key and says where the tests actually come from.
 
 ## Evidence
 
-`packages/core/src/test/service-shape.test.ts` (7 tests) drives the real validator, the real renderer and
-the GENERATED job run through `bash -e`:
+`packages/core/src/test/service-shape.test.ts` (8 tests) drives the real validator, the real renderer, the
+REAL forge and the GENERATED job run through `bash -e`:
 
-- `deliverable.build`/`deliverable.tests` are refused, naming the key, for both keys;
+- `deliverable.build`/`deliverable.tests` are refused, naming the key, for both keys — at the front door
+  and again BY THE FORGE (with a control document that forges cleanly, so the refusal is about the key);
 - `deliverable.timeoutMs` below the floor is refused, a non-number is refused, a valid one is accepted;
 - a service scenario with neither assertion is refused; a bad `expect_status` is refused; one WITH an
   assertion is accepted;
