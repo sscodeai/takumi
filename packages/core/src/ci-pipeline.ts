@@ -17,6 +17,7 @@
 import { parse as parseYamlText } from 'yaml';
 import type { CheckSummary, DeliveryProvider, PullRequestRef } from './delivery.js';
 import type { ArtifactStore } from './artifact-store.js';
+import { DEFAULT_RUN_TIMEOUT_MS, MIN_RUN_TIMEOUT_MS } from './requirement-decisions.js';
 
 /**
  * The dialects this step can write. `forgejo` and `github` are both
@@ -86,6 +87,22 @@ export function readDeliverableSample(documentText: string): string | undefined 
   }
 }
 
+/**
+ * The `deliverable.timeoutMs` the document declares — the bound on ONE invocation of the deliverable
+ * (ADR-046) — or undefined when it declares none (the caller applies `DEFAULT_RUN_TIMEOUT_MS`). A
+ * declared value below the floor is ignored here and refused by the front door, so this reader never
+ * invents a bound: it returns what the document actually says, or nothing.
+ */
+export function readDeliverableRunTimeoutMs(documentText: string): number | undefined {
+  try {
+    const doc = parseYamlText(documentText) as { deliverable?: { timeoutMs?: unknown } } | null;
+    const value = doc?.deliverable?.timeoutMs;
+    return typeof value === 'number' && Number.isFinite(value) && value >= MIN_RUN_TIMEOUT_MS ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface RenderCiConfigInput {
   dialect: CiDialect;
   /** The command that runs the DELIVERED project's own tests. Required by the caller. */
@@ -94,6 +111,12 @@ export interface RenderCiConfigInput {
   runCommand?: string;
   /** `deliverable.input_format.sample`, when the document declares one. */
   sampleCsv?: string;
+  /**
+   * `deliverable.timeoutMs` (ADR-046): the bound on the `deliverable` job's command. When absent the
+   * generated job still gets a bound — `DEFAULT_RUN_TIMEOUT_MS` — because a start-and-serve command never
+   * exits and an unbounded job would wait out the host's own limit.
+   */
+  deliverableTimeoutMs?: number;
   /** The confirmed requirement document ref, recorded in the file's header for a human reading it. */
   requirementRef?: string;
 }
@@ -113,6 +136,41 @@ export interface RenderCiConfigInput {
  */
 export function renderCiJobScript(command: string): string {
   return ['set -o pipefail', ...command.split('\n')].join('\n');
+}
+
+/** Single-quote a value for a POSIX shell, escaping any single quote it contains. */
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** The seconds a declared millisecond bound means, never below one. */
+export function runTimeoutSeconds(timeoutMs: number | undefined): number {
+  return Math.max(1, Math.ceil((timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS) / 1000));
+}
+
+/**
+ * The shell script the generated `deliverable` job runs: the declared run command, BOUNDED (ADR-046).
+ *
+ * WHY THIS IS NOT `renderCiJobScript`. The `deliverable` job runs `deliverable.run`, and for a SERVICE
+ * that command STARTS the thing and never exits — so a `run:` block that just invoked it would sit in
+ * the runner until the host's own job limit (GitHub's default is six hours) and then report a timeout
+ * for the wrong reason, with the command nowhere in the message. Here the command runs under `timeout`,
+ * and when the bound is hit the job prints the command by name and exits 124: a bounded FAILURE that
+ * names what hung, never a pass and never a six-hour wait. The `|| { … }` keeps the message reachable
+ * under `bash -e` (the shell GitHub uses), where a bare failing command would abort before it printed.
+ */
+export function renderBoundedCiJobScript(command: string, timeoutSeconds: number): string {
+  const message = `the deliverable command did not exit within ${timeoutSeconds}s and was killed, so this job fails instead of waiting out the runner's own limit: ${command}`;
+  return [
+    'set -o pipefail',
+    `timeout ${timeoutSeconds}s bash -c ${shellSingleQuote(command)} || {`,
+    '  rc=$?',
+    '  if [ "$rc" = 124 ]; then',
+    `    echo ${shellSingleQuote(message)} >&2`,
+    '  fi',
+    '  exit "$rc"',
+    '}',
+  ].join('\n');
 }
 
 /**
@@ -160,7 +218,7 @@ export function renderCiConfig(input: RenderCiConfigInput): string {
     }
     const runLine = sampleCsv !== undefined && sampleCsv.length > 0 ? runCommand.replace(/\{csv\}/g, 'takumi-sample.csv') : runCommand;
     lines.push('      - name: run the deliverable as the requirement document declares', '        run: |');
-    for (const line of renderCiJobScript(runLine).split('\n')) lines.push(`          ${line}`);
+    for (const line of renderBoundedCiJobScript(runLine, runTimeoutSeconds(input.deliverableTimeoutMs)).split('\n')) lines.push(`          ${line}`);
   }
   return `${lines.join('\n')}\n`;
 }
@@ -204,7 +262,7 @@ export function renderGitlabCiConfig(input: RenderCiConfigInput): string {
       lines.push('      TAKUMI_SAMPLE');
     }
     const runLine = sampleCsv !== undefined && sampleCsv.length > 0 ? runCommand.replace(/\{csv\}/g, 'takumi-sample.csv') : runCommand;
-    for (const line of renderCiJobScript(runLine).split('\n')) lines.push(`      ${line}`);
+    for (const line of renderBoundedCiJobScript(runLine, runTimeoutSeconds(input.deliverableTimeoutMs)).split('\n')) lines.push(`      ${line}`);
   }
   return `${lines.join('\n')}\n`;
 }
@@ -303,12 +361,17 @@ export async function executeCiConfigStep(input: CiConfigStepContext): Promise<C
   }
   const runCommand = documentText === undefined ? undefined : readDeliverableRun(documentText);
   const sampleCsv = documentText === undefined ? undefined : readDeliverableSample(documentText);
+  // ADR-046: the bound on the deliverable job's command. A start-and-serve `run` never exits, so the job
+  // is always bounded — by the document's own `deliverable.timeoutMs` when it declares one, and by the
+  // default otherwise. A declared value below the floor is ignored here and refused by the front door.
+  const deliverableTimeoutMs = documentText === undefined ? undefined : readDeliverableRunTimeoutMs(documentText);
 
   const content = renderCiConfig({
     dialect,
     testCommand,
     ...(runCommand === undefined ? {} : { runCommand }),
     ...(sampleCsv === undefined ? {} : { sampleCsv }),
+    ...(deliverableTimeoutMs === undefined ? {} : { deliverableTimeoutMs }),
     ...(requirementRef.length === 0 ? {} : { requirementRef }),
   });
   const absPath = path.join(input.worktree, relPath);
@@ -319,11 +382,18 @@ export async function executeCiConfigStep(input: CiConfigStepContext): Promise<C
     runCommand === undefined
       ? `deliverable run: (${requirementRef.length === 0 ? 'no requirement document was named' : 'the document declares no deliverable.run'})`
       : `deliverable run (declared by ${requirementRef}): ${runCommand}`;
+  // ADR-046: the deliverable job is BOUNDED. A start-and-serve `run` never exits, so an unbounded job
+  // would wait out the host's own limit; the bound is recorded here so a transcript says which one applied.
+  const boundLine =
+    runCommand === undefined
+      ? undefined
+      : `deliverable bound: ${runTimeoutSeconds(deliverableTimeoutMs)}s (${deliverableTimeoutMs === undefined ? 'the default' : `declared by ${requirementRef}`}), so a command that never exits fails the job naming itself instead of waiting out the runner`;
   const summary = [
     `ci_config: wrote ${relPath} (${dialect} dialect, ${dialectOrigin}) into the delivery worktree at ${input.worktree}`,
     "the delivery now CONTAINS the pipeline that will judge it: the host runs this file against the delivered head, and it runs the DELIVERED project's own tests, not takumi's",
     `test command: ${testCommand}`,
     runLine,
+    ...(boundLine === undefined ? [] : [boundLine]),
     `protected path: CI configuration is a protected path (packages/core/src/review-rules.ts); created by this delivery it is reported by the deterministic reviewer as a note inside the delivery (ADR-032), never silently waved through`,
   ].join('\n');
 
