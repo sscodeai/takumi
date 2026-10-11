@@ -36,7 +36,7 @@ import { writeRunRecord, type RunRecord, type RunRecordStep, type RunStepStatus 
 import { readRequirementConfirmation, type RequirementConfirmation } from './standing-authorization.js';
 import type { Usage } from './types.js';
 import { parse as parseYamlText } from 'yaml';
-import { readFileSync as readTextFileSync } from 'node:fs';
+import { readFileSync as readTextFileSync, statSync as statFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
 const execAsync = promisify(exec);
 /** Runs a harness FILE without a shell, so a path in a manifest is never a shell string. */
@@ -2202,6 +2202,37 @@ export async function executeWorkflow(
       // agent / tool step
       const maxAttempts = step.retry?.maxAttempts ?? ctx.defaultMaxAttempts ?? 1;
       run.stepStatus[stepId] = 'running';
+      /**
+       * A step that DECLARES what it produces is held to it (ADR-053): each declared output is
+       * snapshotted BEFORE the step runs, so "written by this step" is decided by the file CHANGING,
+       * never by the file existing. A file that was already there is not this step's output — which is
+       * exactly how a run that produced nothing passed a gate that read a document from six hours
+       * earlier (wf-5beb034f). Only `agent` steps may declare outputs (refused by name otherwise), so
+       * this is the only place the check is needed.
+       */
+      const declaredOutputs = (step.produces ?? []).map((rel) => {
+        const abs = joinPath(ctx.worktree ?? ctx.cwd, rel);
+        let before: number | null = null;
+        try {
+          before = statFileSync(abs).mtimeMs;
+        } catch {
+          before = null; // absent before the step: anything at this path is this step's output
+        }
+        return { rel, abs, before };
+      });
+      const unwrittenOutputs = (): string[] =>
+        declaredOutputs
+          .filter((o) => {
+            let now: number | null = null;
+            try {
+              now = statFileSync(o.abs).mtimeMs;
+            } catch {
+              now = null;
+            }
+            if (now === null) return true; // nothing there at all: nothing was produced
+            return o.before !== null && now === o.before; // untouched since before the step
+          })
+          .map((o) => o.rel);
       let stepOutcome: WorkflowStepResult | undefined;
       let lastError = '';
       let attempt = 0;
@@ -2244,6 +2275,23 @@ export async function executeWorkflow(
             // backoff before retry
             const backoff = step.retry?.backoffSeconds ?? 1;
             await new Promise((r) => setTimeout(r, backoff * 1000 * attempt));
+            continue;
+          }
+          // The step reported success. If it declared outputs, that success is checked against the
+          // filesystem before it is believed: an agent turn that ends without writing its declared
+          // output is not a completed step, it is a step that produced nothing.
+          const missing = unwrittenOutputs();
+          if (missing.length > 0) {
+            lastError = `the step declares it produces ${missing.join(', ')} and that was not written during this step: a file that was already there is not this step's output, so the step produced nothing (a run that produces nothing must not be graded on what it found)`;
+            ctx.onEvent?.(stepId, `attempt ${attempt} produced nothing: ${missing.join(', ')}`);
+            if (attempt >= maxAttempts) {
+              run.stepStatus[stepId] = 'failed';
+              failedIds.add(stepId);
+              stepOutcome = { stepId, status: 'failed', summary: lastError, artifacts: [], tests: res.tests };
+              break;
+            }
+            const backoffMs = (step.retry?.backoffSeconds ?? 1) * 1000 * attempt;
+            await new Promise((r) => setTimeout(r, backoffMs));
             continue;
           }
           stepOutcome = {

@@ -16,6 +16,13 @@ steps:
     prompt: "{input}"
     # A real runtime is given room to write the document; the fake one returns immediately.
     timeoutMs: 900000
+    # The document this step MUST write (ADR-053). Checked against the filesystem after the step: a
+    # file that was already there is not this step's output, so a run whose agent produced nothing
+    # fails HERE instead of having the shape gate below grade a document from an earlier session
+    # (observed 2026-10-11 17:56Z: the agent turn was cut off at the model's output limit, produced
+    # nothing, and the gate passed 4/4 on a committed document six hours older than the request).
+    produces:
+      - docs/requirements/intake.yaml
   - id: intake_shape
     # The intake's contract, machine-checked BEFORE a human is asked to confirm anything: the document
     # exists where the loop expects it, it parses, its ids line up, every decision carries 2-4 bounded
