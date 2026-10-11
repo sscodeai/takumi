@@ -40,6 +40,36 @@ export interface ReviewInputs {
   ruleset: string;
   /** Who judged. */
   reviewer: string;
+  /**
+   * The CONFIRMED requirement document this delivery implements: `requirementDigest` of its text,
+   * or `NO_REQUIREMENT` when the delivery has none (ADR-025).
+   *
+   * A requirement is an input like any other: a review is evidence about the code THAT satisfies
+   * THAT document. Editing the document after a review — adding a criterion, changing a chosen
+   * option — makes the recorded review say nothing about what would now ship, and the digest is
+   * what lets the next run refuse the mismatch by name instead of merging it quietly.
+   */
+  requirement: string;
+}
+
+/**
+ * The requirement input of a delivery that has NO confirmed requirement document.
+ *
+ * A real value rather than an absent field: a delivery that later gains a requirement must produce
+ * a different digest, and `undefined` would be indistinguishable from "the field was forgotten".
+ */
+export const NO_REQUIREMENT = 'none';
+
+/**
+ * The digest of a requirement document's text.
+ *
+ * Canonicalised before hashing (CRLF → LF, trailing whitespace at the end of the document removed,
+ * exactly one trailing newline) so that an editor saving the file differently does not invalidate a
+ * confirmed acceptance — while any change to what the document SAYS still does.
+ */
+export function requirementDigest(text: string): string {
+  const normalised = `${text.replace(/\r\n/g, '\n').replace(/\s+$/, '')}\n`;
+  return sha256(normalised);
 }
 
 /**

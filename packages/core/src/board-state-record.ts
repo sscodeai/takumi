@@ -51,6 +51,12 @@ export interface BoardStateRecord {
     policy: string;
     ruleset: string;
     reviewer: string;
+    /**
+     * The requirement this review covered (ADR-025): the digest of the confirmed requirement
+     * document, `none` when the delivery has none, or `''` when the record predates requirement
+     * digests — which is read as unknown provenance, never as "no requirement".
+     */
+    requirement: string;
     /** ISO-8601, for humans reading the board. Not part of the digest. */
     at: string;
   };
@@ -187,6 +193,9 @@ function parseReviewed(value: unknown): NonNullable<BoardStateRecord['reviewed']
     policy: typeof block['policy'] === 'string' ? block['policy'] : '',
     ruleset: typeof block['ruleset'] === 'string' ? block['ruleset'] : '',
     reviewer: typeof block['reviewer'] === 'string' ? block['reviewer'] : '',
+    // Absent on a record written before requirement digests existed (ADR-025). `''` is read as
+    // unknown provenance by the staleness check, never as "this delivery has no requirement".
+    requirement: typeof block['requirement'] === 'string' ? block['requirement'] : '',
     at: typeof block['at'] === 'string' ? block['at'] : '',
   };
 }

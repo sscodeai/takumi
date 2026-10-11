@@ -1,0 +1,6 @@
+name: ci-pipeline
+kind: skill
+version: 0.1.0
+description: "The CI/CD steps (ADR-037): ci_config writes the host's pipeline into the delivery, and await_checks waits for the host's pipeline result on the delivered head and fails the run closed when it is not green."
+resources:
+- SKILL.md

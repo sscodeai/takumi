@@ -22,6 +22,7 @@
     "@takumi/board-redmine": "workspace:*",
     "@takumi/core": "workspace:*",
     "@takumi/delivery-fake": "workspace:*",
+    "@takumi/delivery-forgejo": "workspace:*",
     "@takumi/delivery-github": "workspace:*",
     "@takumi/delivery-gitlab": "workspace:*",
     "@takumi/runtime-cli": "workspace:*",

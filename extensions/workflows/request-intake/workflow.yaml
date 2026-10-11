@@ -1,0 +1,47 @@
+name: request-intake
+version: 0.1.0
+description: >
+  The first half of the black-box flow, on its own: a natural-language request becomes a structured
+  requirement document and NOTHING is implemented. This is the honest checkpoint for a real runtime --
+  a human can read and confirm what the intake produced before any code exists, which is also where a
+  run's confirmation token comes from (ADR-025).
+runtime: pi
+requiredSkills:
+  - req-intake
+steps:
+  - id: req_intake
+    type: agent
+    skill: req-intake
+    # First prompt key in extensions/skills/req-intake/manifest.yaml is `intake`.
+    prompt: "{input}"
+    # A real runtime is given room to write the document; the fake one returns immediately.
+    timeoutMs: 900000
+  - id: intake_shape
+    # The intake's contract, machine-checked BEFORE a human is asked to confirm anything: the document
+    # exists where the loop expects it, it parses, its ids line up, every decision carries 2-4 bounded
+    # options and every requirement at least one criterion. `confirm --dry-run` is read-only and refuses
+    # an undecided blocking decision, so this step fails closed on an intake nobody could confirm.
+    type: quality_gate
+    prompt: |
+      bash extensions/workflows/request-intake/checks/intake-shape-tap.sh
+    dependsOn: [req_intake]
+    timeoutMs: 120000
+  - id: ambiguity_confirmation
+    type: approval
+    prompt: |
+      CONFIRM THE REQUIREMENT DOCUMENT, NOT A STEP NAME.
+
+      The document under confirmation is docs/requirements/intake.yaml. It carries every requirement
+      (REQ-nnn) and every open decision the intake found (AMB-nnn), each with 2-4 bounded options.
+
+      How the confirmation is recorded (ADR-025): run
+
+        takumi requirement digest docs/requirements/intake.yaml
+
+      and approve that token. The token is the digest of the document's text, and an acceptance step
+      refuses any document that does not hash to it -- so an edit after this confirmation is caught by
+      name instead of being accepted quietly.
+
+      LIMITATION, stated rather than worked around: this workflow stops here. Nothing is implemented
+      until a run is made against the confirmed document, which is the point of splitting the flow.
+    dependsOn: [intake_shape]

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BoardError,
   DeliveryError,
   DeliveryUnsupportedError,
   hasRunMarker,
@@ -95,7 +96,11 @@ interface SimPull {
 function githubSimulator() {
   const pulls: SimPull[] = [];
   const requests: BoardHttpRequest[] = [];
+  const issues: Array<{ number: number; title: string; body: string; labels?: unknown }> = [];
+  const comments: Array<{ id: number; number: string; body: string }> = [];
   let seq = 41;
+  let issueSeq = 0;
+  let commentSeq = 0;
 
   const json = (payload: unknown, status = 200): BoardHttpResponse => ({ status, body: JSON.stringify(payload) });
 
@@ -172,10 +177,33 @@ function githubSimulator() {
     if (req.method === 'GET' && /^\/commits\/[^/]+\/status$/.test(path)) {
       return json({ state: 'pending', statuses: [{ context: 'ci/legacy', state: 'pending' }] });
     }
+    // The issue surface (ADR-037's report path): create-issue and issue-comment, the same
+    // endpoints GitHub documents for pull requests (a PR IS an issue there).
+    if (req.method === 'POST' && path === '/issues') {
+      issueSeq += 1;
+      const issue = {
+        number: issueSeq,
+        title: String(body['title'] ?? ''),
+        body: String(body['body'] ?? ''),
+        ...(body['labels'] === undefined ? {} : { labels: body['labels'] }),
+      };
+      issues.push(issue);
+      return json({ number: issue.number, html_url: `https://github.com/acme/widgets/issues/${issue.number}` }, 201);
+    }
+    const commentMatch = /^\/issues\/(\d+)\/comments$/.exec(path);
+    if (req.method === 'POST' && commentMatch) {
+      commentSeq += 1;
+      const comment = { id: commentSeq, number: commentMatch[1] ?? '', body: String(body['body'] ?? '') };
+      comments.push(comment);
+      return json(
+        { id: comment.id, html_url: `https://github.com/acme/widgets/issues/${comment.number}#issuecomment-${comment.id}` },
+        201,
+      );
+    }
     return json({ message: 'Not Found' }, 404);
   };
 
-  return { request, requests, pulls };
+  return { request, requests, pulls, issues, comments };
 }
 
 const fixture: DeliveryFixture = {
@@ -439,4 +467,92 @@ test('unused capability guard: merging without canMerge is gated (fake capabilit
     () => sabotaged.merge({ number: '1', url: 'u', headSha: 'x', baseSha: 'main' }, { expectedHeadSha: 'x' }),
     DeliveryUnsupportedError,
   );
+});
+
+// ---------------------------------------------------------------------------------------------
+// The issue surface (ADR-037's report path). A RED pipeline is reported by opening ONE issue and
+// commenting on the pull request; these two methods are the GitHub half of that report, and the
+// endpoint SHAPE is the thing under test (create-issue, and the ISSUE-comment endpoint under the
+// pull request's number — a pull request IS an issue on GitHub).
+// ---------------------------------------------------------------------------------------------
+
+test('openIssue: POSTs to the repository issues endpoint and returns the host identity', async () => {
+  const git = new FakeGit();
+  const sim = githubSimulator();
+  const provider = makeProvider(git, sim);
+  const issue = await provider.openIssue({
+    title: 'Pipeline not green on pull request 7: 1 check(s)',
+    body: 'Checks that are not green:\n- build: failure (https://ci/build)',
+    labels: ['takumi-blocked'],
+  });
+  assert.equal(issue.number, '1');
+  assert.equal(issue.url, 'https://github.com/acme/widgets/issues/1');
+  assert.equal(sim.issues.length, 1);
+  assert.equal(sim.issues[0]?.title, 'Pipeline not green on pull request 7: 1 check(s)');
+  assert.deepEqual(sim.issues[0]?.labels, ['takumi-blocked']);
+  const sent = sim.requests.find((r) => r.method === 'POST' && r.url.endsWith('/issues'));
+  assert.ok(sent, 'the create-issue request must have been sent');
+  assert.equal((sent?.body as Record<string, unknown>)['title'], 'Pipeline not green on pull request 7: 1 check(s)');
+});
+
+test('openIssue: a title that is only whitespace is refused BEFORE any request', async () => {
+  const git = new FakeGit();
+  const sim = githubSimulator();
+  const provider = makeProvider(git, sim);
+  await assert.rejects(
+    () => provider.openIssue({ title: '   ', body: 'x' }),
+    (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /title.*required/.test(e.message),
+  );
+  assert.equal(sim.requests.some((r) => r.method === 'POST' && r.url.endsWith('/issues')), false);
+});
+
+test('commentOnPullRequest: comments on the PULL REQUEST number, via the issue-comment endpoint', async () => {
+  const git = new FakeGit();
+  const sim = githubSimulator();
+  const provider = makeProvider(git, sim);
+  const out = await provider.deliver(
+    { worktree: fixture.worktree, branch: fixture.branch, baseBranch: fixture.baseBranch, itemId: '7', runId: 'abcdef12' },
+    { baseSha: BASE },
+  );
+  const ref = prRefOf(out);
+  const comment = await provider.commentOnPullRequest(ref, 'Pipeline not green:\n- build: failure');
+  assert.equal(comment.id, '1');
+  assert.match(comment.url, /#issuecomment-1$/);
+  assert.equal(sim.comments.length, 1);
+  assert.equal(sim.comments[0]?.number, ref.number);
+  const sent = sim.requests.find((r) => r.method === 'POST' && /\/issues\/\d+\/comments$/.test(r.url));
+  assert.ok(sent, 'the comment must be posted under the pull request number');
+  assert.equal(sent?.url.endsWith(`/issues/${ref.number}/comments`), true);
+});
+
+test('commentOnPullRequest: an empty number is refused before any request', async () => {
+  const git = new FakeGit();
+  const sim = githubSimulator();
+  const provider = makeProvider(git, sim);
+  await assert.rejects(
+    () => provider.commentOnPullRequest({ number: '  ' }, 'x'),
+    (e: unknown) => e instanceof DeliveryError && e.kind === 'precondition' && /number is required/.test(e.message),
+  );
+  assert.equal(sim.requests.some((r) => /\/comments$/.test(r.url)), false);
+});
+
+test('the issue surface fails closed without a transport (no token, no request seam)', async () => {
+  const previous = process.env['GITHUB_TOKEN'];
+  delete process.env['GITHUB_TOKEN'];
+  try {
+    const provider = createGitHubDeliveryProvider({ repo: 'acme/widgets' });
+    // The transport's own failure family (BoardError, kind 'auth') surfaces unchanged — exactly as it
+    // does for status()/checks()/merge(); what matters is that NOTHING was sent and the refusal names
+    // the missing transport rather than pretending an issue exists.
+    await assert.rejects(
+      () => provider.openIssue({ title: 't', body: 'b' }),
+      (e: unknown) => e instanceof BoardError && e.kind === 'auth' && /no request transport configured/.test(e.message),
+    );
+    await assert.rejects(
+      () => provider.commentOnPullRequest({ number: '1' }, 'b'),
+      (e: unknown) => e instanceof BoardError && e.kind === 'auth',
+    );
+  } finally {
+    if (previous !== undefined) process.env['GITHUB_TOKEN'] = previous;
+  }
 });

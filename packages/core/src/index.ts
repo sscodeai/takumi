@@ -38,8 +38,17 @@ export {
   groupByLevel,
   validateWorkflowManifest,
 } from './workflow.js';
-export { executeWorkflow, renderPrompt, resolveStepPrompt, parseReviewVerdict } from './workflow-engine.js';
+export {
+  ACCEPT_VERDICT_VALUES,
+  executeWorkflow,
+  renderPrompt,
+  resolveStepPrompt,
+  parseAcceptVerdict,
+  parseReviewVerdict,
+} from './workflow-engine.js';
 export type {
+  AcceptVerdict,
+  ParsedAcceptVerdict,
   WorkflowExecutionContext,
   WorkflowRunResult,
   WorkflowStepResult,
@@ -47,17 +56,100 @@ export type {
   ReviewVerdict,
 } from './workflow-engine.js';
 
-export { parseTestReport, judgeGate } from './quality-gate.js';
+export { detectHardFailure, parseTestReport, judgeGate } from './quality-gate.js';
 export type { TestReport, TestShape } from './quality-gate.js';
 
 export { ArtifactStore } from './artifact-store.js';
 export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
+export {
+  appendFeedback,
+  FEEDBACK_CLOSURE_KINDS,
+  openFeedback,
+  parseFeedback,
+  renderFeedbackEntry,
+  resolveFeedback,
+} from './requirement-feedback.js';
+export type {
+  FeedbackAppendInput,
+  FeedbackAppendResult,
+  FeedbackClosureKind,
+  FeedbackEntry,
+  FeedbackResolveOptions,
+  FeedbackResolveResult,
+} from './requirement-feedback.js';
+export {
+  checkIdOf,
+  decisionCheckIds,
+  parseDecisionBindings,
+  JUDGE_COLUMN_ROLES,
+  JUDGE_DECISION_MODES,
+  JUDGE_FIELD_ROLES,
+  JUDGE_MUTATION_FORMATS,
+  JUDGE_SCENARIO_REPORTS,
+  JUDGE_RELATION_VOCABULARY,
+  MIN_MUTATION_TIMEOUT_MS,
+  MIN_RUN_TIMEOUT_MS,
+  DEFAULT_RUN_TIMEOUT_MS,
+  decisionModesFor,
+  parseDeliverableBlock,
+  parseInputFormat,
+  parseMutation,
+  parseOutputLines,
+  parseScenarios,
+  parseRequirements,
+  validateRequirementDocument,
+} from './requirement-decisions.js';
+export type {
+  Decision,
+  DecisionBinding,
+  DeliverableBlock,
+  InputFormat,
+  MutationBlock,
+  OutputLineFormat,
+  Scenario,
+} from './requirement-decisions.js';
+export { FEEDBACK_BRIEF_MARKER, analyseFeedback, failuresWithoutDecision, renderFeedbackBrief } from './feedback-brief.js';
+export type { AnalysedFailure, AnalysedFeedback, FailureKind } from './feedback-brief.js';
+
+// A standing authorization (ADR-045): a signed grant that lets a requirement document be confirmed by
+// its OWN defaults, non-interactively, and says so in the record. The scope is SELECTABLE — a `pin` (one
+// revision of one document) or a `scope` (a family of documents by glob) — and either way it may only
+// NARROW the licensable set (a widening field is refused at load, by name), and the confirmation it
+// produces is the same digest-bound token an interactive one produces (ADR-025).
+export {
+  AUTHORIZATION_CLASSES,
+  AUTHORIZATION_FAILURE_CLASSES,
+  AUTHORIZATION_POLICIES,
+  SCOPE_FORMS,
+  UNMECHANISED_CLASS,
+  authorizationDigest,
+  decisionClass,
+  documentMatchesScope,
+  licenseStandingConfirmation,
+  parseStandingAuthorization,
+  readRequirementConfirmation,
+} from './standing-authorization.js';
+export type {
+  AuthorizationFailureGrant,
+  AuthorizationGrant,
+  AuthorizationLoad,
+  AuthorizationPin,
+  AuthorizationScope,
+  ConfirmedAuthorization,
+  DefaultedDecision,
+  RequirementConfirmation,
+  StandingAuthorization,
+  StandingLicence,
+  StandingLicenceInput,
+} from './standing-authorization.js';
 export { carryStateRecordForward } from './board-state-record.js';
 export {
+  NO_REQUIREMENT,
   REVIEWER_DETERMINISTIC_RULES,
   policyHash,
+  requirementDigest,
   reviewDigest,
   rulesetHash,
   shortDigest,
@@ -179,6 +271,29 @@ export type { GitRunner, GitResult, GitRunnerOptions } from './git-runner.js';
 export { renderRunMarker, parseRunMarkers, hasRunMarker } from './run-marker.js';
 export { createKeyOf, hasCreateMarker, parseCreateMarkers, renderCreateMarker } from './create-marker.js';
 
+// The run record: one machine-readable file per run, so cost / success rate / the
+// most-failing step are answered from data rather than by reading logs (see run-record.ts).
+export {
+  RUN_RECORD_DIR,
+  formatDuration,
+  readRunRecords,
+  renderRunAggregate,
+  runRecordPath,
+  summarizeRuns,
+  writeRunRecord,
+} from './run-record.js';
+export type {
+  RunAggregate,
+  RunCostAggregate,
+  RunRecord,
+  RunRecordCost,
+  RunRecordPublished,
+  RunRecordStep,
+  RunRecordUnreadable,
+  RunStepFailureCount,
+  RunStepStatus,
+} from './run-record.js';
+
 // Pilot metrics: counters a scheduler's monitoring can scrape.
 export {
   bumpMetrics,
@@ -255,3 +370,15 @@ export type {
   CheckConclusion,
   MergeOutcome,
 } from './delivery.js';
+
+// The board-projection port (ADR-044): a black-box run's progress written where a human reads it.
+// Write-only on purpose — a port with no read cannot be used to make a decision (ADR-017 rule 1).
+export type {
+  DeliveryBoardPort,
+  DeliveryBoardMetadata,
+  DeliveryBoardProjection,
+  DeliveryBoardRef,
+  DeliveryBoardState,
+} from './delivery-board.js';
+// The label + state vocabulary the engine and any adapter share, so neither invents its own.
+export { DELIVERY_BOARD_LABELS, DELIVERY_BOARD_STEP_STATES } from './delivery-board.js';

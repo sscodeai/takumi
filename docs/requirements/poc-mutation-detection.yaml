@@ -1,0 +1,142 @@
+# The requirement document for the mutation-detection end-to-end proof (ADR-039).
+#
+# This document exists to exercise ONE relation on a real machine: `mutation-detection`. The
+# relation is implemented in the forge and pinned by unit tests, but it had never been carried
+# through a real CLI run — confirm -> forge -> judge -> verdict. Everything here is chosen to make
+# that possible without pretending the rest of the chain was exercised.
+#
+# It is a NEW document on purpose: docs/requirements/intake.yaml is the confirmed PoC document and
+# is bound by its own digest, so a proof must not edit it. The raw request is
+# docs/requirements/poc-mutation-detection.md.
+#
+# Format is deliberately boring YAML: it has to be writable by a human and hashable by a machine.
+
+requirement:
+  id: REQ-DOC-002
+  title: Station temperature summary with a mutation-checked test suite
+  source: docs/requirements/poc-mutation-detection.md
+
+requirements:
+  - id: REQ-001
+    title: Summarise a station temperature CSV
+    description: >
+      Read a CSV whose header line names the columns date,station,temperature_c and print one line
+      per station as "<station> <count> <min> <max> <mean>", then a "SKIPPED <count>" line for the
+      rows that could not be parsed and a "TOTAL <count>" line for the overall count. min, max and
+      mean are rendered with exactly one decimal place.
+    acceptance_criteria:
+      - Running the tool on a CSV prints one line per station with count, min, max and mean.
+      - The printed per-station counts sum to the printed TOTAL count.
+      - A row that cannot be parsed is skipped, excluded from every aggregate and counted on the SKIPPED line, and the run still exits 0.
+    priority: High
+    source: "Request: 'a station temperature summary tool'"
+  - id: REQ-002
+    title: The delivered tests must be able to fail
+    description: >
+      The delivery ships a test suite that fails when the delivered behaviour is mutated. A mutation
+      tool injects faults into the delivered source and runs the delivered tests against the broken
+      copy; the faults the tests do NOT catch (survivors) are reported. The acceptance reads that
+      report and refuses the delivery when any survivor remains.
+    acceptance_criteria:
+      - The delivered test suite fails on at least one deliberately injected fault in the delivered source.
+      - The acceptance refuses a delivery whose mutation report lists a survivor, and refuses a mutation run that measured nothing or wrote no readable report.
+    priority: High
+    source: "Request: 'the tests must catch a wrong implementation'"
+
+ambiguities:
+  - id: AMB-001
+    question: What happens to a row that cannot be parsed?
+    options:
+      - "skip-count: skipped, counted on a `SKIPPED <count>` line, excluded from station stats and TOTAL"
+      - "stop-error: the first unparseable row aborts the run with a non-zero exit"
+    default: "skip-count: skipped, counted on a `SKIPPED <count>` line, excluded from station stats and TOTAL"
+    chosen: "skip-count: skipped, counted on a `SKIPPED <count>` line, excluded from station stats and TOTAL"
+    checkedAs: skip-count
+    blocking: true
+  - id: AMB-002
+    question: How are values that are not exactly representable at one decimal place rounded?
+    options:
+      - "half-up: round half away from zero"
+      - "truncate: round toward zero, dropping extra digits"
+    default: "half-up: round half away from zero"
+    chosen: "half-up: round half away from zero"
+    checkedAs: half-up
+    blocking: true
+  # The declared sample repeats station ids (ALPHA three times, BRAVO twice), so the document MUST
+  # say what a repeated id means: with no duplicate rule the judge judges a DEDUPLICATED world and
+  # every relation then fails against a tool that counts every reading. Declaring the rule is what
+  # makes the document's world the tool's world.
+  - id: AMB-003
+    question: When the same station id appears more than once, what wins?
+    options:
+      - "merge: each occurrence remains a separate valid reading and all contribute to the aggregate"
+      - "first-row: only the first occurrence of an id is kept"
+      - "last-row: only the last occurrence of an id is kept"
+    default: "merge: each occurrence remains a separate valid reading and all contribute to the aggregate"
+    chosen: "merge: each occurrence remains a separate valid reading and all contribute to the aggregate"
+    checkedAs: merge
+    blocking: true
+
+# The judge contract (ADR-026). `run` is how the deliverable is invoked (one {csv} placeholder);
+# `input_format` is the world a judge builds its fixtures in (ADR-033); `output_format` is what a
+# judge may parse; `relations` are the invariants a judge must be able to check; `mutation` CONFIGURES
+# the `mutation-detection` relation (it is not itself a check, ADR-039); and `differential` is an
+# independently computed anchor to compare against.
+deliverable:
+  run: "bash summary.sh {csv}"
+  input_format:
+    columns: "date:date,station:id,temperature_c:measure"
+    sample: |
+      2024-01-01,ALPHA,10.4
+      2024-01-01,BRAVO,-2.5
+      2024-01-02,ALPHA,11.6
+      2024-01-02,BRAVO,-1.5
+      2024-01-03,ALPHA,9.5
+  output_format:
+    station_line:
+      shape: "<station> <count> <min> <max> <mean>"
+      fields: [id, count, min, max, mean]
+    skipped_line:
+      shape: "SKIPPED <count>"
+      fields: [skipped-count]
+    total_line:
+      shape: "TOTAL <count>"
+      fields: [count]
+  relations:
+    - id: REL-001
+      relation: row-order-invariance
+      description: "Shuffling the data rows of a fixture yields byte-identical output: identical station lines, SKIPPED line and TOTAL line."
+    - id: REL-002
+      relation: additivity
+      description: "The per-station counts printed sum to the TOTAL count printed."
+    - id: REL-003
+      relation: malformed-row-accounting
+      decides: AMB-001
+      description: "A fixture with unparseable rows completes with exit 0; the bad rows are excluded from all aggregates and reported on the SKIPPED line."
+    - id: REL-004
+      relation: duplicate-resolution
+      decides: AMB-003
+      description: "A repeated station id is resolved the way AMB-003 chose: every occurrence counts as its own reading and contributes to the aggregate."
+    - id: REL-005
+      relation: mutation-detection
+      description: "The delivered tests fail when the delivered behaviour is mutated: the delivered mutation tool's report must list no survivor over the declared budget."
+  # ADR-039: the mutation block configures the mutation-detection relation above. The tool is the
+  # deliverer's own (`e2e/mutate.sh` here — a small, self-contained mutator that injects one fault at a
+  # time and runs the delivered suite against a copy). `survivors-json` is the tool-agnostic report
+  # shape; a format the judge does not implement is refused, not guessed.
+  mutation:
+    run: "bash e2e/mutate.sh"
+    report_path: "e2e/mutation.json"
+    format: survivors-json
+    max_survivors: 0
+    timeoutMs: 600000
+  differential:
+    - id: DIFF-001
+      anchor: independent-aggregation
+      decides: AMB-002
+      description: "An independent re-computation of each station's count, min, max and mean from the same readings, rounding half away from zero, must equal the tool's printed values."
+
+confirmation:
+  by: "SS"
+  at: "2026-10-11T09:17:13.940Z"
+  method: bounded-choice

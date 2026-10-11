@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-import { listExtensions, loadConfig, runTask } from './commands.js';
+import { listExtensions, loadConfig, runTask, workflowExitCode } from './commands.js';
+import { runRequirementCommand } from './requirement-command.js';
 import { initProject } from './init.js';
 import { createBoardProvider, runBoardCommand } from './board-command.js';
+import { runRunsCommand } from './runs-command.js';
 import { eventLogFor, runOnce, type PilotConfig } from './run-command.js';
 import { join } from 'node:path';
 import type { DeliveryProvider, TaskBoardProvider } from '@takumi/core';
@@ -55,8 +57,16 @@ async function main(argv: string[]): Promise<number> {
       return 1;
     }
 
+    case 'requirement': {
+      return await runRequirementCommand(cwd, rest);
+    }
+
     case 'board': {
       return await runBoardCommand(rest);
+    }
+
+    case 'runs': {
+      return runRunsCommand(cwd, rest);
     }
 
     case 'pilot': {
@@ -70,6 +80,9 @@ async function main(argv: string[]): Promise<number> {
       let verbose = false;
       let sandbox: 'none' | 'unshare' | undefined;
       let resume = false;
+      let requirement: string | undefined;
+      let confirmedRequirement: string | undefined;
+      let worktree: string | undefined;
 
       for (let i = 0; i < rest.length; i++) {
         const arg = rest[i] ?? '';
@@ -83,12 +96,24 @@ async function main(argv: string[]): Promise<number> {
           sandbox = (rest[++i] as 'none' | 'unshare') ?? 'none';
         } else if (arg === '--resume') {
           resume = true;
+        } else if (arg === '--requirement') {
+          requirement = rest[++i];
+        } else if (arg === '--confirmed-requirement') {
+          confirmedRequirement = rest[++i];
+        } else if (arg === '--worktree') {
+          worktree = rest[++i];
         } else if (arg.startsWith('--runtime=')) {
           runtimeId = arg.slice('--runtime='.length);
         } else if (arg.startsWith('--workflow=')) {
           workflow = arg.slice('--workflow='.length);
         } else if (arg.startsWith('--sandbox=')) {
           sandbox = arg.slice('--sandbox='.length) as 'none' | 'unshare';
+        } else if (arg.startsWith('--requirement=')) {
+          requirement = arg.slice('--requirement='.length);
+        } else if (arg.startsWith('--confirmed-requirement=')) {
+          confirmedRequirement = arg.slice('--confirmed-requirement='.length);
+        } else if (arg.startsWith('--worktree=')) {
+          worktree = arg.slice('--worktree='.length);
         } else {
           positional.push(arg);
         }
@@ -96,6 +121,21 @@ async function main(argv: string[]): Promise<number> {
 
       const config = loadConfig(cwd);
       const promptArg = positional.join(' ');
+
+      // ADR-025: a workflow that runs an `acceptance` step needs the digest a human confirmed, and
+      // that digest is the token of the confirmation. The CLI therefore asks for it explicitly
+      // instead of assuming the file it finds is the one that was approved — the whole point of the
+      // binding is that an edit between confirmation and run is caught by name.
+      let confirmation: { ref: string; digest: string } | undefined;
+      if (requirement !== undefined || confirmedRequirement !== undefined) {
+        if (requirement === undefined || confirmedRequirement === undefined) {
+          console.error(
+            '--requirement and --confirmed-requirement go together: run `takumi requirement digest <ref>` to get the digest a human confirmed, then pass both',
+          );
+          return 1;
+        }
+        confirmation = { ref: requirement, digest: confirmedRequirement.trim().replace(/^sha256:/i, '').toLowerCase() };
+      }
 
       // Support: takumi run "prompt" | takumi run requirements.md (read file)
       let prompt = promptArg;
@@ -113,7 +153,7 @@ async function main(argv: string[]): Promise<number> {
       console.log(`  prompt: ${prompt.slice(0, 120)}${prompt.length > 120 ? '…' : ''}`);
       console.log('');
 
-      const { events, summary, traceabilityMatrix, artifacts } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox, resume });
+      const { events, summary, traceabilityMatrix, artifacts, status } = await runTask({ cwd, prompt, runtimeId, workflow, config, verbose, sandbox, resume, confirmedRequirement: confirmation, worktree });
 
       for (const ev of events) console.log(`  ${ev}`);
       console.log('');
@@ -134,7 +174,9 @@ async function main(argv: string[]): Promise<number> {
         console.log('Artifacts:');
         console.log('  (none produced in this run)');
       }
-      return 0;
+      // A failed (or cancelled) workflow is not a success: the exit code is the
+      // only thing a CI job can read. The plain path has no status and stays 0.
+      return workflowExitCode(status);
     }
 
     case 'loop': {
@@ -165,16 +207,43 @@ Usage:
   takumi init                          Initialize a Takumi project
   takumi run "<prompt>"                Run an agent task
   takumi run requirements.md [--runtime fake] [--workflow jp-si-standard]
+                                       A workflow with a 'publish' step publishes through the
+                                       'delivery:' section of takumi.yaml
+                                       (e.g. delivery: { provider: forgejo, repo: owner/name });
+                                       with no such section the run is refused BEFORE it starts.
+                                       With one, the run creates its OWN worktree by cloning
+                                       that repo and branching from its base
+  takumi run "<prompt>" --worktree <path>
+                                       Run in an EXISTING checkout instead (advanced). takumi
+                                       refuses BEFORE the run unless it is a git repository, on
+                                       a branch (not a detached HEAD), clean, and descended
+                                       from <remote>/<baseBranch>
   takumi runtime list                  List available runtimes
   takumi board [--provider github --repo owner/name]
                                        Read-only view of a task board (ADR-006)
   takumi board --check | --bootstrap    Report or create the board's states (ADR-008)
+  takumi runs [--dir <path>] [--json]   Aggregate the run records in .takumi/runs/: run count,
+                                       success rate, median/worst duration, the most-failing step,
+                                       and the total cost the runtimes reported
   takumi pilot --once                  One tick of the unattended runner (ADR-009)
   takumi extension list                List discovered extensions
+  takumi requirement digest <ref>      Print the confirmation token for a requirement document
+  takumi requirement confirm <ref>     Decide its open questions as bounded choices, and print the token
+  takumi requirement confirm <ref> --dry-run
+  takumi requirement feedback <ref>    List the acceptance failures written back into the document
+  takumi requirement brief <ref>       What each failure is about, and the answers it could take instead
+  takumi requirement resolve <ref> --id FB-001 --note "…"
+                                       Record what addresses an open failure (exits 1 while one is open)
+                                       Show what is still undecided (read-only; exits 1 while a
+                                       blocking decision has no default and no choice)
 
 Examples:
   takumi run "Implement user authentication API"
   takumi run requirements.md --runtime fake --workflow jp-si-standard
+  takumi requirement confirm docs/requirements/feature.yaml
+  takumi requirement digest docs/requirements/feature.yaml
+  takumi run docs/requirements/feature.yaml --workflow blackbox-acceptance \
+    --requirement docs/requirements/feature.yaml --confirmed-requirement sha256:<digest>
 `);
       return 0;
 

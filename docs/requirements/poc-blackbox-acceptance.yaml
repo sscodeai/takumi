@@ -1,0 +1,210 @@
+# The CONFIRMED requirement document for the black-box acceptance PoC (ADR-025).
+#
+# This is the artefact the human confirms and the acceptance step binds to: its digest is the
+# confirmation token. Editing anything that changes what it SAYS changes the digest, and an
+# acceptance whose document no longer hashes to the confirmed token is refused by name.
+#
+# The raw request it was derived from is docs/requirements/poc-blackbox-acceptance.md. The
+# `chosen` values below are the options the human decided at confirmation time; the `default`
+# values were the intake's proposal and are kept so a reader can see what was changed.
+#
+# The `deliverable` block is the contract a JUDGE is forged against (ADR-026): how to run the thing,
+# the output shape a judge may parse, and the relations a judge must be able to check. A judge is
+# generated from THIS block, not from the implementation — and a relation the forge does not
+# implement is a refusal, never a silently skipped check.
+#
+# ADR-028: a relation may say `decides: AMB-nnn`, which means it EXERCISES that decision — its fixture
+# and its expected values come from the `chosen` option, and the judge reports a DEC-nnn line saying
+# whether the implementation honours it. A BLOCKING decision that no relation exercises is refused at
+# forge time: a decision nothing checks does not bind the implementation, it only decorates it.
+#
+# Format is deliberately boring YAML: it has to be writable by a human and hashable by a machine.
+
+requirement:
+  id: REQ-DOC-001
+  title: Employee CSV summary report
+  source: docs/requirements/poc-blackbox-acceptance.md
+  # The confirmation record (who decided when) is appended by `takumi requirement confirm`, together
+  # with the `chosen` option of every decision below — and the digest of the result is the token the
+  # acceptance step binds to.
+
+requirements:
+  - id: REQ-001
+    title: Summarise an employee CSV by department
+    description: >
+      Read a CSV with columns employee_id,name,department,start_date,annual_salary and print a
+      per-department summary with the number of employees, the total annual salary and the average
+      annual salary rounded to whole currency units, plus the overall headcount and total salary.
+    acceptance_criteria:
+      - Running the tool on a CSV prints one line per department with count, total and average.
+      - The printed department totals sum to the printed overall total.
+      - A 50,000-row file completes in a few seconds on a developer laptop with no network.
+    priority: High
+    source: "Request: \"a small command-line tool that reads a CSV export of employee records\""
+  - id: REQ-002
+    title: Report malformed rows instead of dying silently
+    description: >
+      A row that cannot be parsed (missing column, non-numeric salary, unparseable date) is skipped
+      and counted, and the count is printed with the summary. The run still exits 0.
+    acceptance_criteria:
+      - A file with 3 malformed rows in 100 prints "3 malformed rows skipped" and the summary of 97.
+      - The exit code is 0 when only malformed rows are skipped.
+    priority: High
+    source: "Open decision: malformed rows"
+  - id: REQ-003
+    title: Resolve duplicate employee_id deterministically
+    description: >
+      When the same employee_id appears more than once, the row with the latest start_date wins; a
+      tie is broken by the last occurrence in file order. The number of duplicate ids resolved is
+      printed.
+    acceptance_criteria:
+      - A file with one duplicated id prints the row with the latest start_date.
+      - The count of resolved duplicates is printed.
+    priority: Medium
+    source: "Open decision: duplicate employee_id"
+  - id: REQ-004
+    title: Write to stdout, optionally to a file
+    description: >
+      The summary goes to stdout. An optional path argument writes the same text to that file and
+      stdout stays unchanged.
+    acceptance_criteria:
+      - With no path argument nothing is written to disk.
+      - With a path argument the file content equals stdout.
+    priority: Medium
+    source: "Open decision: output destination"
+  - id: REQ-005
+    title: Round half-up in the file's single currency
+    description: >
+      No currency is assumed or printed; averages are rounded half-up to whole units and the
+      per-department totals are the sum of the rounded per-row salaries.
+    acceptance_criteria:
+      - A department with two salaries of 100.5 and 101.4 reports a total of 202 and an average of 101.
+    priority: Low
+    source: "Open decision: currency and rounding"
+
+ambiguities:
+  - id: AMB-001
+    question: What happens to a malformed row?
+    options:
+      - "Stop with an error"
+      - "Skip the row, count it, and report the count"
+      - "Skip the row and write it to a rejected-rows file"
+    default: "Skip the row, count it, and report the count"
+    chosen: "Skip the row, count it, and report the count"
+    checkedAs: skip-count
+    blocking: true
+  - id: AMB-002
+    question: Which row wins when employee_id repeats?
+    options:
+      - "First row wins"
+      - "Last row wins"
+      - "The row with the latest start_date wins"
+      - "Treat it as an error"
+    default: "First row wins"
+    chosen: "Last row wins"
+    checkedAs: last-row
+    blocking: true
+  - id: AMB-003
+    question: Where does the summary go?
+    options:
+      - "stdout only"
+      - "stdout, plus an optional file path"
+    default: "stdout, plus an optional file path"
+    chosen: "stdout only"
+    blocking: false
+  - id: AMB-004
+    question: How is the average rounded, and in what currency?
+    options:
+      - "Half-up, no currency printed"
+      - "Truncate, no currency printed"
+      - "Half-up, currency printed with a per-run argument"
+    default: "Half-up, no currency printed"
+    chosen: "Half-up, no currency printed"
+    checkedAs: half-up
+    blocking: true
+
+# The judge contract (ADR-026). `run` is how the deliverable is invoked (one {csv} placeholder);
+# `output_format` is what a judge may parse; `relations` are the invariants a judge must be able to
+# check — a relation id the forge does not implement makes the forge FAIL rather than skip it; and
+# `differential` is an independently computed anchor to compare against.
+deliverable:
+  run: "node csv-summary.mjs {csv}"
+  # The world a judge builds its fixtures in (ADR-033): the columns and what they mean, plus a sample
+  # the judge reshuffles, duplicates and mangles. Before this the fixture rows lived inside the forge,
+  # where no document could reach them.
+  input_format:
+    # The id role is the column the tool GROUPS BY (the report has one line per department), and every
+    # column is declared because row validity in this world is "five fields, a numeric salary, an ISO
+    # date" — exactly the shapes the deliverable itself refuses.
+    columns: "employee_id:other,name:other,department:id,start_date:date,annual_salary:measure"
+    sample: |
+      1001,Ada,Engineering,2021-04-01,100.5
+      1002,Grace,Sales,2019-11-15,135.4
+      1003,Carol,Engineering,2020-01-10,90.5
+      1004,Alan,Sales,2022-02-02,100.6
+  output_format:
+    department_line:
+      shape: "<department> <count> <total> <average>"
+      fields: [id, count, sum, mean]
+    skipped_line:
+      shape: "SKIPPED <count>"
+      fields: [skipped-count]
+    overall_line:
+      shape: "TOTAL <count> <total>"
+      fields: [count, sum]
+  relations:
+    - id: REL-001
+      relation: row-order-invariance
+      description: Shuffling the input rows must not change any department total or the overall total.
+    - id: REL-002
+      relation: additivity
+      description: The sum of the per-department totals must equal the printed overall total.
+    - id: REL-003
+      relation: duplicate-resolution
+      # ADR-028: this relation is the one that SETTLES AMB-002, so its fixtures and its expectations
+      # come from that decision's `chosen` option, and a run reports DEC-002 for it.
+      decides: AMB-002
+      description: Whether a repeated id adds an employee, and which row wins, is decided by AMB-002 — the fixture is built from that option and the counts must match it.
+    - id: REL-004
+      relation: malformed-row-accounting
+      decides: AMB-001
+      description: What happens to a malformed row is decided by AMB-001 — three injected malformed rows must behave the way that option says.
+  differential:
+    - id: DIFF-001
+      anchor: independent-aggregation
+      decides: AMB-004
+      description: An independent recomputation of the department totals and the overall total must equal the tool's output, rounded the way AMB-004 decided.
+
+confirmation:
+  by: "SS"
+  at: "2026-10-01T05:40:23.597Z"
+  method: bounded-choice
+feedback:
+  - id: FB-001
+    at: "2026-10-01T05:05:57.188Z"
+    run: "wf-7767a958"
+    requirementDigest: "8644a79ff49b72efd234de70e5cbdb1ab450abc481664d3d5c52102b3c95580c"
+    judgeDigest: "sha256:c6194d0e7cd8047aaa849aad50e7075cb7e95c7e65cfaeb7abad3310fa49c347"
+    status: resolved
+    resolvedAt: "2026-10-01T05:06:46.191Z"
+    resolvedBy: "SS"
+    resolvedNote: "the human answered this at re-confirmation (bounded choice, 2026-10-01T05:06:46.191Z)"
+    checks:
+      - "REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214"
+      - "REL-003 duplicate-resolution: the chosen option \"latest-start-date\" does not hold (headcount 4 want 4, late-date total 269 want 537, early-date total 214 want 428) — headcount=4/4 totals=269/537,214/428"
+      - "DEC-002 AMB-002 NOT honoured: \"The row with the latest start_date wins\" (checked by REL-003, which failed)"
+
+  - id: FB-002
+    at: "2026-10-01T05:38:10.666Z"
+    run: "wf-82150fff"
+    requirementDigest: "966dae0656c65597bfa2e22dd440ab57477b89ffcffa0b474f8b0b5194100971"
+    judgeDigest: "sha256:c6194d0e7cd8047aaa849aad50e7075cb7e95c7e65cfaeb7abad3310fa49c347"
+    status: resolved
+    resolvedAt: "2026-10-01T05:40:23.583Z"
+    resolvedBy: "SS"
+    resolvedNote: "the answer was wrong: AMB-002 was re-decided at this confirmation (2026-10-01T05:40:23.583Z)"
+    resolvedByDecision: "AMB-002"
+    checks:
+      - "REL-002 additivity: department totals sum to 428 but the report says 214 — sum=428 reported=214"
+      - "REL-003 duplicate-resolution: the chosen option \"latest-start-date\" does not hold (headcount 4 want 4, late-date total 269 want 537, early-date total 214 want 428) — headcount=4/4 totals=269/537,214/428"
+      - "DEC-002 AMB-002 NOT honoured: \"The row with the latest start_date wins\" (checked by REL-003, which failed)"

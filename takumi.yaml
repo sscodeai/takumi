@@ -1,0 +1,14 @@
+runtime: fake
+registry:
+  skills: extensions/skills
+  tools: extensions/tools
+  workflows: extensions/workflows
+  runtimes: runtimes
+artifacts: .takumi/artifacts
+
+delivery:
+  provider: forgejo
+  repo: dev/takumi-delivery-selftest
+  apiBase: http://forgejo.internal.invalid:3000/api/v1
+  baseBranch: main
+  remote: origin

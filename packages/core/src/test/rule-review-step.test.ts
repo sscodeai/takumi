@@ -68,7 +68,7 @@ function fixture(): Fixture {
 /** Drive a workflow whose only real step is `rule_review`, with a downstream step to observe. */
 async function runRuleReview(
   f: Fixture,
-  step: { baseRef: string; headRef?: string },
+  step: { baseRef: string; headRef?: string; worktree?: string },
 ): Promise<{ status: string; rules?: { status: string; summary: string; artifacts: string[] }; shipped?: { status: string } }> {
   const artifacts = mkdtempSync(join(tmpdir(), 'takumi-rule-review-artifacts-'));
   try {
@@ -87,6 +87,7 @@ async function runRuleReview(
       artifacts: new ArtifactStore(artifacts),
       git: createGitRunner(),
       onApproval: () => true,
+      ...(step.worktree === undefined ? {} : { worktree: step.worktree }),
     });
     return {
       status: res.status,
@@ -96,6 +97,39 @@ async function runRuleReview(
   } finally {
     rmSync(artifacts, { recursive: true, force: true });
   }
+}
+
+/**
+ * A DELIVERY WORKTREE: a repository of its own — separate from the project repository, no shared
+ * objects — that starts from a commit and receives the delivery's own commits.
+ */
+interface DeliveryWorktree {
+  dir: string;
+  root: string;
+  commit: (message: string) => string;
+  cleanup: () => void;
+}
+
+function deliveryWorktree(): DeliveryWorktree {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-delivery-worktree-'));
+  const raw = (args: string[]): string => execFileSync('git', args, { cwd: dir, encoding: 'utf8', env: GIT_ENV });
+  raw(['init', '-q', '-b', 'main']);
+  mkdirSync(join(dir, 'tests'), { recursive: true });
+  writeFileSync(join(dir, 'package.json'), '{"name":"delivered","version":"1.0.0"}\n');
+  writeFileSync(join(dir, 'app.js'), 'export const version = 1;\n');
+  writeFileSync(join(dir, 'tests', 'app.test.js'), "it('works', () => {\n  expect(true).toBe(true);\n});\n");
+  raw(['add', '-A']);
+  raw(['commit', '-q', '-m', 'init: the delivered project starts']);
+  return {
+    dir,
+    root: raw(['rev-parse', 'HEAD']).trim(),
+    commit: (message: string): string => {
+      raw(['add', '-A']);
+      raw(['commit', '-q', '-m', message]);
+      return raw(['rev-parse', 'HEAD']).trim();
+    },
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }
 
 test('rule_review: a deleted test file fails with test-weakening/deleted', async () => {
@@ -220,6 +254,71 @@ test('rule_review: the findings are persisted as a markdown artifact', async () 
     const res = await runRuleReview(f, { baseRef: f.baseSha });
     assert.equal(res.rules?.artifacts.length, 1);
     assert.match(res.rules?.artifacts[0] ?? '', /rules\.md$/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('rule_review: the change set is read in the delivery worktree, not the project repository', async () => {
+  // The delivery is a repository of its own. Resolving `root`/`HEAD` in the PROJECT repo and diffing
+  // them in the WORKTREE asks git for objects that repository has never seen: `fatal: bad object`, a
+  // review that could not run, for a change set sitting right there (docs/bugs-fixed.md, 35).
+  const p = fixture();
+  const w = deliveryWorktree();
+  try {
+    rmSync(join(w.dir, 'tests', 'app.test.js'));
+    w.commit('chore: drop the test that was in the way');
+
+    const res = await runRuleReview(p, { baseRef: 'root', worktree: w.dir });
+    assert.equal(res.rules?.status, 'failed');
+    assert.match(res.rules?.summary ?? '', /test-weakening\/deleted/);
+    assert.match(res.rules?.summary ?? '', /app\.test\.js/);
+  } finally {
+    p.cleanup();
+    w.cleanup();
+  }
+});
+
+test('rule_review: baseRef root reviews everything the delivery added, whatever it left on top', async () => {
+  const p = fixture();
+  const w = deliveryWorktree();
+  try {
+    writeFileSync(
+      join(w.dir, 'tests', 'app.test.js'),
+      "it('works', () => {\n  expect(true).toBe(true);\n});\n\nit.skip('used to fail', () => {\n  expect(1).toBe(2);\n});\n",
+    );
+    w.commit('fix: make the suite green');
+    writeFileSync(join(w.dir, 'notes.md'), 'the tests pass\n');
+    w.commit('docs: note that the suite is green');
+
+    // The whole delivery, from the point it started: the weakened test is in the change set.
+    const whole = await runRuleReview(p, { baseRef: 'root', worktree: w.dir });
+    assert.equal(whole.rules?.status, 'failed');
+    assert.match(whole.rules?.summary ?? '', /test-weakening\/skipped/);
+
+    // A distance instead of the root reviews only the top commit, and the weakening disappears from a
+    // review that claims to judge the delivery.
+    const top = await runRuleReview(p, { baseRef: 'HEAD~1', headRef: 'HEAD', worktree: w.dir });
+    assert.equal(top.rules?.status, 'completed');
+  } finally {
+    p.cleanup();
+    w.cleanup();
+  }
+});
+
+test('rule_review: a base that is not an ancestor of the head is refused, not diffed', async () => {
+  const f = fixture();
+  try {
+    // An unrelated root in the same repository: `git diff` renders it as a change set anyway.
+    execFileSync('git', ['checkout', '-q', '--orphan', 'unrelated'], { cwd: f.dir, env: GIT_ENV });
+    execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'chore: unrelated root'], { cwd: f.dir, env: GIT_ENV });
+    const orphan = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: f.dir, encoding: 'utf8', env: GIT_ENV }).trim();
+    execFileSync('git', ['checkout', '-q', 'main'], { cwd: f.dir, env: GIT_ENV });
+
+    const res = await runRuleReview(f, { baseRef: orphan, headRef: 'HEAD' });
+    assert.equal(res.rules?.status, 'failed');
+    assert.match(res.rules?.summary ?? '', /is not an ancestor of head/);
+    assert.match(res.rules?.summary ?? '', /not a change set of the repository under review/);
   } finally {
     f.cleanup();
   }

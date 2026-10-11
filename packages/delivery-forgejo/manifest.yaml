@@ -1,0 +1,37 @@
+name: forgejo-delivery
+kind: delivery
+version: 0.1.0
+description: "Forgejo/Gitea delivery: local git for the branch, the REST v1 API for the pull request, commit statuses, merge and the issue surface."
+entry: dist/index.js
+package: "@takumi/delivery-forgejo"
+provider:
+  id: "forgejo"
+  factory: createForgejoDeliveryProvider
+  transport: createForgejoTransport
+  auth:
+    header: "Authorization: token <PAT>"
+    env: "FORGEJO_TOKEN"
+    env_alt: "GITEA_TOKEN"
+  api:
+    base: "http://localhost:3000/api/v1"
+    endpoints:
+      listPullRequests: "GET /repos/:owner/:repo/pulls?state=open&limit=50"
+      createPullRequest: "POST /repos/:owner/:repo/pulls"
+      getPullRequest: "GET /repos/:owner/:repo/pulls/:index"
+      mergePullRequest: "POST /repos/:owner/:repo/pulls/:index/merge (Do, head_commit_id)"
+      combinedCommitStatus: "GET /repos/:owner/:repo/commits/:sha/status"
+      createIssue: "POST /repos/:owner/:repo/issues"
+      createIssueComment: "POST /repos/:owner/:repo/issues/:index/comments"
+      listLabels: "GET /repos/:owner/:repo/labels?limit=50"
+  git:
+    runner: createGitRunner
+    push: "plain only (never --force, never --force-with-lease)"
+    merge: "plain merge of the advanced base, aborted on conflict"
+capabilities:
+  canPushBranch: true
+  canOpenPullRequest: true
+  canRunChecks: true
+  canMerge: true
+issues:
+  openIssue: openForgejoIssue
+  commentOnPullRequest: commentOnForgejoPullRequest

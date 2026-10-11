@@ -126,6 +126,11 @@ const DEFAULT_PROTECTED_PATTERNS: readonly string[] = [
   '(^|/)Cargo\\.(toml|lock)$',
   '(^|/)takumi\\.ya?ml$',
   '(^|/)\\.takumi/',
+  // ADR-045: a run may never author, edit or revoke its OWN authorization. The grant that lets a
+  // document be defaulted non-interactively is a human's artefact, and a machine that could rewrite it
+  // would be widening its own reach — so `docs/authorizations/` is a protected path like CI config or a
+  // dependency manifest, and a change to it is a `human` finding (ADR-032).
+  '(^|/)docs/authorizations/',
 ];
 
 /** Markers that silence a test rather than fix it, across the harnesses we have seen. */
@@ -318,11 +323,23 @@ export function runReviewRules(input: ReviewInput, rules: ReviewRules = {}): Rev
   // --- paths a machine may not approve --------------------------------------
   for (const change of implementationChanges) {
     if (matchesAny(change.path, protectedPatterns)) {
+      // A protected path the delivery CREATES is the delivery. The implementer chooses the language and
+      // the stack, and a stack choice is written down in exactly these files (package.json, go.mod,
+      // Cargo.toml, a CI workflow); the delivery's own worktree starts empty, so "nothing of the sort
+      // existed at the base" is the normal shape of a first delivery. The rule exists to stop a machine
+      // from waving through a CHANGE to the configuration that builds a project that was already there —
+      // so it keeps its teeth where a protected path existed (modified, renamed, deleted), and a creation
+      // is reported as a note inside the delivery the human reads, which is where a black-box run makes
+      // that decision (ADR-032). Without the distinction the rule stops every delivery with a manifest,
+      // which is every delivery: a guard whose scope does not survive the path it runs on (ledger #27).
+      const created = change.status === 'added';
       findings.push({
         rule: 'protected-path',
-        severity: 'human',
+        severity: created ? 'note' : 'human',
         path: change.path,
-        detail: `this path is protected (CI configuration, dependency manifest, container build or takumi's own configuration): a machine must not wave it through, and an agent must not "fix" a legitimate change by reverting it — a human decides`,
+        detail: created
+          ? `this delivery CREATES a protected path (nothing of the sort existed at the base): how the implementer writes down a stack choice, reported for the human reading the delivery rather than treated as a change to configuration that was already there`
+          : `this path is protected (CI configuration, dependency manifest, container build or takumi's own configuration): a machine must not wave it through, and an agent must not "fix" a legitimate change by reverting it — a human decides`,
         });
     }
   }

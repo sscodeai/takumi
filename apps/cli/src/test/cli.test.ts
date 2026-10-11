@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, chmodSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initProject } from '../init.js';
-import { loadConfig, loadWorkflow, resolveRuntime, runTask } from '../commands.js';
+import { loadConfig, loadWorkflow, requirementConfirmation, resolveRuntime, runTask, workflowExitCode } from '../commands.js';
 
 function makeProject(): string {
   const dir = mkdtempSync(join(tmpdir(), 'takumi-cli-test-'));
@@ -127,6 +127,162 @@ test('runTask: a workflow containing rule_review runs to completion over a real 
     const out = await runTask({ cwd: dir, prompt: 'review the change', runtimeId: 'fake', workflow: 'rule-check', config: cfg });
     assert.match(out.summary, /workflow "rule-check" completed/);
     assert.ok(out.artifacts.some((path) => path.endsWith('rules.md')), `the findings artifact is in the delivery (${out.artifacts.join(', ')})`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The exit code is the only thing a CI job can read. Before this fix the CLI
+// printed `✓ workflow "..." failed` and exited 0, so a failed delivery (and a
+// failed black-box acceptance) was indistinguishable from a green one.
+test('runTask: a failed workflow reports its status, and the CLI exit code follows it', async () => {
+  const dir = makeProject();
+  try {
+    writeFileSync(join(dir, 'gate.sh'), '#!/bin/sh\necho "# tests 1"\necho "# pass 0"\necho "# fail 1"\nexit 1\n');
+    const wfDir = join(dir, 'extensions/workflows/failing-gate');
+    mkdirSync(wfDir, { recursive: true });
+    writeFileSync(
+      join(wfDir, 'workflow.yaml'),
+      [
+        'name: failing-gate',
+        'version: 0.1.0',
+        'description: a gate that cannot pass',
+        'steps:',
+        '  - id: gate',
+        '    type: quality_gate',
+        '    prompt: sh gate.sh',
+        '  - id: ship',
+        '    type: delivery',
+        '    prompt: ship the delivery',
+        '    dependsOn: [gate]',
+        '',
+      ].join('\n'),
+    );
+    const cfg = loadConfig(dir);
+    const out = await runTask({ cwd: dir, prompt: 'ship it', runtimeId: 'fake', workflow: 'failing-gate', config: cfg });
+
+    assert.equal(out.status, 'failed', 'the workflow outcome must reach the caller');
+    assert.match(out.summary, /workflow "failing-gate" failed/);
+    assert.equal(workflowExitCode(out.status), 1, 'a failed workflow must not exit 0');
+    assert.ok(
+      !out.artifacts.some((p) => p.includes('delivery')),
+      `nothing may be delivered after a failed gate (${out.artifacts.join(', ')})`,
+    );
+
+    assert.equal(workflowExitCode(undefined), 0, 'the plain path has no workflow outcome');
+    assert.equal(workflowExitCode('completed'), 0);
+    assert.equal(workflowExitCode('cancelled'), 1, 'a rejected approval is not a success either');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ADR-025 through the CLI: the confirmation token, the acceptance step, and a refusal that names an
+// edited requirement.
+const ACCEPT_REQUIREMENT = [
+  'requirements:',
+  '  - id: REQ-001',
+  '    title: Summarise the CSV',
+  'ambiguities:',
+  '  - id: AMB-001',
+  '    question: What happens to a malformed row?',
+  '    options: ["stop", "skip and count"]',
+  '    default: "skip and count"',
+  '    blocking: true',
+  '',
+].join('\n');
+
+function acceptProject(): string {
+  const dir = makeProject();
+  mkdirSync(join(dir, 'docs/requirements'), { recursive: true });
+  mkdirSync(join(dir, 'checks'), { recursive: true });
+  writeFileSync(join(dir, 'docs/requirements/feature.yaml'), ACCEPT_REQUIREMENT);
+  writeFileSync(join(dir, 'checks/accept.sh'), '#!/bin/sh\necho "ok 1 - the summary has one row per department"\necho "ACCEPT_VERDICT: pass"\nexit 0\n');
+  chmodSync(join(dir, 'checks/accept.sh'), 0o755);
+  mkdirSync(join(dir, 'extensions/workflows/accept-flow'), { recursive: true });
+  writeFileSync(
+    join(dir, 'extensions/workflows/accept-flow/workflow.yaml'),
+    [
+      'name: accept-flow',
+      'version: 0.1.0',
+      'description: an acceptance step over a confirmed requirement',
+      'steps:',
+      '  - id: accept',
+      '    type: acceptance',
+      '    requirementRef: docs/requirements/feature.yaml',
+      '    acceptanceRef: checks/accept.sh',
+      '  - id: ship',
+      '    type: delivery',
+      '    prompt: ship the delivery',
+      '    dependsOn: [accept]',
+      '',
+    ].join('\n'),
+  );
+  return dir;
+}
+
+test('requirement digest: the confirmation token is stable, and an edit changes it', () => {
+  const dir = acceptProject();
+  try {
+    const token = requirementConfirmation(dir, 'docs/requirements/feature.yaml');
+    assert.equal(token.ref, 'docs/requirements/feature.yaml');
+    assert.match(token.digest, /^[0-9a-f]{64}$/);
+    assert.equal(requirementConfirmation(dir, 'docs/requirements/feature.yaml').digest, token.digest);
+    writeFileSync(join(dir, 'docs/requirements/feature.yaml'), ACCEPT_REQUIREMENT.replace('skip and count"]', 'stop"]'));
+    assert.notEqual(requirementConfirmation(dir, 'docs/requirements/feature.yaml').digest, token.digest, 'an edited document is a different token');
+    assert.throws(() => requirementConfirmation(dir, 'docs/requirements/nope.yaml'), /does not exist/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runTask: an acceptance workflow completes on the confirmed document, and refuses an edited one', async () => {
+  const dir = acceptProject();
+  try {
+    const cfg = loadConfig(dir);
+    const confirmed = requirementConfirmation(dir, 'docs/requirements/feature.yaml');
+
+    const ok = await runTask({ cwd: dir, prompt: 'ship it', runtimeId: 'fake', workflow: 'accept-flow', config: cfg, confirmedRequirement: confirmed });
+    assert.equal(ok.status, 'completed', `the acceptance passes on the confirmed document (${ok.events.join(' | ')})`);
+    assert.ok(
+      ok.artifacts.some((p) => p.includes('acceptance/ACCEPT-001.md')),
+      `the ACCEPT artifact is part of the run (${ok.artifacts.join(', ')})`,
+    );
+
+    // The document is edited after the confirmation: the acceptance refuses, by name, and nothing ships.
+    writeFileSync(join(dir, 'docs/requirements/feature.yaml'), ACCEPT_REQUIREMENT.replace('skip and count"]', 'stop"]'));
+    const stale = await runTask({ cwd: dir, prompt: 'ship it', runtimeId: 'fake', workflow: 'accept-flow', config: cfg, confirmedRequirement: confirmed });
+    assert.equal(stale.status, 'failed');
+    assert.match(stale.events.join('\n'), /is not the one that was confirmed/);
+    assert.ok(!stale.artifacts.some((p) => p.includes('delivery-manifest')), 'a refused acceptance delivers nothing');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runTask: an acceptance with no confirmation on record fails instead of accepting itself', async () => {
+  const dir = acceptProject();
+  try {
+    const cfg = loadConfig(dir);
+    const res = await runTask({ cwd: dir, prompt: 'ship it', runtimeId: 'fake', workflow: 'accept-flow', config: cfg });
+    assert.equal(res.status, 'failed');
+    assert.match(res.events.join('\n'), /no confirmed requirement is on record/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadWorkflow: an acceptance step with no requirementRef is refused at load', async () => {
+  const dir = acceptProject();
+  try {
+    writeFileSync(
+      join(dir, 'extensions/workflows/accept-flow/workflow.yaml'),
+      ['name: accept-flow', 'version: 0.1.0', 'description: broken', 'steps:', '  - id: accept', '    type: acceptance', '    acceptanceRef: checks/accept.sh', ''].join('\n'),
+    );
+    await assert.rejects(
+      () => loadWorkflow(dir, loadConfig(dir), 'accept-flow'),
+      /requires a non-empty requirementRef/,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

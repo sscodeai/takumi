@@ -36,6 +36,7 @@ import type { TaskBoardProvider } from './task-board.js';
 import type { BoardStateRecord } from './board-state-record.js';
 import type { ReviewFinding } from './review-rules.js';
 import {
+  NO_REQUIREMENT,
   REVIEWER_DETERMINISTIC_RULES,
   policyHash,
   reviewDigest,
@@ -62,6 +63,12 @@ export interface DeliveryLoopPlan {
    * label. The caller supplies the identity, and an approval then binds to the reviewer that ran.
    */
   reviewer?: string;
+  /**
+   * The digest of the CONFIRMED requirement document this delivery implements (ADR-025), or
+   * `NO_REQUIREMENT` when it has none. Bound into the review digest, so editing the requirement
+   * after a review makes that evidence stale — and merging it is refused by name.
+   */
+  requirementDigest?: string;
   /**
    * This run is FINISHING a delivery an earlier run left open (ADR-014), so round 0's work is
    * already committed on the branch.
@@ -297,12 +304,19 @@ export function staleReviewReason(
     return 'this delivery needs a human approval, and there is no record of what was presented for it (the record predates digests, or was written elsewhere): re-review, then approve that version';
   }
   if (onRecord.reviewed.digest === current.digest) return null;
+  // A record written before requirement digests existed cannot say which document it covered.
+  // That is unknown provenance, not a difference to describe (ADR-025, following ADR-018's rule
+  // that a record which cannot show what was reviewed may not merge).
+  if (onRecord.reviewed.requirement === '' && current.requirement !== NO_REQUIREMENT) {
+    return 'the review on record does not say which requirement it covered (the record predates requirement digests): re-review the confirmed requirement, then approve that version';
+  }
   const what: string[] = [];
   if (onRecord.reviewed.head !== current.head) what.push(`head ${onRecord.reviewed.head.slice(0, 12)} -> ${current.head.slice(0, 12)}`);
   if (onRecord.reviewed.base !== current.base) what.push('the base moved');
   if (onRecord.reviewed.policy !== current.policy) what.push('the review policy changed');
   if (onRecord.reviewed.ruleset !== current.ruleset) what.push('the rule set changed');
   if (onRecord.reviewed.reviewer !== current.reviewer) what.push('the reviewer changed');
+  if (onRecord.reviewed.requirement !== current.requirement) what.push('the requirement changed');
   return `the review on record covers different inputs (${onRecord.reviewed.digest.slice(0, 12)} vs ${current.digest.slice(0, 12)}: ${what.join(', ') || 'unknown difference'})`;
 }
 
@@ -416,6 +430,9 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
       reviewRules: plan.reviewRules,
     });
     const ruleDigest = rulesetHash(rulesetOptions(plan.reviewRules));
+    // ADR-025: a delivery with no confirmed requirement says so with a real value, so a delivery
+    // that later gains one is a CHANGE of inputs rather than an absence nobody can compare.
+    const requirement = plan.requirementDigest ?? NO_REQUIREMENT;
     return {
       digest: reviewDigest({
         head,
@@ -423,12 +440,14 @@ export async function runDeliveryLoop(deps: DeliveryLoopDeps): Promise<DeliveryL
         policy: policyDigest,
         ruleset: ruleDigest,
         reviewer: reviewerId,
+        requirement,
       }),
       head,
       base: plan.baseSha,
       policy: policyDigest,
       ruleset: ruleDigest,
       reviewer: reviewerId,
+      requirement,
       at: new Date(clock()).toISOString(),
     };
   };

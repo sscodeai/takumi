@@ -38,6 +38,9 @@ importers:
       '@takumi/delivery-fake':
         specifier: workspace:*
         version: link:../../deliveries/fake
+      '@takumi/delivery-forgejo':
+        specifier: workspace:*
+        version: link:../../packages/delivery-forgejo
       '@takumi/delivery-git':
         specifier: workspace:*
         version: link:../../deliveries/git
@@ -227,6 +230,19 @@ importers:
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  packages/delivery-forgejo:
+    dependencies:
+      '@takumi/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
