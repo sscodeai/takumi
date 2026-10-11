@@ -37,6 +37,25 @@ export const JUDGE_SCENARIO_REPORTS = ['ctrf', 'junit', 'tap'] as const;
 export const JUDGE_MUTATION_FORMATS = ['survivors-json'] as const;
 
 /**
+ * The smallest honest bound on ONE invocation of the deliverable (ADR-046). A run gets at least a
+ * second, or the bound is a refusal nobody sees. The forge carries the same floor on its own
+ * `RUN_MIN_TIMEOUT_MS` line; the two are kept honest by a test that parses the shell.
+ */
+export const MIN_RUN_TIMEOUT_MS = 1000;
+
+/**
+ * The bound applied to one invocation of the deliverable when the document declares none (ADR-046).
+ *
+ * WHY A BOUND EXISTS AT ALL, AND WHY IT IS A DEFAULT RATHER THAN AN OPTION. `deliverable.run` is
+ * invoked once per fixture, and a SERVICE-shaped run is a start-and-serve command that NEVER exits:
+ * without a bound the judge waits for ever and a generated CI job waits out the host's own job limit
+ * (GitHub's default is six hours). The bound is therefore unconditional — the document may tighten it
+ * (`deliverable.timeoutMs`) but cannot remove it, because an unbounded invocation is not a check, it is
+ * a hang that eventually reads as a failure for the wrong reason.
+ */
+export const DEFAULT_RUN_TIMEOUT_MS = 120000;
+
+/**
  * The smallest honest bound for a mutation run (ADR-039). A mutation tool executes the delivered suite
  * once per mutant, so a bound below five seconds cannot contain even a two-mutant pass; scenarios get one
  * second because they run one command once. This is a FLOOR, not a recommendation — a real suite should
@@ -412,8 +431,10 @@ export function parseDeliverableBlock(text: string): DeliverableBlock | undefine
   const run = stringOf(block['run']);
   const input = parseInputFormat(text);
   const mutation = parseMutation(text);
+  const timeout = block['timeoutMs'];
   return {
     ...(run === undefined ? {} : { run }),
+    ...(typeof timeout === 'number' && Number.isFinite(timeout) ? { timeoutMs: timeout } : {}),
     ...(block['output_format'] === undefined ? {} : { outputFormat: block['output_format'] }),
     ...(input === undefined ? {} : { input }),
     ...(mutation === undefined ? {} : { mutation }),
@@ -471,6 +492,31 @@ export function validateRequirementDocument(text: string): string[] {
   if (block !== undefined) {
     if (block.run === undefined || block.run.trim().length === 0) {
       issues.push('the deliverable block declares no run: a judge with no way to invoke the thing cannot check anything');
+    }
+    // ADR-046: `deliverable.build` and `deliverable.tests` are DEAD TEXT. Nothing in the chain reads
+    // either one: the delivered project's own tests are run from the WORKFLOW's `testCommand` (the
+    // `ci_config` step and the quality gate), not from the document, and no install/build step exists in
+    // `request-to-delivery{,-attempt}/workflow.yaml` at all. Before this refusal they were neither
+    // executed nor refused, so a document that declared them READ as compliance while nothing ran — the
+    // same defect class as a key inherited through a merge (docs/bugs-fixed.md #47). A silent declaration
+    // is worse than a refusal, so the front door names the key and refuses.
+    for (const deadKey of ['build', 'tests'] as const) {
+      if (!objectHasKey(text, deadKey)) continue;
+      issues.push(
+        `the deliverable block declares ${deadKey}, which nothing in the chain reads or runs: a declaration that is never executed reads as compliance, which is worse than a refusal — either wire it as a real step or remove it (the delivered project's own tests are run from the workflow's testCommand, not from deliverable.tests)`,
+      );
+    }
+    // ADR-046: the bound on ONE invocation of the deliverable. Optional in the document (the forge and the
+    // generated CI job apply DEFAULT_RUN_TIMEOUT_MS), but a declared one has to be a bound a judge can
+    // apply: a whole number of milliseconds at or above the floor. A bound below the floor is a refusal
+    // nobody sees; a non-number is a bound nobody can apply.
+    const declaredRunTimeout = deliverableOf(text)?.['timeoutMs'];
+    if (declaredRunTimeout !== undefined) {
+      if (typeof declaredRunTimeout !== 'number' || !Number.isFinite(declaredRunTimeout) || declaredRunTimeout < MIN_RUN_TIMEOUT_MS) {
+        issues.push(
+          `the deliverable block declares timeoutMs ${JSON.stringify(declaredRunTimeout)}: the bound on one invocation of the deliverable must be a whole number of milliseconds at or above ${MIN_RUN_TIMEOUT_MS}, or the timeout is a refusal nobody sees (omit it to take the default of ${DEFAULT_RUN_TIMEOUT_MS})`,
+        );
+      }
     }
     const implemented = JUDGE_RELATION_VOCABULARY.join(', ');
     for (const binding of block.bindings) {
