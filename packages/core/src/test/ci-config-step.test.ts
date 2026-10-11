@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import {
   ArtifactStore,
   executeWorkflow,
@@ -11,7 +13,7 @@ import {
   type WorkflowStep,
 } from '../index.js';
 import { TestRuntime } from '../test-utils.js';
-import { dialectForDeliveryProvider } from '../ci-pipeline.js';
+import { dialectForDeliveryProvider, renderCiConfig, type CiDialect } from '../ci-pipeline.js';
 import type { CheckSummary, DeliveryProvider, PullRequestRef } from '../delivery.js';
 
 /**
@@ -744,6 +746,81 @@ test('await_checks: two red steps file at most ONE issue per run (comments still
     assert.equal(provider.issues.length, 1, 'never more than one issue per run');
     assert.equal(provider.comments.length, 2, 'each genuine failure still reaches the pull request');
     assert.match(r.steps[1]?.summary ?? '', /issue not opened \(one pipeline-failure issue per run was already filed\)/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// (c) the generated pipeline FAILS when the delivered tests fail (docs/bugs-fixed.md #49)
+//
+// GitHub Actions runs a `run:` block with `bash -e`, which does NOT set `pipefail`, so a pipeline's
+// exit status is the LAST command's. Every branch of the delivered test command ends in `| tail -60`
+// (so the log stays readable), so a FAILING suite read GREEN. These tests run the GENERATED script
+// through the same shell the host uses, so what they assert is the artifact's behaviour, not a
+// paraphrase of it: a red suite is a red job.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The exact shell script the generated pipeline's `tests` job runs — extracted from the YAML, the way
+ * the host reads it. Handles both dialects: the GitHub-Actions jobs (`jobs.tests.steps[].run`) and
+ * GitLab CI's single `tests.script` block.
+ */
+function generatedTestScript(yaml: string): string {
+  const doc = parseYaml(yaml) as {
+    jobs?: { tests?: { steps?: Array<{ run?: unknown }> } };
+    tests?: { script?: unknown };
+  };
+  const stepRuns = (doc.jobs?.tests?.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === 'string');
+  if (stepRuns.length > 0) return stepRuns[stepRuns.length - 1]!;
+  const script = doc.tests?.script;
+  if (Array.isArray(script)) {
+    const parts = script.filter((s): s is string => typeof s === 'string');
+    if (parts.length > 0) return parts.join('\n');
+  }
+  throw new Error('the generated pipeline has no tests-job script to run');
+}
+
+/**
+ * Render a pipeline for `testCommand` and run its tests job the way the host does: a non-interactive
+ * `bash -e` in the delivery worktree. Returns the exit status and the combined output.
+ */
+function runGeneratedTestsJob(p: Project, testCommand: string, dialect: CiDialect): { status: number; output: string } {
+  const script = generatedTestScript(renderCiConfig({ dialect, testCommand }));
+  const res = spawnSync('bash', ['-e', '-c', script], { cwd: p.worktree, encoding: 'utf8' });
+  return { status: res.status ?? -1, output: `${res.stdout ?? ''}${res.stderr ?? ''}` };
+}
+
+test('ci_config: the generated tests job is NON-ZERO when the delivered suite FAILS (a red suite is never a green pipeline)', () => {
+  const p = fixture();
+  try {
+    // The delivered project's own failing suite, piped through `tail` exactly as the workflow declares.
+    writeFileSync(join(p.worktree, 'run-tests.sh'), '#!/usr/bin/env bash\necho "not ok 1 - the delivered suite failed"\nexit 1\n');
+    const testCommand = 'bash run-tests.sh 2>&1 | tail -60';
+    for (const dialect of ['github', 'forgejo', 'gitlab'] as const) {
+      const r = runGeneratedTestsJob(p, testCommand, dialect);
+      assert.notEqual(
+        r.status,
+        0,
+        `a FAILING delivered suite must fail the generated ${dialect} tests job, not read GREEN (got ${r.status}): ${r.output}`,
+      );
+      assert.match(r.output, /not ok 1/, 'the tail still shows the failing output the log exists to carry');
+    }
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('ci_config: the generated tests job is ZERO when the delivered suite PASSES (the tail is kept)', () => {
+  const p = fixture();
+  try {
+    writeFileSync(join(p.worktree, 'run-tests.sh'), '#!/usr/bin/env bash\necho "ok 1 - the delivered suite passed"\nexit 0\n');
+    const testCommand = 'bash run-tests.sh 2>&1 | tail -60';
+    for (const dialect of ['github', 'forgejo', 'gitlab'] as const) {
+      const r = runGeneratedTestsJob(p, testCommand, dialect);
+      assert.equal(r.status, 0, `a PASSING delivered suite must pass the generated ${dialect} tests job: ${r.output}`);
+      assert.match(r.output, /ok 1 - the delivered suite passed/, 'the output is still tailed into the log');
+    }
   } finally {
     p.cleanup();
   }

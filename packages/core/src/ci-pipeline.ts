@@ -99,6 +99,23 @@ export interface RenderCiConfigInput {
 }
 
 /**
+ * The shell script a generated job runs, with `set -o pipefail` in front of the command.
+ *
+ * WHY THIS EXISTS, AND WHY IT IS UNCONDITIONAL. GitHub Actions runs a `run:` block with `bash -e`,
+ * which does NOT set `pipefail`: the exit status of a pipeline is the LAST command's. The generated
+ * test command is a discovery snippet whose every branch ends in `| tail -60` (the tail exists so the
+ * log stays readable), so a FAILING delivered suite exited 0 and the job read GREEN — a false green in
+ * CI, the worst kind of defect this project can ship (docs/bugs-fixed.md #49). `set -o pipefail` makes
+ * the pipeline fail when ANY part of it fails, while KEEPING the tail. It is harmless for a command
+ * with no pipe, so it is emitted for every job and every dialect rather than sniffed for: a guard that
+ * depends on recognising the shape would go blind the day the shape changed, which is the same defect
+ * one level up. The deliverable job gets it too, for the identical reason.
+ */
+export function renderCiJobScript(command: string): string {
+  return ['set -o pipefail', ...command.split('\n')].join('\n');
+}
+
+/**
  * Render the pipeline YAML. It runs the DELIVERED project's own tests — not takumi's — and, when the
  * document declares a `deliverable.run`, a second job that runs the deliverable against the sample the
  * document itself declares. `{csv}` in the run command resolves to that sample file.
@@ -126,7 +143,7 @@ export function renderCiConfig(input: RenderCiConfigInput): string {
     "      - name: run the delivered project's own tests",
     '        run: |',
   );
-  for (const line of testCommand.split('\n')) lines.push(`          ${line}`);
+  for (const line of renderCiJobScript(testCommand).split('\n')) lines.push(`          ${line}`);
 
   if (runCommand !== undefined && runCommand.length > 0) {
     lines.push(
@@ -143,7 +160,7 @@ export function renderCiConfig(input: RenderCiConfigInput): string {
     }
     const runLine = sampleCsv !== undefined && sampleCsv.length > 0 ? runCommand.replace(/\{csv\}/g, 'takumi-sample.csv') : runCommand;
     lines.push('      - name: run the deliverable as the requirement document declares', '        run: |');
-    for (const line of runLine.split('\n')) lines.push(`          ${line}`);
+    for (const line of renderCiJobScript(runLine).split('\n')) lines.push(`          ${line}`);
   }
   return `${lines.join('\n')}\n`;
 }
@@ -177,7 +194,7 @@ export function renderGitlabCiConfig(input: RenderCiConfigInput): string {
     '  script:',
     '    - |',
   );
-  for (const line of testCommand.split('\n')) lines.push(`      ${line}`);
+  for (const line of renderCiJobScript(testCommand).split('\n')) lines.push(`      ${line}`);
 
   if (hasDeliverable) {
     lines.push('', 'deliverable:', '  stage: deliverable', '  script:', '    - |');
@@ -187,7 +204,7 @@ export function renderGitlabCiConfig(input: RenderCiConfigInput): string {
       lines.push('      TAKUMI_SAMPLE');
     }
     const runLine = sampleCsv !== undefined && sampleCsv.length > 0 ? runCommand.replace(/\{csv\}/g, 'takumi-sample.csv') : runCommand;
-    for (const line of runLine.split('\n')) lines.push(`      ${line}`);
+    for (const line of renderCiJobScript(runLine).split('\n')) lines.push(`      ${line}`);
   }
   return `${lines.join('\n')}\n`;
 }
