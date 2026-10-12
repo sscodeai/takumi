@@ -81,6 +81,19 @@ if [ ! -f "$AUTHORIZATION" ]; then
   exit 1
 fi
 
+# ---- 0b. the environment is checked BEFORE anything is spent ---------------------------------------
+# Act 1 spends an agent's money and minutes, so an environment that cannot possibly finish the
+# chain must be refused first. This is not hypothetical: three runs of this script each died in
+# ONE SECOND on a stale build output, and the only clue was a message about an unpublished SDK
+# (ledger #76). A refused measurement says nothing about the chain's reliability, so the chain
+# refuses to BE measured until its own machine is healthy.
+if ! bash "$ROOT/scripts/preflight-unattended.sh"; then
+  echo "refusing to start: the environment is not healthy (see PREFLIGHT above)." >&2
+  echo "This is not a delivery failure and must not be recorded as one (ledger #76): fix the" >&2
+  echo "environment, then measure. The chain has spent nothing." >&2
+  exit 1
+fi
+
 # ---- 1. intake: a document, or a refusal that says so ----------------------------------------------
 step "1/3 intake — one sentence becomes a requirement document"
 if ! "${CLI[@]}" run "$REQUEST" --workflow request-intake --runtime "$RUNTIME"; then
