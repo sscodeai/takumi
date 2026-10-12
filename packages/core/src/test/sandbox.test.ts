@@ -1,27 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DockerSandbox, NoopSandbox, dockerAvailable } from '../sandbox-docker.js';
 import { UnshareSandbox, unshareAvailable } from '../sandbox-unshare.js';
 
 // P1-2 Sandbox isolation tests. Docker-gated: if no daemon, we assert the
 // availability probe honestly reports false (never a fake sandbox pass).
-
-/**
- * A fixture root the unshare boundary can mirror: NOT under `/tmp`, which the
- * boundary mounts as a private tmpfs (guard G4). The filesystem-isolation
- * assertions live in `sandbox-boundary.test.ts`; this file keeps the legacy
- * `run(projectDir, command)` contract alive.
- */
-const FIXTURE_ROOT =
-  process.env.TAKUMI_SANDBOX_TEST_DIR ?? join(homedir(), '.cache', 'takumi-sandbox-tests');
-
-function mkProjectDir(): string {
-  mkdirSync(FIXTURE_ROOT, { recursive: true });
-  return mkdtempSync(join(FIXTURE_ROOT, 'legacy-project-'));
-}
 
 test('sandbox: dockerAvailable is honest (true or false, never throws)', async () => {
   const avail = await dockerAvailable();
@@ -105,7 +91,7 @@ test('sandbox: UnshareSandbox runs commands in project dir', async (t) => {
     return;
   }
   const sb = new UnshareSandbox();
-  const dir = mkProjectDir();
+  const dir = mkdtempSync(join(tmpdir(), 'sb-un-'));
   const res = await sb.run(dir, 'echo unshare-ok && pwd');
   assert.equal(res.code, 0);
   assert.ok(res.stdout.includes('unshare-ok'));
@@ -114,10 +100,20 @@ test('sandbox: UnshareSandbox runs commands in project dir', async (t) => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-// The old `touch /etc/evil-test` case was removed: it passed for the wrong
-// reason (this host mounts /etc read-only already), so it measured the host,
-// not the boundary. `sandbox-boundary.test.ts` replaces it with writes into a
-// mirrored project root, asserted against the same command run with no sandbox.
+test('sandbox: UnshareSandbox denies writes to host system paths', async (t) => {
+  const avail = await unshareAvailable();
+  if (!avail) {
+    t.skip('unshare sandbox not available');
+    return;
+  }
+  const sb = new UnshareSandbox();
+  const dir = mkdtempSync(join(tmpdir(), 'sb-un-ro-'));
+  const res = await sb.run(dir, 'touch /etc/evil-test 2>&1; echo "touch_rc=$?"');
+  // host rootfs is read-only inside the user ns → write denied (touch_rc=1)
+  assert.ok(/touch_rc=[1-9]/.test(res.stdout), `write to /etc must be denied (got: ${res.stdout.slice(0, 80)})`);
+  await sb.close();
+  rmSync(dir, { recursive: true, force: true });
+});
 
 test('sandbox: UnshareSandbox applies CPU resource limit', async (t) => {
   const avail = await unshareAvailable();
@@ -126,7 +122,7 @@ test('sandbox: UnshareSandbox applies CPU resource limit', async (t) => {
     return;
   }
   const sb = new UnshareSandbox();
-  const dir = mkProjectDir();
+  const dir = mkdtempSync(join(tmpdir(), 'sb-un-cpu-'));
   const t0 = Date.now();
   const res = await sb.run(dir, 'ulimit -t 1; while :; do :; done', { timeoutMs: 15000 });
   const dt = Date.now() - t0;

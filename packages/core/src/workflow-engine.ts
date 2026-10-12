@@ -35,8 +35,6 @@ import { appendFeedback, parseFeedback } from './requirement-feedback.js';
 import { writeRunRecord, type RunRecord, type RunRecordStep, type RunStepStatus } from './run-record.js';
 import { readRequirementConfirmation, type RequirementConfirmation } from './standing-authorization.js';
 import type { Usage } from './types.js';
-import type { StepSandbox } from './sandbox.js';
-import type { SandboxRoots } from './sandbox.js';
 import { parse as parseYamlText } from 'yaml';
 import { readFileSync as readTextFileSync, statSync as statFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
@@ -88,88 +86,6 @@ function renderNotGreenChecks(checks: readonly CheckSummary[]): string[] {
     .map((c) => `- ${c.name}: ${c.conclusion}${c.url !== undefined && c.url.length > 0 ? ` (${c.url})` : ''}`);
 }
 
-/**
- * One shell/argv command a step wants to run, and where. The engine routes every
- * step command through `runStepCommand`, which is the single place a step can
- * reach a boundary. `shell` and `argv` are mutually exclusive: a harness file is
- * run as argv (`bash <file>`) so a path in a manifest is never shell syntax.
- */
-export interface StepCommandRequest {
-  /** Shell command, run as `<sh> -c <shell>`. */
-  shell?: string;
-  /** argv form; `argv[0]` is the program, the rest are its arguments. */
-  argv?: string[];
-  /** Host-side working directory. Mirrored at the same absolute path inside a boundary. */
-  cwd: string;
-  /** Extra environment for the command, merged over the host environment. */
-  env?: Record<string, string>;
-  /** Wall-clock timeout in ms (default 120_000). */
-  timeoutMs?: number;
-}
-
-/** The shape `runStepCommand` throws for a non-zero/timed-out command. */
-export type StepCommandError = Error & {
-  stdout?: string;
-  stderr?: string;
-  code?: number;
-  timedOut?: boolean;
-};
-
-/**
- * Run a step command. This is the ONLY path a step shell command takes.
- *
- * When the execution context carries a `StepSandbox`, the command runs inside
- * that boundary and a refusal (the boundary could not be established) is
- * surfaced as a thrown error, never silently run unconfined. Without a sandbox
- * the command runs as before — the fail-closed refusal for a delivery run is a
- * preflight decision, so non-delivery runs keep their current behaviour (A9).
- *
- * Non-zero exit and timeout are reported by THROWING an error that carries
- * `stdout`/`stderr`/`code`, which is the contract the call sites already used
- * with `exec`/`execFile`.
- */
-export async function runStepCommand(
-  ctx: WorkflowExecutionContext,
-  req: StepCommandRequest,
-): Promise<{ stdout: string; stderr: string }> {
-  const timeoutMs = req.timeoutMs ?? 120000;
-  if ((req.shell === undefined) === (req.argv === undefined)) {
-    throw new Error('runStepCommand: exactly one of shell/argv is required');
-  }
-  if (ctx.sandbox !== undefined) {
-    const res = await ctx.sandbox.runStep({
-      ...(req.shell === undefined ? {} : { shell: req.shell }),
-      ...(req.argv === undefined ? {} : { argv: req.argv }),
-      cwd: req.cwd,
-      ...(req.env === undefined ? {} : { env: req.env }),
-      timeoutMs,
-    });
-    if (res.code !== 0) {
-      const err = new Error(
-        res.timedOut ? `command timed out after ${timeoutMs}ms` : `command exited with code ${res.code}`,
-      ) as StepCommandError;
-      err.stdout = res.stdout;
-      err.stderr = res.stderr;
-      err.code = res.code;
-      err.timedOut = res.timedOut;
-      throw err;
-    }
-    return { stdout: res.stdout, stderr: res.stderr };
-  }
-  const options = {
-    cwd: req.cwd,
-    timeout: timeoutMs,
-    maxBuffer: 16 * 1024 * 1024,
-    ...(req.env === undefined ? {} : { env: { ...process.env, ...req.env } }),
-  };
-  if (req.argv !== undefined) {
-    const [file, ...args] = req.argv;
-    if (file === undefined) throw new Error('runStepCommand: argv must not be empty');
-    return await execFileAsync(file, args, options);
-  }
-  return await execAsync(req.shell as string, options);
-}
-
 export interface WorkflowExecutionContext {
   /** Project working directory (steps run here). */
   cwd: string;
@@ -207,31 +123,6 @@ export interface WorkflowExecutionContext {
    * separation is a path property a test can assert rather than a promise in a comment.
    */
   worktree?: string;
-  /**
-   * The run id to use. When absent the engine generates one. The CLI pre-generates it
-   * so a boundary can name this run's judge directory before the first step runs.
-   */
-  runId?: string;
-  /**
-   * How this run's commands were sandboxed, as a human-readable string recorded in the
-   * run record: 'unshare', 'none', or 'none (unsafe override)'. Absent records 'none'
-   * honestly rather than implying a boundary that was not there (ADR-058).
-   */
-  sandboxNote?: string;
-  /**
-   * The boundary every step command in this run is routed through (ADR-058).
-   * Absent means no boundary: non-delivery runs pass through, and a delivery run
-   * is refused by the CLI preflight before its first agent step rather than
-   * running its step commands unconfined.
-   */
-  sandbox?: StepSandbox;
-  /**
-   * The roots the in-process agent tool adapters may touch (ADR-058 S5). The
-   * kernel boundary confines a `bash` command; `read`/`write`/`edit`/`ls`/`find`
-   * run in-process and are contained by resolving real paths against these roots.
-   * Present exactly when `sandbox` is; absent leaves the runtime open (legacy).
-   */
-  sandboxRoots?: SandboxRoots;
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
   /**
@@ -572,7 +463,7 @@ export async function executeWorkflow(
   }
 
   const order = topoSort(workflow.steps);
-  const runId = ctx.runId ?? `wf-${randomUUID().slice(0, 8)}`;
+  const runId = `wf-${randomUUID().slice(0, 8)}`;
   const run: WorkflowRun = {
     id: runId,
     workflow,
@@ -786,7 +677,6 @@ export async function executeWorkflow(
       },
       boardRowId,
       cost,
-      sandbox: ctx.sandboxNote ?? 'none',
     };
     const result = writeRunRecord(ctx.cwd, record);
     ctx.onEvent?.(
@@ -816,10 +706,6 @@ export async function executeWorkflow(
             cwd: ctx.worktree ?? ctx.cwd,
             trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
             context: { workflowStep: stepId, workflow: workflow.name, ...vars },
-            options: {
-              ...(ctx.sandbox === undefined ? {} : { sandbox: ctx.sandbox }),
-              ...(ctx.sandboxRoots === undefined ? {} : { sandboxRoots: ctx.sandboxRoots }),
-            },
           };
           try {
             const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
@@ -938,7 +824,7 @@ export async function executeWorkflow(
         const cmd = renderPrompt(step.prompt ?? '', vars);
         try {
           ctx.onEvent?.(stepId, `tool run: ${cmd}`);
-          const { stdout, stderr } = await runStepCommand(ctx, { shell: cmd, cwd: ctx.worktree ?? ctx.cwd, timeoutMs: step.timeoutMs ?? 120000 });
+          const { stdout, stderr } = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 120000 });
           const out = (stdout?.trim() || stderr?.trim() || '(no output)').slice(0, 4000);
           const kind = step.id.split('_')[0] ?? 'tool';
           const artifact = await ctx.artifacts.write({
@@ -975,7 +861,7 @@ export async function executeWorkflow(
         let out = '';
         let exitOk = true;
         try {
-          const r = await runStepCommand(ctx, { shell: cmd, cwd: ctx.worktree ?? ctx.cwd, timeoutMs: step.timeoutMs ?? 300000 });
+          const r = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 300000 });
           out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
         } catch (e) {
           exitOk = false;
@@ -1483,11 +1369,11 @@ export async function executeWorkflow(
         let out = '';
         let exitOk = true;
         try {
-          const r = await runStepCommand(ctx, {
-            argv: ['bash', path.resolve(ctx.cwd, forgeRef)],
+          const r = await execFileAsync('bash', [path.resolve(ctx.cwd, forgeRef)], {
             cwd: judgeDir,
-            timeoutMs: step.timeoutMs ?? 300000,
+            timeout: step.timeoutMs ?? 300000,
             env: {
+              ...process.env,
               TAKUMI_REQUIREMENT: requirementRef,
               TAKUMI_REQUIREMENT_DIGEST: `sha256:${reqDigest}`,
               TAKUMI_WORKTREE: worktreePath,
@@ -1638,11 +1524,11 @@ export async function executeWorkflow(
         let out = '';
         let exitOk = true;
         try {
-          const r = await runStepCommand(ctx, {
-            argv: ['bash', acceptanceRef],
+          const r = await execFileAsync('bash', [acceptanceRef], {
             cwd: harnessCwd,
-            timeoutMs: step.timeoutMs ?? 300000,
+            timeout: step.timeoutMs ?? 300000,
             env: {
+              ...process.env,
               TAKUMI_WORKTREE: worktreePath,
               TAKUMI_PROJECT: ctx.cwd,
               ...(forgedJudgePath === undefined ? {} : { TAKUMI_JUDGE_DIR: harnessCwd }),
@@ -2407,10 +2293,6 @@ export async function executeWorkflow(
           cwd: ctx.worktree ?? ctx.cwd,
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
           context: { workflowStep: stepId, workflow: workflow.name, ...vars },
-          options: {
-            ...(ctx.sandbox === undefined ? {} : { sandbox: ctx.sandbox }),
-            ...(ctx.sandboxRoots === undefined ? {} : { sandboxRoots: ctx.sandboxRoots }),
-          },
         };
         try {
           const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
