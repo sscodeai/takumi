@@ -53,6 +53,68 @@ else
   not_ok "the document declares a judge contract (deliverable.run and at least one REL-nnn relation)"
 fi
 
+# ADR-056: HAVING a judge contract is not the same as a judge being forgeable from it, and the difference
+# cost ~35 minutes of a real run (docs/bugs-fixed.md #69). On 2026-10-12 the third unattended chain
+# produced a document this gate passed 5/5 — and `judge_forge` then refused it ("declares 0 output
+# line(s) that are neither a per-id line nor a skipped line, where exactly one totals line is needed").
+# The refusal is correct and the forge is the authority; what was wrong is WHERE it was discovered: the
+# check above only asks whether the document HAS `deliverable.run` and a relation, and the validator
+# above (`requirement confirm --dry-run`) knows nothing about forgeability — so the disagreement surfaced
+# AFTER the implementation and the delivered tests had been paid for (1 047 s), and the repair round paid
+# for it AGAIN, because a document does not change between attempts.
+#
+# So the gate asks the JUDGE'S OWN QUESTION here, before a human (or a signed grant) is asked to confirm
+# anything: the forge is run against the document into a scratch judge directory and must answer
+# `JUDGE_FORGE: ok`. A refusal becomes a failed check naming what the forge could not implement — the one
+# place in the chain where fixing the document is still free. It runs the forge the run itself will run
+# (`extensions/judges/metamorphic-forge.sh`), not a re-implementation of it, so the two cannot drift: a
+# rule added to the forge is enforced here the same day, and no vocabulary list is maintained twice.
+#
+# `TAKUMI_WORKTREE` is a scratch directory, and that is deliberate: forging takes the document alone
+# (ADR-026) and no implementation exists yet — the forge refuses a judge that hard-codes the worktree it
+# was TOLD about, so a scratch path is the honest input and a real one would be a lie.
+#
+# The document is forged AS THE CONFIRMATION WILL LEAVE IT, not as the intake wrote it. The forge reads
+# `chosen:` and the intake is forbidden to write it (rule 4b), so forging the raw intake document would
+# refuse every document in the chain for a reason that is not about the contract at all ("$AMB has no
+# chosen option: the judge would be built from a decision nobody made"). So every decision that has no
+# `chosen:` is answered with its own `default:` first — which is exactly the answer a signed standing
+# authorization takes (`confirmation.defaulted` records each one), and exactly what the human is offered
+# as a bounded choice.
+FORGE="${TAKUMI_FORGE:-extensions/judges/metamorphic-forge.sh}"
+if [ ! -f "$FORGE" ]; then
+  not_ok "the judge forge is present at $FORGE"
+else
+  mkdir -p "$PWD/.takumi"
+  GATE_DIR=$(mktemp -d "$PWD/.takumi/gate-XXXXXX")
+  AS_CONFIRMED="$GATE_DIR/intake-as-confirmed.yaml"
+  awk '
+    function flush() { if (pend) { print indent "chosen: " defval; pend = 0 } }
+    {
+      if (pend && $0 !~ /^[[:space:]]*chosen:[[:space:]]/) flush()
+      print
+      if ($0 ~ /^[[:space:]]*default:[[:space:]]/) {
+        pend = 1; defval = $0; sub(/^[[:space:]]*default:[[:space:]]*/, "", defval)
+        indent = $0; sub(/[^[:space:]].*$/, "", indent)
+      } else if ($0 ~ /^[[:space:]]*chosen:[[:space:]]*/) { pend = 0 }
+    }
+    END { flush() }
+  ' "$REF" > "$AS_CONFIRMED"
+  JUDGE_TMP=$(mktemp -d)
+  WORK_TMP=$(mktemp -d)
+  FORGE_OUT=$(TAKUMI_REQUIREMENT="${AS_CONFIRMED#"$PWD"/}" TAKUMI_REQUIREMENT_DIGEST="sha256:gate" \
+    TAKUMI_PROJECT="$PWD" TAKUMI_JUDGE_DIR="$JUDGE_TMP" TAKUMI_WORKTREE="$WORK_TMP" \
+    timeout 120 bash "$FORGE" 2>&1)
+  FORGE_STATUS=$?
+  rm -rf "$JUDGE_TMP" "$WORK_TMP" "$GATE_DIR"
+  printf '%s\n' "$FORGE_OUT" | sed 's/^/# /'
+  if [ "$FORGE_STATUS" -eq 0 ] && printf '%s\n' "$FORGE_OUT" | grep -qE '^[[:space:]]*JUDGE_FORGE[[:space:]]*[:=][[:space:]]*ok[[:space:]]*$'; then
+    ok "a judge can be forged from the document as the confirmation will leave it"
+  else
+    not_ok "a judge can be forged from the document as the confirmation will leave it (exit $FORGE_STATUS: no delivery could be judged against this document)"
+  fi
+fi
+
 REQS=$(grep -cE '^[[:space:]]*-[[:space:]]*id:[[:space:]]*REQ-[0-9]+' "$REF" || true)
 AMBS=$(grep -cE '^[[:space:]]*-[[:space:]]*id:[[:space:]]*AMB-[0-9]+' "$REF" || true)
 if [ "$REQS" -ge 1 ]; then

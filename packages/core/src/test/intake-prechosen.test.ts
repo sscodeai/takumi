@@ -35,7 +35,13 @@ import { fileURLToPath } from 'node:url';
 const REPO = fileURLToPath(new URL('../../../..', import.meta.url));
 const GATE = join(REPO, 'extensions/workflows/request-intake/checks/intake-shape-tap.sh');
 const CLI = join(REPO, 'apps/cli/dist/index.js');
-const DOC = join(REPO, 'docs/requirements/intake.yaml');
+// The fixture is a COMMITTED document the forge accepts (`service-station-summary.yaml` delivered PR #7),
+// NOT the intake's own output path. It used to be `docs/requirements/intake.yaml`, which the system
+// REWRITES on every intake run — so this test asserted "the gate passes this document" about a file whose
+// content is whatever the last agent happened to write. The third unattended chain produced one the forge
+// refuses (no totals line), and these tests went red for a reason that had nothing to do with pre-chosen
+// answers (docs/bugs-fixed.md #69).
+const DOC = join(REPO, 'docs/requirements/service-station-summary.yaml');
 
 /** The gate needs a document INSIDE the project, named RELATIVE to it: the CLI joins the ref onto the
  * project root, so an absolute path is read as a path under the root and cannot be found. */
