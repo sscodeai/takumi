@@ -164,6 +164,9 @@ is copied or linked from util-linux, from orbi (AGPL/SUL), or from the Pi SDK's 
   confinement of a real step, and the human-only override recorded as `none (unsafe override)`.
 - `packages/core/src/test/sandbox-real-boundary.test.ts` — A10: the **real** metamorphic forge prints
   `JUDGE_FORGE: ok` inside the boundary, the judge it writes runs there, and the fixture delivery's own
-  `run-tests.sh` passes there. This test found the missing `/dev/fd`.
+  `run-tests.sh` passes there. This test found the missing `/dev/fd`. It needs the fixture worktree
+  `.takumi/worktrees/takumi-run-20261006T001959616Z-18dc560a`, which is git-ignored, so in a clean
+  checkout it SKIPS with a named reason (reported as a skip, never a pass); running it requires that
+  fixture or a copy of it.
 - `runtimes/pi/src/test/confinement.test.ts` — the confined tool builder drops `grep`, reads/writes
   inside, and refuses an outside path and a symlink escape.
