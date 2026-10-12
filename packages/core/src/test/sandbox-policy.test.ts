@@ -338,3 +338,36 @@ test('sandbox script: renderInnerCommand refuses an ambiguous request', () => {
     "cd '/w' && exec 'bash' '/j/run.sh'",
   );
 });
+
+// --- the platform's own tooling must run, and read-only is how (the next unit after ledger #79) --
+//
+// With the boundary confined to the model's seam, the acceptance step runs the DELIVERED project
+// open, because the platform harness that runs it lives inside this repository and the boundary
+// makes that repository invisible. The fix is not to open the step, it is to make the platform
+// READ-ONLY VISIBLE: the harness can run, and #68's property (a judged agent cannot WRITE the
+// platform) is G2's, which is untouched.
+
+test('platformReadOnly: the project root is mirrored READ-ONLY, so the platform tooling can run', () => {
+  const p = deliveryPolicy({ platformReadOnly: true });
+  const ro = p.ro.map((r) => path.resolve(r));
+  assert.ok(ro.includes(path.resolve(PROJECT)), 'the platform root is mirrored read-only');
+  assert.ok(
+    !p.rw.map((r) => path.resolve(r)).includes(path.resolve(PROJECT)),
+    'and it is NEVER a write root — that is the property that matters',
+  );
+});
+
+test('platformReadOnly: a STRICT ANCESTOR of the project is still refused (siblings would leak)', () => {
+  assert.throws(
+    () => deliveryPolicy({ platformReadOnly: true, ro: ['/srv/hermes', ...CLEAN_TOOLCHAIN.roots] }),
+    (e: unknown) =>
+      e instanceof SandboxPolicyError && e.guard === 'G1' && /contains the project root/.test(e.message),
+  );
+});
+
+test('without platformReadOnly, the project root as a read-only root is still refused (the default stays invisible)', () => {
+  assert.throws(
+    () => deliveryPolicy({ ro: [PROJECT, ...CLEAN_TOOLCHAIN.roots] }),
+    (e: unknown) => e instanceof SandboxPolicyError && e.guard === 'G1',
+  );
+});
