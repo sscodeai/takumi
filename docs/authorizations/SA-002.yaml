@@ -52,5 +52,17 @@ decisions:
     policy: document-default
   - class: independent-aggregation
     policy: document-default
+  # WIDENED 2026-10-12, on the machinery's own instruction ("the authorization is widened in a signed
+  # commit"), after the first unattended chain stopped here and named it:
+  #   AMB-004 (unmechanised) — class not in the authorization's decisions
+  #   AMB-005 (unmechanised) — class not in the authorization's decisions
+  # `unmechanised` is ADR-045 §1's class for a decision NO declared check exercises. The validator
+  # already refuses a BLOCKING decision nothing checks (ADR-028), so this class can only ever be a
+  # NON-BLOCKING one — and both of these are (`blocking: false`): the boundary of "malformed" and the
+  # line ordering. Signing this class means: on those two, the document's own `default:` is taken, and
+  # each answer is listed in the document's `defaulted:` list for a reviewer. It does NOT widen which
+  # documents are in reach, and it cannot reach a blocking question.
+  - class: unmechanised
+    policy: document-default
 failures:
   - class: implementation-changes
