@@ -171,22 +171,6 @@ is copied or linked from util-linux, from orbi (AGPL/SUL), or from the Pi SDK's 
 - `runtimes/pi/src/test/confinement.test.ts` — the confined tool builder drops `grep`, reads/writes
   inside, and refuses an outside path and a symlink escape.
 
-## What CI cannot verify (added 2026-10-12)
-
-GitHub's hosted runners do not permit unprivileged user namespaces: `unshare` fails with
-`unshare: _write_failed_ /proc/self/uid_map: _Operation_not_permitted`. Consequences, stated rather than
-discovered later:
-
-- Every test that needs a real boundary SKIPS there (the boundary self-test reports that it could not be
-  established, and the tests that assert mount propagation, resource limits and the A10 end-to-end run are
-  skipped rather than passed). **A green CI run therefore says nothing about the boundary** — it is
-  verified on hosts that can provide one (this machine: `unprivileged_userns_clone=1`,
-  `max_user_namespaces=63120`), not on the runner.
-- The run-path tests (`apps/cli/src/test/delivery-worktree.test.ts`) drive real runs and would otherwise be
-  refused by the fail-closed preflight on such a host. They set the recorded hatch
-  (`TAKUMI_UNSAFE_NO_SANDBOX=1`) for exactly that reason, so the hatch is also covered behaviour rather
-  than a comment (docs/bugs-fixed.md #73).
-
 ### Whose code runs: the boundary belongs to the model's seam (amended 2026-10-12, ledger #79)
 
 This ADR first described ONE boundary applied to every step, and that was a category error: the
@@ -216,3 +200,27 @@ What this boundary does NOT close (added, not a claim): the **acceptance step ru
 project open**, because it is the platform's harness that runs it; the deliverable is model-authored
 code. Containing the thing under test requires a per-step boundary (read-only platform, worktree
 writable) and a chain-level test — named as the next unit of work, not claimed here.
+
+## What CI cannot verify (added 2026-10-12)
+
+GitHub's hosted runners do not permit unprivileged user namespaces: `unshare` fails with
+`unshare: _write_failed_ /proc/self/uid_map: _Operation_not_permitted`. Consequences, stated rather than
+discovered later:
+
+- Every test that needs a real boundary SKIPS there (the boundary self-test reports that it could not be
+  established, and the tests that assert mount propagation, resource limits and the A10 end-to-end run are
+  skipped rather than passed). **A green CI run therefore says nothing about the boundary** — it is
+  verified on hosts that can provide one (this machine: `unprivileged_userns_clone=1`,
+  `max_user_namespaces=63120`), not on the runner.
+- The run-path tests (`apps/cli/src/test/delivery-worktree.test.ts`) drive real runs and would otherwise be
+  refused by the fail-closed preflight on such a host. They set the recorded hatch
+  (`TAKUMI_UNSAFE_NO_SANDBOX=1`) for exactly that reason, so the hatch is also covered behaviour rather
+  than a comment (docs/bugs-fixed.md #73).
+
+**The chain check is the required step for any change to this boundary:**
+`scripts/verify-boundary-chain.sh` runs ONE real chain with the boundary ON and reads `sandbox`,
+`accepted` and the merge step back out of the run record — so "we ran with the boundary" is not
+prose. It refuses to run when the unsafe override is set (the result would say nothing about the
+boundary) and refuses on an unhealthy environment (ledger #76: a broken machine must not be recorded
+as a delivery failure). This is the check that would have caught ledger #75, where the boundary
+merged after its own tests passed 12/12 while the chain was dead.
