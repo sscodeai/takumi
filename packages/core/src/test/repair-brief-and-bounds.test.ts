@@ -263,10 +263,9 @@ test('the manifests carry the wiring: the intake is a repair round, and the deli
   assert.match(sub, /\{repairFailures\}/, 'the next attempt is told what the contract refused');
   assert.match(
     sub,
-    /- id: intake_shape[\s\S]*?type: acceptance/,
-    'the gate is the attempt’s ACCEPTANCE: a repair sub-workflow without one is refused by the engine, and the gate’s failing checks are the brief',
+    /- id: intake_shape[\s\S]*?type: quality_gate/,
+    'the gate is the attempt’s verdict: a repair sub-workflow needs a verdict step, and here that is a shape gate — an `acceptance` would be bound to a confirmed requirement that cannot exist yet',
   );
-  assert.match(sub, /- id: intake_shape[\s\S]*?acceptanceRef: extensions\/workflows\/request-intake\/checks\/intake-shape-tap\.sh/);
   assert.match(sub, /- id: intake_shape[\s\S]*?dependsOn: \[req_intake\]/, 'the gate runs on the document the agent wrote');
 
   const delivery = read('extensions/workflows/request-to-delivery-attempt/workflow.yaml');
@@ -277,5 +276,33 @@ test('the manifests carry the wiring: the intake is a repair round, and the deli
       /timeoutMs: [1-9][0-9]{5,}/,
       `${id} declares a bound: a wandering agent must not spend without limit (docs/bugs-fixed.md #68)`,
     );
+  }
+});
+
+test('a repair sub-workflow whose verdict is a SHAPE GATE still repairs (no acceptance exists at intake time)', async () => {
+  // docs/bugs-fixed.md #72: the intake's attempt is judged by a `quality_gate`. Requiring an `acceptance`
+  // there was unsatisfiable BY CONSTRUCTION — an acceptance is bound to a confirmed requirement (ADR-025)
+  // and nothing is confirmed while the intake runs, so the first version of the round failed with "no
+  // confirmed requirement is on record for this run" without executing its gate at all.
+  const p = project();
+  try {
+    const sub: WorkflowDefinition = {
+      name: 'the-attempt',
+      version: '0.1.0',
+      description: '',
+      steps: [
+        { id: 'implementation', type: 'agent', prompt: 'Attempt {repairRound}. Brief:\n{repairFailures}\n— end.', timeoutMs: 600000 },
+        { id: 'shape_gate', type: 'quality_gate', prompt: 'bash shape.sh', dependsOn: ['implementation'], timeoutMs: 120000 },
+      ],
+    };
+    const res = await run(p, sub, (n) => {
+      if (n === 2) writeFileSync(join(p.dir, 'fixed'), 'repaired\n');
+    });
+
+    assert.equal(res.status, 'completed', `a gate-judged attempt is repaired, not refused\n${res.step.summary}`);
+    assert.equal(res.prompts.length, 2, 'the round ran exactly twice: one refusal, one repair');
+    assert.match(res.prompts[1] ?? '', /exactly one totals line/, 'the second attempt is told what the gate refused');
+  } finally {
+    rmSync(p.dir, { recursive: true, force: true });
   }
 });

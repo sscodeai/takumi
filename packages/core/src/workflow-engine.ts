@@ -942,9 +942,15 @@ export async function executeWorkflow(
           done.add(stepId);
           continue;
         }
-        if (!sub.steps.some((s) => s.type === 'acceptance')) {
+        // WHAT JUDGES AN ATTEMPT IS NOT ALWAYS AN `acceptance`. An acceptance is BOUND to a confirmed
+        // requirement (ADR-025) and the intake's attempt runs BEFORE anything is confirmed, so requiring
+        // one there is unsatisfiable by construction: the first version of the intake repair round failed
+        // with "no confirmed requirement is on record for this run" without ever running its gate
+        // (docs/bugs-fixed.md #72). A `quality_gate` reports the same TAP failures and is the right verdict
+        // for an attempt whose subject is the document itself.
+        if (!sub.steps.some((s) => s.type === 'acceptance' || s.type === 'quality_gate')) {
           failStep(
-            `the repair sub-workflow "${repairRef}" declares no acceptance step: a repair loop with nothing to judge it cannot know when to stop`,
+            `the repair sub-workflow "${repairRef}" declares neither an acceptance nor a quality gate step: a repair loop with nothing to judge it cannot know when to stop`,
           );
           done.add(stepId);
           continue;
@@ -976,7 +982,12 @@ export async function executeWorkflow(
             abort = `delivery ${label} could not be run (${e instanceof Error ? e.message : String(e)})`;
             break;
           }
-          const acceptance = res.steps.find((s) => sub.steps.find((d) => d.id === s.stepId)?.type === 'acceptance');
+          // The attempt's verdict: an `acceptance` OR a `quality_gate` (see the guard above). Both end in
+          // TAP and both name their failing checks, which is what a repair round needs and all it needs.
+          const verdictType = (id: string): string | undefined => sub.steps.find((d) => d.id === id)?.type;
+          const acceptance = res.steps.find(
+            (s) => verdictType(s.stepId) === 'acceptance' || verdictType(s.stepId) === 'quality_gate',
+          );
           // THE BRIEF COMES FROM THE STEP THAT FAILED, when the acceptance never ran. The acceptance is
           // SKIPPED while any step it depends on fails, so on the round after an upstream refusal its
           // summary is empty and the next attempt would be handed "a judge which reported nothing has told
