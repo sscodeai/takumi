@@ -124,19 +124,28 @@ test('sandbox policy (G1): a read-only root that contains the project is refused
 });
 
 test('sandbox policy (G1): the probed toolchain has no read-only root above the project (A8)', () => {
-  const policy = buildSandboxPolicy({
-    projectRoot: PROJECT,
-    worktree: WORKTREE,
-    judgeDir: JUDGE,
-    runId: RUN_ID,
-    pathValue: process.env.PATH,
+  // Injected `exists`/`pathValue` so the property is tested on ANY host, not only
+  // one whose PATH happens to contain the sibling toolchain directory.
+  const nodeBin = '/srv/hermes/.local/bin';
+  const insideProject = path.join(PROJECT, 'node_modules', '.bin');
+  const probe = probeToolchain({
+    cwd: PROJECT,
+    pathValue: [nodeBin, insideProject, '/srv/hermes', '/usr/bin', '/bin'].join(path.delimiter),
+    exists: () => true,
+    realpath: (p) => p,
+    requiredTools: ['sh'],
   });
+  assert.ok(probe.roots.includes(nodeBin), 'a SIBLING toolchain directory is mirrored');
+  assert.ok(!probe.roots.includes('/srv/hermes'), 'the parent of the workspace tree must not be mirrored');
+  assert.ok(
+    probe.dropped.some((d) => d.path === insideProject),
+    'a PATH entry inside the project (pnpm puts node_modules/.bin there) is dropped',
+  );
+  const policy = deliveryPolicy({ ro: probe.roots });
   for (const root of policy.ro) {
     assert.ok(!isInside(root, policy.cwd), `read-only root ${root} must not contain ${policy.cwd}`);
     assert.ok(!isInside(policy.cwd, root), `read-only root ${root} must not be inside ${policy.cwd}`);
   }
-  assert.ok(!policy.ro.includes('/srv/hermes'), 'the parent of the workspace tree must not be mirrored');
-  assert.ok(policy.ro.includes('/srv/hermes/.local/bin'), 'the node/pnpm directory is a sibling and is mirrored');
 });
 
 test('sandbox policy (G4): a project root under a path the boundary masks is refused when it stages files', () => {

@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentRuntimeAdapter, WorkflowDefinition } from '@takumi/core';
+import { sandboxCapability } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
 import { initProject } from '../init.js';
 import {
@@ -123,6 +124,24 @@ test('preflight: a run without a worktree stays unconfined unless --sandbox unsh
   );
 });
 
+test('preflight: an explicit --sandbox unshare is honoured even when the override is set', () => {
+  // The override is the fallback for a run that would otherwise be refused; it
+  // must not silently drop a boundary that was asked for and is available.
+  const requested = decideSandbox({
+    worktree: '/w',
+    sandbox: 'unshare',
+    capability: { available: true },
+    unsafeOverride: true,
+  });
+  assert.equal(requested.mode, 'unshare');
+  const fallback = decideSandbox({
+    sandbox: 'unshare',
+    capability: { available: false, reason: 'no_userns' },
+    unsafeOverride: true,
+  });
+  assert.equal(fallback.mode, 'unsafe-override');
+});
+
 test('preflight: only the exact literal 1 in the environment is the override', () => {
   assert.equal(unsafeNoSandboxSet({ [UNSAFE_NO_SANDBOX_ENV]: '1' }), true);
   assert.equal(unsafeNoSandboxSet({ [UNSAFE_NO_SANDBOX_ENV]: 'true' }), false);
@@ -195,7 +214,56 @@ test('preflight (A7): a delivery run with --sandbox none is refused before the r
   }
 });
 
-test('preflight: a confined run executes its step inside the boundary and records it', async () => {
+test('preflight (H2): a policy guard failure is refused and audited, with no judge directory left behind', async () => {
+  // A project root under /tmp that stages a harness file violates G4. The failure
+  // must arrive as the SAME audited refusal as an unavailable boundary, not as an
+  // unaudited throw, and no empty judge tree may be left behind.
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-guard-'));
+  try {
+    initProject(dir);
+    writeFileSync(join(dir, 'req.md'), '# requirement\n');
+    writeWorkflow(dir, 'forge', [
+      'name: forge',
+      'version: 0.1.0',
+      'description: a forge step',
+      'steps:',
+      '  - id: judge_forge',
+      '    type: judge_forge',
+      "    requirementRef: 'req.md'",
+      "    forgeRef: 'forge.sh'",
+    ]);
+    writeFileSync(join(dir, 'forge.sh'), '#!/bin/sh\n');
+    const cfg = loadConfig(dir);
+    const flag = { ran: false };
+    const out = await runTask({
+      cwd: dir,
+      prompt: 'x',
+      runtimeId: 'fake',
+      runtime: spyRuntime(flag),
+      workflow: 'forge',
+      worktree: join(dir, 'worktree'),
+      sandbox: 'unshare',
+      confirmedRequirement: { ref: 'req.md', digest: 'abc' },
+      config: cfg,
+    });
+    assert.equal(out.status, 'failed');
+    assert.equal(flag.ran, false);
+    const audits = auditRecords(dir);
+    assert.ok(audits.length >= 1, 'the guard failure is audited');
+    assert.equal((audits[0]?.sandbox as { mode?: string } | undefined)?.mode, 'refused');
+    assert.equal((audits[0]?.sandbox as { reason?: string } | undefined)?.reason, 'G4');
+    assert.equal(existsSync(join(dir, '.takumi/acceptance')), false, 'no empty judge tree is left behind');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('preflight: a confined run executes its step inside the boundary and records it', async (t) => {
+  const capability = await sandboxCapability();
+  if (!capability.available) {
+    t.skip(`the boundary cannot be established on this host: ${capability.reason ?? 'unknown'}`);
+    return;
+  }
   const dir = makeProject();
   try {
     writeWorkflow(dir, 'tools', [
@@ -220,7 +288,9 @@ test('preflight: a confined run executes its step inside the boundary and record
     assert.ok(out.events.some((e) => e.startsWith('step tool_step: completed') && e.includes('confined-ok')));
     const records = runRecords(dir);
     assert.equal(records.length, 1);
-    assert.equal(records[0]?.sandbox, 'unshare');
+    // Step commands are confined on every runtime; the fake runtime's agent is
+    // not, so the record says which of the two this run got (ADR-058 limitation 8).
+    assert.match(String(records[0]?.sandbox), /^unshare/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

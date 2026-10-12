@@ -275,6 +275,12 @@ function renderSelfTestScript(policy: SandboxPolicy): string {
   lines.push(
     `timeout 3 bash -c "exec 3<>/dev/tcp/1.1.1.1/443" 2>/dev/null && emit no-network FAIL:reachable || emit no-network OK`,
   );
+  // STRUCTURAL network assertion: the reachability probe above fails open on a
+  // host that has no route to the address at all (air-gapped CI, IPv4 disabled), so
+  // a fresh netns that unexpectedly carried the host's routes could still read OK.
+  // The empty routing table is the property, and it is checked directly.
+  lines.push(`[ -z "$(ip route 2>/dev/null)" ] && emit no-route OK || emit no-route FAIL:route_present`);
+  lines.push(`[ -z "$(ip -6 route 2>/dev/null)" ] && emit no-route6 OK || emit no-route6 FAIL:route_present`);
   lines.push(`ip link show lo 2>/dev/null | grep -q UP && emit loopback OK || emit loopback FAIL:down`);
   lines.push(`[ -r /proc/1/status ] && emit proc OK || emit proc FAIL:unreadable`);
   lines.push(`( : > /dev/null ) && emit dev-null OK || emit dev-null FAIL:unwritable`);

@@ -94,7 +94,9 @@ async function main(argv: string[]): Promise<number> {
         } else if (arg === '--verbose' || arg === '-v') {
           verbose = true;
         } else if (arg === '--sandbox') {
-          sandbox = (rest[++i] as 'none' | 'unshare') ?? 'none';
+          // A missing value is NOT silently `none`: an absent next arg becomes a
+          // sentinel that the validation below refuses, like any unknown value.
+          sandbox = (rest[++i] ?? '__missing__') as 'none' | 'unshare';
         } else if (arg === '--resume') {
           resume = true;
         } else if (arg === '--requirement') {

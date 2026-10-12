@@ -15,6 +15,13 @@
  * is the reference; a NoopSandbox (plain exec) is used when sandboxing is
  * disabled or unavailable — so the default remains "unsandboxed" and the
  * capability 'sandbox' is only advertised when a real sandbox is available.
+ *
+ * The REAL boundary used by a delivery is `UnshareSandbox` built from a
+ * `SandboxPolicy` (ADR-058): it mirrors an explicit allow-list of host paths
+ * into a private tmpfs root, mounts only the worktree and this run's judge tree
+ * read-write, and self-tests every property before a step runs. `NoopSandbox`
+ * provides NO isolation — it is the passthrough for runs that are not confined,
+ * and the tests use it as the non-vacuity control.
  */
 export interface SandboxResult {
   stdout: string;

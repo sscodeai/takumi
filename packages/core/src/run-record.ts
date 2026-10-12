@@ -133,10 +133,12 @@ export interface RunRecord {
   /** The runtime-reported cost, or a plain statement that none was reported. */
   cost: RunRecordCost;
   /**
-   * How this run's step commands were sandboxed (ADR-058): 'unshare' when a boundary was
-   * established, 'none' when there was none, and 'none (unsafe override)' when the human-only
-   * `TAKUMI_UNSAFE_NO_SANDBOX=1` bypass was in effect. Recorded so a run that skipped the
-   * boundary is auditable rather than indistinguishable from one that used it.
+   * How this run's commands were sandboxed (ADR-058): `unshare` when the boundary covered the
+   * step commands AND the Pi runtime's agent tools, `unshare (step commands only; runtime agent not
+   * confined)` when only the step commands were covered, `none` when there was no boundary, and
+   * `none (unsafe override)` when the human-only `TAKUMI_UNSAFE_NO_SANDBOX=1` bypass was in effect.
+   * Recorded so a run that skipped all or part of the boundary is auditable rather than
+   * indistinguishable from one that used it.
    */
   sandbox?: string;
   /** Present and true when this record is incomplete. */

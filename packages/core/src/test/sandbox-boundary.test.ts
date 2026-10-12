@@ -241,13 +241,17 @@ test('boundary (A4): no external network inside the step, loopback up', async (t
   try {
     const command =
       `timeout 3 bash -c "exec 3<>/dev/tcp/1.1.1.1/443" 2>/dev/null; echo net_rc=$?; ` +
-      `ip link show lo 2>/dev/null | head -1; ip route 2>/dev/null | wc -l`;
+      `ip link show lo 2>/dev/null | head -1; echo routes=$(ip route 2>/dev/null | wc -l | tr -d ' ')`;
     const sandbox = new UnshareSandbox(policyFor(scratch));
     const result = await run(sandbox, { shell: command, cwd: scratch.worktree });
+    assert.match(result.stdout, /routes=0/, `the fresh netns must have an empty routing table: ${result.stdout}`);
     assert.match(result.stdout, /net_rc=[1-9]/, `1.1.1.1:443 must be unreachable: ${result.stdout}`);
     assert.match(result.stdout, /LOOPBACK,UP/, 'loopback must be up for service-shaped judges');
 
-    // Non-vacuity, only when the host itself can reach the address.
+    // The reachability probe alone fails OPEN on a host with no route to the
+    // address at all, so the non-vacuity control is explicit: when the host
+    // cannot reach it either, that is a diagnostic, and the empty route table
+    // above is the structural measurement.
     const noop = new NoopSandbox();
     const hostReaches = await noop.run(scratch.worktree, command);
     if (/net_rc=0/.test(hostReaches.stdout)) {
@@ -256,6 +260,8 @@ test('boundary (A4): no external network inside the step, loopback up', async (t
         /net_rc=[1-9]/,
         'the host reaches the address, so the denial is the network namespace at work',
       );
+    } else {
+      t.diagnostic('the host cannot reach 1.1.1.1:443, so no-network is measured by the empty route table, not by reachability');
     }
   } finally {
     scratch.cleanup();
@@ -328,6 +334,18 @@ test('boundary (A6): a backgrounded grandchild does not outlive the step', async
     assert.ok(existsSync(ran), 'the step itself must have run (non-vacuity)');
     await sleep(5000);
     assert.equal(existsSync(leaked), false, 'a backgrounded grandchild must not outlive its pid namespace');
+
+    // Non-vacuity: the SAME shape through the unsandboxed default DOES leave the
+    // grandchild behind, so the assertion above is the boundary's doing.
+    const controlLeak = path.join(scratch.worktree, 'leaked-control.txt');
+    const noop = new NoopSandbox();
+    await noop.run(
+      scratch.worktree,
+      `( sleep 3; touch ${shQuote(controlLeak)} ) & echo backgrounded; exit 0`,
+    );
+    await sleep(5000);
+    assert.ok(existsSync(controlLeak), 'without a boundary the backgrounded grandchild survives');
+    rmSync(controlLeak, { force: true });
   } finally {
     scratch.cleanup();
   }
@@ -395,7 +413,7 @@ test('boundary: a self-test for a good policy passes and reports every check', a
     );
     assert.equal(result.ok, true, result.reason);
     const names = result.checks.map((check) => check.name);
-    for (const expected of ['propagation', 'root-readonly', 'cwd-present', 'hidden-probe', 'no-network', 'loopback', 'proc', 'tool:node']) {
+    for (const expected of ['propagation', 'root-readonly', 'cwd-present', 'hidden-probe', 'no-network', 'no-route', 'loopback', 'proc', 'tool:node']) {
       assert.ok(names.includes(expected), `missing self-test check ${expected}: ${names.join(', ')}`);
     }
     assert.ok(names.some((name) => name.startsWith('rw-writable:')));

@@ -26,9 +26,10 @@ records the one thing the boundary does **not** close.
 
 ## Decision
 
-**Every step shell command and every confined delivery agent runs inside an unprivileged mount-policy
-boundary, the boundary is built from an explicit validated policy, and a run whose boundary cannot be
-established is refused before its first step.**
+**Every step shell command runs inside an unprivileged mount-policy boundary, the Pi delivery agent's
+tools do too, the boundary is built from an explicit validated policy, and a run whose boundary cannot
+be established is refused before its first step.** (Other runtimes and the pilot path are NOT yet
+confined — limitations 8 and 9 below.)
 
 ### The mechanism
 
@@ -78,14 +79,19 @@ unreachable, loopback up, tools resolve) and refuses by name (code 126) when it 
 The CLI preflight decides before the first agent step: a delivery run (one with a worktree) is
 confined by default; when the boundary cannot be established the run is refused, named, audited, and
 the runtime is never invoked. `--sandbox none` on a delivery run is refused; an unknown `--sandbox`
-value is refused rather than silently defaulting.
+value is refused rather than silently defaulting. A **guard** failure (a policy that would re-expose
+the platform) is refused through the SAME audited path and leaves no judge directory behind, and the
+network property is checked structurally (an empty routing table) as well as by reachability, because
+a reachability probe fails open on a host with no route at all.
 
 ### The escape hatch is human-only, loud, and recorded
 
 `TAKUMI_UNSAFE_NO_SANDBOX=1` exists, and it is read from the **process environment and nothing else**:
 no CLI flag, no `takumi.yaml` key, and no workflow step can set it, so an agent or a workflow step
 cannot turn the boundary off for the run it is part of. It prints loudly, is recorded in the run
-record's `sandbox` field as `none (unsafe override)`, and is written to the audit record.
+record's `sandbox` field as `none (unsafe override)`, and is written to the audit record. It is the
+FALLBACK for a run that would otherwise be refused: an explicit `--sandbox unshare` on a capable host
+is honoured even when the override is exported, so a requested boundary is never silently dropped.
 
 ### The delivery agent's tools
 
@@ -96,7 +102,7 @@ from the per-tool `operations` seam. `read`/`write`/`edit`/`ls`/`find` route thr
 nearest existing ancestor, for a new file) and refuses anything outside the roots — so a planted
 symlink is refused, not followed. `bash` routes through the same `StepSandbox` as every other step
 command. `grep` is **dropped by name** and the drop is recorded: its operations seam cannot contain the
-ripgrep search, which is a host process.
+ripgrep search, which is a host process. This is the Pi adapter only; limitation 8 covers the rest.
 
 ## Named limitations — what this boundary does NOT close
 
@@ -126,6 +132,16 @@ These are stated as limits, not smoothed over. The sandbox is **not** fully clos
 7. **`bubblewrap` and `docker` are not used.** `bubblewrap` is not installed (LGPL, usable only as an
    external binary the operator installs); `docker` is installed but unusable for uid 999. The
    mechanism is util-linux only.
+8. **Only the Pi runtime's AGENT tools are confined.** Step shell commands are confined for every
+   runtime (they route through the engine seam), but the agent's OWN in-process tools are contained
+   only by the Pi adapter (S5). `deepseek`, `openhands`, and `cli:<cmd>` run their tool calls on the
+   host: a delivery run using one of them gets confined step commands and an **unconfined agent**, and
+   the run record says so (`unshare (step commands only; runtime agent not confined)`). The operator's
+   brief scoped the agent runtime integration to `runtimes/pi`, and this ADR states the rest as open
+   rather than implying it is covered.
+9. **The pilot / unattended runner (`takumi pilot`) builds no boundary at all.** It calls the runtime
+   directly (`apps/cli/src/run-command.ts`) outside `executeWorkflow`, so neither its step commands nor
+   its agent are confined. That is bug #68's class, and it is named here as OPEN, not solved.
 
 ## Licence
 

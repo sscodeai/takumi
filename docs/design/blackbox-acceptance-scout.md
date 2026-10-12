@@ -199,7 +199,8 @@
   tasks were authored; (ii) enforcement that the generated verifier never enters the implementing
   agent's context. Today the only isolation primitive on the workflow path is `cwd`: the
   independent review runs with `cwd: reviewDir` (`packages/core/src/workflow-engine.ts:649-660`),
-  and the comment there calls it "isolated session context". Whether a real runtime constrains
+  and the comment there calls it "isolated session context". (This predates ADR-058, which adds a
+  mount-policy boundary for step commands and the Pi runtime's agent tools.) Whether a real runtime constrains
   file access to that cwd is **not determined** from this repository; for the fake runtime it
   certainly does not.
 - **Smallest thing that closes it**: a judge-forge agent step whose output is written outside the
