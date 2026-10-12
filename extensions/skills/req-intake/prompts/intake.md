@@ -164,6 +164,14 @@ from your text alone.
    The number of `fields` must equal the number of `<placeholders>` in the shape, and at least one shape
    must declare its fields: a judge can compare two runs without them, but it cannot say which number is
    the count, so the whole document is refused.
+   EXACTLY ONE TOTALS LINE IS REQUIRED, and it is the shape the example below names `total_line`: a shape
+   that is neither a per-id line (its `fields` include `id`) nor a skipped line (its `fields` include
+   `skipped-count`). The forge refuses a document without one — it compares the per-id lines against the
+   whole the tool itself printed, and there is no whole without it — and declares `count` or `sum` among
+   its fields so that comparison can be made. Measured 2026-10-12: an intake omitted it, every shape-gate
+   check passed the document, and the judge forge refused it AFTER the implementation and the delivered
+   tests had been paid for (twice, because a repair round was spent on a document no implementation can
+   change; docs/bugs-fixed.md #69). The example below shows one.
 10. `input_format` declares the data the whole thing is ABOUT, and it is what the judge generates its
    fixtures from — reshuffled, duplicated and mangled versions of YOUR sample. `columns` is a flat list of
    `name:role` pairs in file order, where a role is `id` | `measure` | `date` | `other`: exactly one
