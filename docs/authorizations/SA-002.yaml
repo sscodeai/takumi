@@ -64,5 +64,17 @@ decisions:
   # documents are in reach, and it cannot reach a blocking question.
   - class: unmechanised
     policy: document-default
+  # The rest of the implemented vocabulary, so this FAMILY form actually covers whatever document the
+  # intake produces rather than the exact kinds one run happened to pick. The vocabulary is CLOSED and
+  # fixed in code (`JUDGE_RELATION_VOCABULARY` + `unmechanised` = `AUTHORIZATION_CLASSES`), and a grant
+  # may only ever name a class inside it — so listing it licenses the KINDS a document in scope may
+  # declare, not an answer: every answer still comes from that document's own `default:`, and every one
+  # is listed in its `defaulted:` front-matter. Without these two, the next intake that reaches for a
+  # browser scenario or a mutation relation would stop the chain the way AMB-004/005 did — correct, and
+  # avoidable by signing the whole vocabulary once.
+  - class: browser-scenario
+    policy: document-default
+  - class: mutation-detection
+    policy: document-default
 failures:
   - class: implementation-changes
