@@ -484,6 +484,12 @@ export function renderBoundaryScript(policy: SandboxPolicy): string {
   lines.push(
     `for n in ${SANDBOX_DEV_NODES.join(' ')}; do : > "$R/dev/$n"; done`,
   );
+  lines.push('# Process substitution (<(...)) and `read -u`/here-strings need the fd devices.');
+  lines.push('# They are symlinks into the fresh /proc, created before the root is sealed.');
+  lines.push('ln -sf /proc/self/fd "$R/dev/fd"');
+  lines.push('ln -sf /proc/self/fd/0 "$R/dev/stdin"');
+  lines.push('ln -sf /proc/self/fd/1 "$R/dev/stdout"');
+  lines.push('ln -sf /proc/self/fd/2 "$R/dev/stderr"');
   lines.push('');
   if (policy.staged.length > 0) {
     lines.push('# Staged read-only copies (the requirement document, harness scripts):');
