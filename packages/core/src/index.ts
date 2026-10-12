@@ -182,9 +182,56 @@ export {
 } from './review-rules.js';
 export { collectReviewInput, createRuleReviewer, verdictFromFindings } from './review.js';
 export type { CollectReviewInputOptions, RuleReviewerOptions } from './review.js';
-export type { Sandbox, SandboxOptions, SandboxResult } from './sandbox.js';
+export type {
+  Sandbox,
+  SandboxLimits,
+  SandboxMountMode,
+  SandboxOptions,
+  SandboxPolicy,
+  SandboxResult,
+  SandboxStagedFile,
+  StepSandbox,
+  StepSandboxRequest,
+} from './sandbox.js';
 export { DockerSandbox, NoopSandbox, dockerAvailable } from './sandbox-docker.js';
-export { UnshareSandbox } from './sandbox-unshare.js';
+export {
+  SANDBOX_REFUSED_CODE,
+  SANDBOX_REFUSED_PREFIX,
+  UnshareSandbox,
+  clearSandboxSelfTestCache,
+  sandboxCapability,
+  sandboxSelfTest,
+  unshareAvailable,
+} from './sandbox-unshare.js';
+export type { SandboxCapability, SandboxSelfTestCheck, SandboxSelfTestResult } from './sandbox-unshare.js';
+export {
+  DEFAULT_SANDBOX_LIMITS,
+  SANDBOX_BASE_ROOTS,
+  SANDBOX_DEV_NODES,
+  SANDBOX_MASKED_PREFIXES,
+  SANDBOX_REQUIRED_TOOLS,
+  SandboxPolicyError,
+  assertMirroredRootUnmasked,
+  assertReadOnlyRootsSafe,
+  assertSandboxPolicy,
+  assertStagedFilesSafe,
+  assertWriteRootsSafe,
+  boundaryDirs,
+  buildSandboxPolicy,
+  isInside,
+  maskedPrefixOf,
+  probeToolchain,
+  renderBoundaryScript,
+  renderInnerCommand,
+  shQuote,
+} from './sandbox-policy.js';
+export type {
+  SandboxGuard,
+  SandboxPolicyInput,
+  SandboxToolProbe,
+  SandboxToolchainProbe,
+  SandboxToolchainProbeOptions,
+} from './sandbox-policy.js';
 export { runManagerLoop } from './manager-loop.js';
 export type { LoopRecord, TaskState, LoopDecision, LoopContract, AuditResult, LoopHost } from './manager-loop.js';
 
