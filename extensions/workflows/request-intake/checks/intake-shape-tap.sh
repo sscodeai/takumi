@@ -142,4 +142,13 @@ else
 fi
 
 printf '# tests %d\n# pass %d\n# fail %d\n' "$N" "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ] || exit 1
+# The verdict an `acceptance` step reads. The intake's attempt IS judged by this gate (ADR-057): the
+# step passes only on `pass`, so a document that failed any check above is a REFUSED attempt and the
+# repair round is handed those checks as its brief — which is the whole reason this script is the
+# attempt's acceptance rather than a separate gate step nothing can retry.
+if [ "$FAIL" -eq 0 ]; then
+  printf 'ACCEPT_VERDICT: pass\n'
+else
+  printf 'ACCEPT_VERDICT: fail\n'
+  exit 1
+fi
