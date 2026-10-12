@@ -45,10 +45,13 @@ export {
   resolveStepPrompt,
   parseAcceptVerdict,
   parseReviewVerdict,
+  runStepCommand,
 } from './workflow-engine.js';
 export type {
   AcceptVerdict,
   ParsedAcceptVerdict,
+  StepCommandError,
+  StepCommandRequest,
   WorkflowExecutionContext,
   WorkflowRunResult,
   WorkflowStepResult,
