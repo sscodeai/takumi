@@ -18,12 +18,8 @@ can verify and fix before disclosure.
 - **Artifact/audit writes**: audit logs are best-effort and contain only run
   metadata + event strings; review for sensitive prompts before sharing.
 - **Plugins**: plugins (skills/tools/workflows/runtimes) are **trusted local
-  code** and run with the same privileges as the user. Extensions are not
-  sandboxed. Since ADR-058 a delivery run (one with a worktree) confines its
-  step shell commands in an unprivileged mount-policy boundary, and the Pi
-  runtime confines the agent's own tools, but `takumi pilot`, the other
-  runtimes, and the plugin loader itself are not confined — do not run
-  untrusted extensions (Gate 21).
+  code** and run with the same privileges as the user. There is **no
+  sandboxing** in this MVP — do not run untrusted extensions (Gate 21).
 - **Command injection**: the `cli:<command>` runtime bridge spawns the given
   command directly (shell:false) with the user's env; only bridge commands
   you trust.

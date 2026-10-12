@@ -199,8 +199,7 @@
   tasks were authored; (ii) enforcement that the generated verifier never enters the implementing
   agent's context. Today the only isolation primitive on the workflow path is `cwd`: the
   independent review runs with `cwd: reviewDir` (`packages/core/src/workflow-engine.ts:649-660`),
-  and the comment there calls it "isolated session context". (This predates ADR-058, which adds a
-  mount-policy boundary for step commands and the Pi runtime's agent tools.) Whether a real runtime constrains
+  and the comment there calls it "isolated session context". Whether a real runtime constrains
   file access to that cwd is **not determined** from this repository; for the fake runtime it
   certainly does not.
 - **Smallest thing that closes it**: a judge-forge agent step whose output is written outside the
@@ -424,11 +423,9 @@ this tree, in increasing strength:
    Gate 20), which makes "the judge is inside `.takumi/artifacts`" a checkable property rather
    than a promise.
 3. **A separate process/uid/container for the verifier.** The CLI accepts `--sandbox none|unshare`
-   (`apps/cli/src/index.ts:71-91`) and `packages/core/src/sandbox-unshare.ts` exists. Whether
-   `unshare` confines filesystem visibility was **not determined** from this tree when this note was
-   written; it has since been **measured** by ADR-058 (`packages/core/src/test/sandbox-boundary.test.ts`,
-   `sandbox-real-boundary.test.ts`), which also states the limits the boundary does NOT close —
-   notably the delivery agent's model egress.
+   (`apps/cli/src/index.ts:71-91`) and `packages/core/src/sandbox-unshare.ts` exists, but whether
+   `unshare` confines filesystem visibility for a real runtime is **not determined** from this
+   tree. It must be measured before any isolation claim is made.
 
 **How the eval harness moves the hidden tests today (the only working precedent).**
 `eval/scripts/run-eval.mjs` keeps ground-truth tests under `test/.hidden/` in the fixture, copies
@@ -634,11 +631,8 @@ What would falsify it:
 
 Honest scope note for PoC-3: with the fake runtime every check above is a *sequencing and path*
 check, not a security check. Whether a real runtime (Pi, DeepSeek, OpenHands) confines a session
-to its `cwd` **was not determined** from this repository when this note was written. It has since
-been measured for the Pi runtime by ADR-058 (`runtimes/pi/src/test/confinement.test.ts`): a confined
-task gets `noTools: 'builtin'` and contained `read`/`write`/`edit`/`ls`/`find`/`bash` tools, with
-`grep` dropped because its search cannot be contained. The delivery agent still keeps model egress,
-which ADR-058 states as a named limitation rather than an isolation claim. The eval
+to its `cwd` is **not determined** from this repository, so the isolation claim is not made here;
+it must be measured with a real runtime and a real sandbox before it is asserted. The eval
 harness's `.hidden` layout is the precedent for the sequencing half only
 (`eval/scripts/run-eval.mjs:75-80`, `:103`).
 

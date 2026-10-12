@@ -11,7 +11,6 @@ import type {
 } from '@takumi/core';
 import { createAgentSession } from '@earendil-works/pi-coding-agent';
 import { EventEmitter } from 'node:events';
-import { createConfinedTools, confinementOf, type Confinement } from './confinement.js';
 
 /**
  * PiRuntimeAdapter — wraps the Pi SDK AgentSession in-process into the
@@ -112,17 +111,12 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
     cwd: string,
     taskId: TaskId,
     emit: (ev: AgentEvent) => void,
-    confinement?: Confinement,
   ): Promise<{ session: Awaited<ReturnType<typeof createAgentSession>>['session']; isReused: boolean }> {
-    // A confined session and an open session are DIFFERENT contracts: the pool is
-    // keyed by both so a confined step can never reuse a session built with host
-    // builtin tools (or vice versa).
-    const poolKey = `${cwd}\u0000${confinement === undefined ? 'open' : 'confined'}`;
     // Serialize per-cwd acquisition to keep pooled session's prompt() non-overlapping.
-    const prev = this.poolLocks.get(poolKey) ?? Promise.resolve();
+    const prev = this.poolLocks.get(cwd) ?? Promise.resolve();
     let release!: (value?: unknown) => void;
     this.poolLocks.set(
-      poolKey,
+      cwd,
       new Promise((res) => {
         release = res;
       }),
@@ -135,7 +129,7 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
       // own context), never across different workflow steps — a long shared
       // session degrades to empty/echo replies (observed in 10-step E2E:
       // assistant content became [] after several followUp prompts).
-      const existing = this.pool.get(poolKey);
+      const existing = this.pool.get(cwd);
       if (existing && existing.taskId === taskId && this.options.reuseSession) {
         return { session: existing.session, isReused: true };
       }
@@ -147,36 +141,20 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
         } catch {
           // ignore
         }
-        this.pool.delete(poolKey);
+        this.pool.delete(cwd);
       }
 
-      const result =
-        confinement === undefined
-          ? await createAgentSession({
-              cwd,
-              tools: ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls'],
-              // model omitted: Pi resolves provider/model + API key from ~/.pi/agent.
-            })
-          : await createAgentSession({
-              cwd,
-              // No builtin tools: every tool the agent gets is a contained one.
-              noTools: 'builtin',
-              customTools: createConfinedTools(cwd, confinement, (name, reason) =>
-                emit({
-                  id: `${taskId}-drop-${name}`,
-                  taskId,
-                  type: 'agent.message',
-                  timestamp: Date.now(),
-                  message: `confined tool "${name}" was not offered: ${reason}`,
-                }),
-              ),
-            });
+      const result = await createAgentSession({
+        cwd,
+        tools: ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls'],
+        // model omitted: Pi resolves provider/model + API key from ~/.pi/agent.
+      });
       const session = result.session;
       const unsubscribe = session.subscribe(() => {
         // Per-task event mapping happens in run() via its own listener;
         // the pool entry just holds the session alive for reuse.
       });
-      this.pool.set(poolKey, { session, unsubscribe, taskId });
+      this.pool.set(cwd, { session, unsubscribe, taskId });
       return { session, isReused: false };
     } finally {
       release();
@@ -215,11 +193,7 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
       }
 
       // Acquire a session, reusing a pooled one for the same cwd when enabled.
-      // A confined task carries its boundary and containment roots in the task
-      // options; a half-configured one is refused by confinementOf (fail closed)
-      // before any session is created.
-      const confinement = confinementOf(task.options);
-      const { session, isReused } = await this.acquireSession(task.cwd, id, (ev) => emitEvent(ev), confinement);
+      const { session, isReused } = await this.acquireSession(task.cwd, id, (ev) => emitEvent(ev));
       if (isReused) {
         emitEvent({ id: `${id}-ev0b`, taskId: id, type: 'agent.message', timestamp: Date.now(), message: 'reusing pooled pi session' });
       }

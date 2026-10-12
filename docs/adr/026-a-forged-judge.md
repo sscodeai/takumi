@@ -61,15 +61,11 @@ and without it the mode is only as honest as the harness.
 
 ## Honest limits
 
-- **The separation is structural, not (by itself) a security boundary.** The engine proves the judge is
-  written after the implementation, is not in the implementer's prompt, and lives outside the named
-  worktree. For an UNCONFINED run it does NOT stop an agent with filesystem access from reading
-  `<project>/.takumi/acceptance/…` by guessing the path, and the run's `worktree` is a path property,
-  not a permission. As of **ADR-058** a confined run does have a boundary: a `judge_forge`/`acceptance`
-  step and a confined delivery agent's tools run inside an unprivileged mount-policy boundary, so
-  `<project>/.takumi/acceptance/<runId>` and the platform repository are not reachable from inside. The
-  exception is the delivery agent's model egress, which ADR-058 states as a named limitation rather
-  than claiming a closed boundary.
+- **The separation is structural, not a security boundary.** The engine proves the judge is written
+  after the implementation, is not in the implementer's prompt, and lives outside the named worktree.
+  It does NOT stop an agent with filesystem access from reading `<project>/.takumi/acceptance/…` by
+  guessing the path. Real isolation (a separate uid/container, an agent without filesystem reach) is
+  unmeasured and is not claimed; the run's `worktree` is a path property, not a permission.
 - **The forge parses the requirement document line-wise.** That is honest for our own format and
   fails closed on what it cannot read, but a general forge needs a parser.
 - **The behavioural strength is the relation vocabulary.** Four relations and one anchor caught the
