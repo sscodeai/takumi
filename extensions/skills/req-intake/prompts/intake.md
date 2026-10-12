@@ -125,6 +125,12 @@ deliverable:
    acceptance criterion.
 2. Every decision point the request does not settle becomes an `AMB-nnn`
    entry. Do not silently choose an interpretation and drop the question.
+   A document carries AT MOST 5 decisions, and the confirmation REFUSES one that carries more: an intake
+   that asks more than five questions has not decided what it is about. Merge related questions into one
+   bounded choice, or settle one in prose and record it as a `requirement` with its own acceptance
+   criterion — but never drop a real question to fit the budget. Measured 2026-10-12: an intake emitted 6
+   decisions (two of them blocking and exercised by no relation) and the whole run was lost at the gate
+   after 105 s; the budget is enforced in `requirement-decisions.ts` and was stated nowhere here.
 3. Each ambiguity has 2 to 4 `options`. They must be mutually exclusive and
    bounded — not open questions.
 4. `default` must be exactly one of that ambiguity's `options`.
