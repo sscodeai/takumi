@@ -1,0 +1,52 @@
+name: intake-attempt
+version: 0.1.0
+description: >
+  ONE intake attempt: a natural-language request becomes a structured requirement document, and the
+  document's own machine-checked contract is verified BEFORE any human (or signed grant) is asked to
+  confirm it. Run by a `repair` step, once per attempt: the second attempt is told exactly which checks the
+  first attempt's document failed (ADR-057), which is what turns a bad sample into a repair instead of a
+  lost run. Measured 2026-10-12: three of four unattended chains produced a document the gate refused for a
+  different reason each time — a missing totals line (docs/bugs-fixed.md #69), six decisions over the
+  budget of five (#70) — and every one of them cost the whole run.
+runtime: pi
+requiredSkills:
+  - req-intake
+steps:
+  - id: req_intake
+    type: agent
+    skill: req-intake
+    # `{repairFailures}` is EMPTY on the first attempt and carries the gate's own failing checks on the
+    # next one (the engine sets it per attempt). The wording mirrors the delivery's repair prompt: the
+    # document is the thing under repair, and the answer is never to weaken the contract.
+    prompt: |
+      {input}
+
+      This is intake attempt {repairRound}. If the text between the markers below is empty, this is the
+      FIRST attempt and there is nothing to repair. If it is not empty, a previous attempt's document was
+      REFUSED by the document's own machine-checked contract, and these are the exact checks that failed:
+
+      --- what the contract refused --------------------------------------------------------------
+      {repairFailures}
+      -------------------------------------------------------------------------------------------
+
+      Repair the DOCUMENT so those checks hold. Fix the document, never the contract: do not drop a real
+      question to fit a budget, do not weaken an acceptance criterion, and do not write `chosen:` (the
+      confirmation writes those). You are NOT asked to inspect this repository: the document IS the whole
+      job.
+    # A real runtime is given room to write the document; the fake one returns immediately. The bound
+    # stays at 15 minutes so a wandering attempt cannot spend without limit — the repair round, not an
+    # unbounded attempt, is what turns a bad sample into a delivery.
+    timeoutMs: 900000
+    # The document this step MUST write (ADR-053): a file that was already there is not this step's
+    # output, so a run whose agent produced nothing fails HERE instead of having the shape gate grade a
+    # document from an earlier session.
+    produces:
+      - docs/requirements/intake.yaml
+  - id: intake_shape
+    # The document's contract, machine-checked before anything is confirmed: the shape gate runs the same
+    # judge forge the delivery will run (ADR-056) plus the validator the human's confirmation uses.
+    type: quality_gate
+    prompt: |
+      bash extensions/workflows/request-intake/checks/intake-shape-tap.sh
+    dependsOn: [req_intake]
+    timeoutMs: 180000

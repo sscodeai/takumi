@@ -63,6 +63,11 @@ steps:
       entry. When done, summarise the files you created or changed, the stack you chose and why, and how
       each acceptance criterion is met.
     dependsOn: [ci_config]
+    # A BOUND ON THE IMPLEMENTER (docs/bugs-fixed.md #68). Measured 2026-10-12: this step ran 33 minutes
+    # and was still going when the run was killed, because it had left the delivery worktree and started
+    # editing the platform that was judging it. Nothing bounded it, so nothing could stop it. 30 minutes is
+    # ~2.4x the slowest observed attempt (748 s) and still finite.
+    timeoutMs: 1800000
   - id: unit_and_integration_tests
     type: agent
     prompt: |
@@ -75,6 +80,8 @@ steps:
       failure. A suite nothing can invoke is a suite that does not count. Commit your work: the host runs
       what you commit.
     dependsOn: [implementation]
+    # Bounded for the same reason as the implementer above: the slowest observed test round was 294 s.
+    timeoutMs: 900000
   - id: quality_gate
     type: quality_gate
     # The project's own test command, run in the implementation. It is a SMOKE gate, not the evidence: a
