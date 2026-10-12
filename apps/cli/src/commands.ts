@@ -1,17 +1,22 @@
 import { parse } from 'yaml';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import {
   ArtifactStore,
+  buildSandboxPolicy,
   discoverExtensions,
   executeWorkflow,
   renderTraceabilityMatrix,
   requirementDigest,
+  sandboxCapability,
+  UnshareSandbox,
   validateWorkflowManifest,
   WorkflowDefinition,
   WorkflowStepResult,
 } from '@takumi/core';
+import type { SandboxCapability, SandboxStagedFile, StepSandbox } from '@takumi/core';
 import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
 import { CliRuntimeAdapter } from '@takumi/runtime-cli';
@@ -288,6 +293,141 @@ export function loadConfig(cwd: string): ProjectConfig {
 }
 
 /**
+ * The HUMAN-ONLY escape hatch (ADR-058 decision 2). It is read from the process
+ * environment and from nothing else: no CLI flag, no `takumi.yaml` key and no
+ * workflow step can set it, so an agent or a step cannot turn the boundary off
+ * for the run it is part of. A value other than exactly `1` is not the override.
+ */
+export const UNSAFE_NO_SANDBOX_ENV = 'TAKUMI_UNSAFE_NO_SANDBOX';
+
+/** True only when a human operator launched this process with the override set. */
+export function unsafeNoSandboxSet(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[UNSAFE_NO_SANDBOX_ENV] === '1';
+}
+
+/** What the preflight decided about confinement, before any step runs. */
+export type SandboxDecision =
+  | { mode: 'none'; note: string }
+  | { mode: 'unshare' }
+  | { mode: 'unsafe-override'; note: string; warning: string }
+  | { mode: 'refused'; reason: string; message: string };
+
+/**
+ * Decide confinement from facts alone, so the fail-closed behaviour is a pure,
+ * tested rule rather than a branch buried in the run path.
+ *
+ *  - a DELIVERY run (a worktree) is confined by default; `--sandbox none` on it
+ *    is refused, because the only sanctioned bypass is the human-only override;
+ *  - `--sandbox unshare` confines even a run without a worktree;
+ *  - when confinement is intended but the host cannot establish the boundary,
+ *    the run is REFUSED unless the human-only override is set — in which case it
+ *    runs unconfined and says so, loudly and in the record.
+ */
+export function decideSandbox(input: {
+  worktree?: string | undefined;
+  sandbox?: 'none' | 'unshare' | undefined;
+  capability: Pick<SandboxCapability, 'available' | 'reason'>;
+  unsafeOverride: boolean;
+}): SandboxDecision {
+  const { worktree, sandbox, capability } = input;
+  if (worktree !== undefined && sandbox === 'none' && !input.unsafeOverride) {
+    return {
+      mode: 'refused',
+      reason: 'explicit_none_on_delivery_run',
+      message:
+        '--sandbox none is not permitted for a delivery run: the boundary is the whole point of a ' +
+        `delivery. Use the boundary, or (human only) set ${UNSAFE_NO_SANDBOX_ENV}=1 to run without it ` +
+        'and have the override recorded.',
+    };
+  }
+  if (input.unsafeOverride) {
+    return {
+      mode: 'unsafe-override',
+      note: 'none (unsafe override)',
+      warning:
+        `${UNSAFE_NO_SANDBOX_ENV}=1 is set: running WITHOUT a sandbox boundary. ` +
+        'This is a human-only override and is recorded in this run\'s record and audit.',
+    };
+  }
+  const confine = sandbox === 'unshare' || worktree !== undefined;
+  if (!confine) return { mode: 'none', note: 'none' };
+  if (!capability.available) {
+    const reason = capability.reason ?? 'unknown';
+    return {
+      mode: 'refused',
+      reason,
+      message:
+        `sandbox refused: the boundary cannot be established on this host (${reason}); no step was run. ` +
+        `A human operator may set ${UNSAFE_NO_SANDBOX_ENV}=1 to run without it, which is recorded.`,
+    };
+  }
+  return { mode: 'unshare' };
+}
+
+/**
+ * The project files a boundary must make readable for the run's HARNESS steps.
+ *
+ * A `judge_forge` runs `bash <cwd>/<forgeRef>` and reads `<cwd>/<requirementRef>`; an
+ * `acceptance` runs `bash <resolved acceptanceRef>`. Those live in the platform repository,
+ * which is otherwise not mounted, so each is staged as a READ-ONLY copy at its mirror path.
+ * Refs that are placeholders (`{requirement}`, `{judgePath}`) are resolved at run time and
+ * are never staged. A ref that does not exist on the host is skipped here and fails in the
+ * step, which is where a missing harness should be named.
+ */
+export function collectStagedRefs(
+  workflow: WorkflowDefinition,
+  confirmedRequirement: { ref: string } | undefined,
+  cwd: string,
+): SandboxStagedFile[] {
+  const refs = new Set<string>();
+  if (confirmedRequirement !== undefined && confirmedRequirement.ref.trim().length > 0) {
+    refs.add(confirmedRequirement.ref.trim());
+  }
+  for (const step of workflow.steps) {
+    for (const raw of [step.requirementRef, step.forgeRef, step.acceptanceRef]) {
+      if (typeof raw !== 'string') continue;
+      const ref = raw.trim();
+      if (ref.length === 0 || ref.includes('{')) continue;
+      refs.add(ref);
+    }
+  }
+  const staged: SandboxStagedFile[] = [];
+  for (const ref of refs) {
+    const hostPath = join(cwd, ref);
+    if (existsSync(hostPath)) staged.push({ ref, hostPath });
+  }
+  return staged;
+}
+
+/**
+ * Build the boundary for a confined run. The judge directory is this run's own
+ * `acceptance/<runId>` tree (the engine creates `<stepId>` under it), created here
+ * because the boundary bind needs it to exist. The platform repository is not a
+ * root; only the worktree and the judge tree are read-write.
+ */
+export function prepareRunSandbox(input: {
+  cwd: string;
+  runId: string;
+  worktree?: string | undefined;
+  staged: SandboxStagedFile[];
+}): StepSandbox {
+  const judgeRoot = join(input.cwd, '.takumi', 'acceptance', input.runId);
+  mkdirSync(judgeRoot, { recursive: true });
+  if (input.worktree === undefined) {
+    return new UnshareSandbox(buildSandboxPolicy({ projectRoot: input.cwd }));
+  }
+  return new UnshareSandbox(
+    buildSandboxPolicy({
+      projectRoot: input.cwd,
+      worktree: input.worktree,
+      judgeDir: judgeRoot,
+      runId: input.runId,
+      staged: input.staged,
+    }),
+  );
+}
+
+/**
  * Runtime registry: resolve a runtime id to an AgentRuntimeAdapter.
  *
  * Built-ins: "fake" (deterministic). "pi" (real Pi AgentSession) is OPT-IN —
@@ -512,6 +652,52 @@ async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): P
       events.push(line);
       if (opts.verbose) console.log(`  ${line}`);
     }
+
+    // (D) THE BOUNDARY (ADR-058). Decided BEFORE the first step: a delivery run whose
+    // boundary cannot be established is refused here, and the only sanctioned bypass is
+    // the human-only environment override, recorded loudly and in this run's record.
+    const confineIntended =
+      opts.sandbox === 'unshare' || (worktreePath !== undefined && opts.sandbox !== 'none');
+    const capability = confineIntended ? await sandboxCapability() : { available: false };
+    const decision = decideSandbox({
+      worktree: worktreePath,
+      sandbox: opts.sandbox,
+      capability,
+      unsafeOverride: unsafeNoSandboxSet(),
+    });
+    let sandbox: StepSandbox | undefined;
+    let sandboxNote = 'none';
+    let runId: string | undefined;
+    if (decision.mode === 'refused') {
+      events.push(decision.message);
+      console.error(`\n\u2717 ${decision.message}\n`);
+      await writeAudit({
+        kind: 'workflow',
+        workflow: opts.workflow,
+        runtimeId: opts.runtimeId,
+        status: 'failed',
+        sandbox: { mode: 'refused', reason: decision.reason },
+        steps: [],
+      });
+      return { events, summary: decision.message, artifacts: [], status: 'failed' };
+    }
+    if (decision.mode === 'unsafe-override') {
+      console.warn(`\n\u26a0 ${decision.warning}\n`);
+      events.push(decision.warning);
+      sandboxNote = decision.note;
+    } else if (decision.mode === 'unshare') {
+      runId = `wf-${randomUUID().slice(0, 8)}`;
+      sandbox = prepareRunSandbox({
+        cwd: opts.cwd,
+        runId,
+        worktree: worktreePath,
+        staged: collectStagedRefs(wf, opts.confirmedRequirement, opts.cwd),
+      });
+      sandboxNote = 'unshare';
+      const line = `sandbox: unshare boundary (run ${runId})`;
+      events.push(line);
+      if (opts.verbose) console.log(`  ${line}`);
+    }
     // Durable resume: rebuild completed steps from the newest audit record.
     let resumeCtx: { completed: Map<string, WorkflowStepResult> } | undefined;
     if (opts.resume) {
@@ -567,6 +753,9 @@ async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): P
             }),
         ...(opts.confirmedRequirement === undefined ? {} : { confirmedRequirement: opts.confirmedRequirement }),
         ...(worktreePath === undefined ? {} : { worktree: worktreePath }),
+        ...(sandbox === undefined ? {} : { sandbox }),
+        ...(runId === undefined ? {} : { runId }),
+        sandboxNote,
         onApproval: async (req) => {
           const line = `approval required [${req.stepId}]: ${req.prompt}`;
           events.push(line);
@@ -599,6 +788,7 @@ async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): P
       workflow: opts.workflow,
       runtimeId: opts.runtimeId,
       status: result.status,
+      sandbox: sandboxNote,
       steps: result.steps.map((s) => ({ stepId: s.stepId, status: s.status, summary: s.summary })),
     });
     return {

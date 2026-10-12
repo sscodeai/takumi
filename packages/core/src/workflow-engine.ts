@@ -207,6 +207,17 @@ export interface WorkflowExecutionContext {
    */
   worktree?: string;
   /**
+   * The run id to use. When absent the engine generates one. The CLI pre-generates it
+   * so a boundary can name this run's judge directory before the first step runs.
+   */
+  runId?: string;
+  /**
+   * How this run's commands were sandboxed, as a human-readable string recorded in the
+   * run record: 'unshare', 'none', or 'none (unsafe override)'. Absent records 'none'
+   * honestly rather than implying a boundary that was not there (ADR-058).
+   */
+  sandboxNote?: string;
+  /**
    * The boundary every step command in this run is routed through (ADR-058).
    * Absent means no boundary: non-delivery runs pass through, and a delivery run
    * is refused by the CLI preflight before its first agent step rather than
@@ -553,7 +564,7 @@ export async function executeWorkflow(
   }
 
   const order = topoSort(workflow.steps);
-  const runId = `wf-${randomUUID().slice(0, 8)}`;
+  const runId = ctx.runId ?? `wf-${randomUUID().slice(0, 8)}`;
   const run: WorkflowRun = {
     id: runId,
     workflow,
@@ -767,6 +778,7 @@ export async function executeWorkflow(
       },
       boardRowId,
       cost,
+      sandbox: ctx.sandboxNote ?? 'none',
     };
     const result = writeRunRecord(ctx.cwd, record);
     ctx.onEvent?.(

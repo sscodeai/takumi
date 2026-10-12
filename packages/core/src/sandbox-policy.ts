@@ -284,19 +284,21 @@ export function maskedPrefixOf(p: string): string | undefined {
 }
 
 /**
- * G4 — the mirrored project root must not sit under a masked path. Measured:
- * a project root of `/tmp/x` is *shadowed* by the boundary's own `/tmp` tmpfs,
- * so the read-only mirror is not the host directory at all: staged files are
- * invisible and a write silently lands in scratch space instead of failing.
- * Refresh the wording of this failure whenever the masking mounts change.
+ * G4 — a boundary that stages files may not be rooted under a masked path.
+ * Measured: a project root of `/tmp/x` is *shadowed* by the boundary's own
+ * `/tmp` tmpfs, so a staged read-only copy is invisible and a step silently
+ * reads nothing. Without staged files the masking is harmless: the read-write
+ * binds are attached after the tmpfs mounts, so they still resolve. Refresh
+ * the wording of this failure whenever the masking mounts change.
  */
-export function assertMirroredRootUnmasked(policy: Pick<SandboxPolicy, 'cwd'>): void {
+export function assertMirroredRootUnmasked(policy: Pick<SandboxPolicy, 'cwd' | 'staged'>): void {
+  if (policy.staged.length === 0) return;
   const prefix = maskedPrefixOf(policy.cwd);
   if (prefix !== undefined) {
     throw new SandboxPolicyError(
       'G4',
       `project root "${policy.cwd}" is under ${prefix}, which this boundary mounts as a private tmpfs: ` +
-        'it cannot be mirrored read-only, so staged files would be invisible and writes would land in scratch space',
+        'staged files would be invisible, so harness steps would read nothing',
     );
   }
 }

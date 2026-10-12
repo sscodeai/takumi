@@ -123,6 +123,14 @@ async function main(argv: string[]): Promise<number> {
       const config = loadConfig(cwd);
       const promptArg = positional.join(' ');
 
+      // An unknown --sandbox value is refused rather than silently treated as the
+      // default: a typo that quietly disables (or enables) the boundary is the
+      // failure mode fail-closed exists to prevent (ADR-058).
+      if (sandbox !== undefined && sandbox !== 'none' && sandbox !== 'unshare') {
+        console.error(`unknown --sandbox value "${String(sandbox)}" (expected: unshare or none)`);
+        return 1;
+      }
+
       // ADR-025: a workflow that runs an `acceptance` step needs the digest a human confirmed, and
       // that digest is the token of the confirmation. The CLI therefore asks for it explicitly
       // instead of assuming the file it finds is the one that was approved — the whole point of the
@@ -219,6 +227,16 @@ Usage:
                                        refuses BEFORE the run unless it is a git repository, on
                                        a branch (not a detached HEAD), clean, and descended
                                        from <remote>/<baseBranch>
+  takumi run ... --sandbox unshare      Confine every step shell command inside an unprivileged
+                                       mount-policy boundary (ADR-058). A delivery run (one with
+                                       a worktree) is confined by default and refuses before the
+                                       first step when the boundary cannot be established.
+                                       --sandbox none is refused on a delivery run; the ONLY
+                                       bypass is the human-only environment override
+                                       TAKUMI_UNSAFE_NO_SANDBOX=1, which is loud and recorded
+                                       in the run record. Step boundaries have no network
+                                       (loopback only); the delivery agent keeps provider
+                                       egress — a named limitation, see docs/adr/058.
   takumi runtime list                  List available runtimes
   takumi board [--provider github --repo owner/name]
                                        Read-only view of a task board (ADR-006)

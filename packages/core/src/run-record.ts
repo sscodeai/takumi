@@ -132,6 +132,13 @@ export interface RunRecord {
   boardRowId: string | null;
   /** The runtime-reported cost, or a plain statement that none was reported. */
   cost: RunRecordCost;
+  /**
+   * How this run's step commands were sandboxed (ADR-058): 'unshare' when a boundary was
+   * established, 'none' when there was none, and 'none (unsafe override)' when the human-only
+   * `TAKUMI_UNSAFE_NO_SANDBOX=1` bypass was in effect. Recorded so a run that skipped the
+   * boundary is auditable rather than indistinguishable from one that used it.
+   */
+  sandbox?: string;
   /** Present and true when this record is incomplete. */
   partial?: boolean;
   /** Why the record is partial; present exactly when `partial` is true. */

@@ -139,15 +139,25 @@ test('sandbox policy (G1): the probed toolchain has no read-only root above the 
   assert.ok(policy.ro.includes('/srv/hermes/.local/bin'), 'the node/pnpm directory is a sibling and is mirrored');
 });
 
-test('sandbox policy (G4): a project root under a path the boundary masks is refused', () => {
+test('sandbox policy (G4): a project root under a path the boundary masks is refused when it stages files', () => {
   for (const masked of SANDBOX_MASKED_PREFIXES) {
     assert.equal(maskedPrefixOf(path.join(masked, 'x')), masked);
     assert.equal(maskedPrefixOf(masked), masked);
+    const root = path.join(masked, 'x');
     assert.equal(
-      guardOf(() => buildSandboxPolicy({ projectRoot: path.join(masked, 'x'), toolchain: CLEAN_TOOLCHAIN })),
+      guardOf(() =>
+        buildSandboxPolicy({
+          projectRoot: root,
+          toolchain: CLEAN_TOOLCHAIN,
+          staged: [{ ref: 'req.md', hostPath: path.join(root, 'req.md') }],
+        }),
+      ),
       'G4',
-      `${masked} is mounted as a private tmpfs, so a project root under it cannot be mirrored read-only`,
+      `${masked} is mounted as a private tmpfs, so a project root under it that stages files cannot be mirrored read-only`,
     );
+    // Without staged files the masking is harmless (the read-write binds attach
+    // after the tmpfs mounts), so the same root is not refused.
+    assert.doesNotThrow(() => buildSandboxPolicy({ projectRoot: root, toolchain: CLEAN_TOOLCHAIN }));
   }
   assert.equal(maskedPrefixOf('/tmpfoo/x'), undefined, 'the prefix check is segment-aware');
   assert.equal(maskedPrefixOf(PROJECT), undefined);
