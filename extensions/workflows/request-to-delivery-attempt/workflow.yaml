@@ -125,5 +125,10 @@ steps:
     type: acceptance
     requirementRef: "{requirement}"
     acceptanceRef: "{judgePath}"
+    # The judge RUNS THE DELIVERED PROJECT, so its cost is the DELIVERY's cost, not ours:
+    # a delivery that ships a mutation harness (14 mutants observed) legitimately exceeds the
+    # 120 s this step used to declare — and a 120 s bound killed a judge that had already
+    # passed 4 checks and was about to accept (ledger #77). 15 minutes, and the engine now
+    # NAMES the bound when it is hit instead of reporting the judge as silent.
+    timeoutMs: 900000
     dependsOn: [judge_forge]
-    timeoutMs: 120000
