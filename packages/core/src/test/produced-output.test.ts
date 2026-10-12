@@ -160,6 +160,12 @@ test('the REAL request-intake manifest declares the document its agent step must
     'the agent step declares the document it must write, so an intake that writes nothing is refused instead of graded on a file it did not produce',
   );
 
+  // The step that is not yet reliable is allowed a SECOND attempt inside the same bound, rather than the
+  // run being thrown away: measured 2026-10-12, the same one-sentence request produced a document in
+  // 152.9s on one attempt and, on another, spent 536.8s reading this repository and wrote nothing.
+  assert.equal(agent?.retry?.maxAttempts, 2, 'a wandering attempt is retried instead of losing the run');
+  assert.equal(agent?.timeoutMs, 900_000, 'and the bound per attempt stays where it is: 15 minutes');
+
   // The gate that reads the document must depend on the step that produces it, or the declaration
   // is checked after something has already read the stale file.
   const gate = (def.steps ?? []).find((s) => s.type === 'quality_gate');

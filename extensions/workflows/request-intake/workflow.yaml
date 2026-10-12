@@ -16,6 +16,15 @@ steps:
     prompt: "{input}"
     # A real runtime is given room to write the document; the fake one returns immediately.
     timeoutMs: 900000
+    # The record says this step is not yet reliable, so it is allowed ONE more attempt rather than the
+    # run being thrown away: measured 2026-10-12, the same one-sentence request produced a document in
+    # 152.9s on one attempt and, on another, spent 536.8s reading the takumi repository and wrote
+    # NOTHING (the `produces` check below caught it — the run failed honestly instead of grading the
+    # file that was already on disk). The bound stays at 15 minutes so a wandering attempt cannot spend
+    # without limit; the retry is what turns a bad sample into a delivery instead of a lost run.
+    retry:
+      maxAttempts: 2
+      backoffSeconds: 5
     # The document this step MUST write (ADR-053). Checked against the filesystem after the step: a
     # file that was already there is not this step's output, so a run whose agent produced nothing
     # fails HERE instead of having the shape gate below grade a document from an earlier session
