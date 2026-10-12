@@ -6,6 +6,7 @@ import { createBoardProvider, runBoardCommand } from './board-command.js';
 import { runRunsCommand } from './runs-command.js';
 import { eventLogFor, runOnce, type PilotConfig } from './run-command.js';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { DeliveryProvider, TaskBoardProvider } from '@takumi/core';
 
 async function main(argv: string[]): Promise<number> {
@@ -467,12 +468,65 @@ async function createProviders(
   throw new Error(`unknown delivery provider: ${deliveryId} (fake | github | gitlab)`);
 }
 
-main(process.argv.slice(2)).then(
-  (code) => {
-    process.exitCode = code;
-  },
-  (err: unknown) => {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exitCode = 1;
-  },
-);
+/**
+ * Run the command only when this file IS the entry point.
+ *
+ * A test that imports this module (`apps/cli/src/test/run.test.ts` imports `runPilotCommand`) must not
+ * start a command — and, now that a finished command EXITS (see `exitWhenFlushed`), it must certainly
+ * not terminate the importer: before this guard, adding the explicit exit silently cut 16 tests off the
+ * end of the suite (1022 → 1006), which is exactly the kind of quiet loss this repository treats as a
+ * defect rather than a footnote.
+ */
+const isEntryPoint =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntryPoint) {
+  holdEventLoopForTest();
+  main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+      void exitWhenFlushed(code);
+    },
+    (err: unknown) => {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+      void exitWhenFlushed(1);
+    },
+  );
+}
+
+/**
+ * TEST SEAM: hold the event loop open for this many milliseconds — the way a library that forgot to
+ * release a socket does. It exists so the exit contract can be tested against a process that WOULD
+ * hang, on a machine with no API key: the real instance was the pi adapter's session pool (ADR-054),
+ * reproducible only with a live model.
+ *
+ * Deliberately NOT `unref()`'d: the leak is the point.
+ */
+function holdEventLoopForTest(): void {
+  const raw = Number(process.env['TAKUMI_TEST_HOLD_ALIVE_MS'] ?? '');
+  if (Number.isFinite(raw) && raw > 0) setTimeout(() => {}, raw);
+}
+
+/**
+ * FINISH: hand stdio to the OS, then EXIT.
+ *
+ * A command-line program ends when its command ends. Leaving the exit to "the event loop drained"
+ * makes a finished run depend on EVERY library releasing EVERY socket — which is how a run that had
+ * written its record and printed its summary stayed alive for minutes afterwards (ADR-054 measured it:
+ * workflow done at 01:23:10Z, process alive at 01:25:30Z). A supervisor sequences unattended runs by
+ * waiting for that exit, so the exit is this program's contract, not a side effect of other people's
+ * cleanup. Stdio is flushed first so a piped or redirected run loses none of its output.
+ */
+async function exitWhenFlushed(code: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let pending = 2;
+    const done = (): void => {
+      pending -= 1;
+      if (pending === 0) resolve();
+    };
+    process.stdout.write('', done);
+    process.stderr.write('', done);
+  });
+  process.exit(code);
+}
