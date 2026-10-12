@@ -28,8 +28,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -79,8 +78,17 @@ function confirmed(): string {
   return ['confirmation:', '  by: "SS"', '  at: "2026-10-12T00:00:00Z"', '  method: bounded-choice', '', preChosen()].join('\n');
 }
 
+/** A scratch directory INSIDE the project: the gate resolves the document against the project root, and
+ * `.takumi/` is where a project keeps its own output — it may not exist in a fresh checkout (it is
+ * created by `initProject`), which is exactly how this test failed CI once. */
+function scratch(): string {
+  const root = join(REPO, '.takumi');
+  mkdirSync(root, { recursive: true });
+  return mkdtempSync(join(root, 'prechosen-test-'));
+}
+
 test('the gate refuses an intake that answers its own questions, and passes the same document without them', () => {
-  const dir = mkdtempSync(join(REPO, '.takumi', 'prechosen-test-'));
+  const dir = scratch();
   try {
     const refused = gate(dir, preChosen());
     assert.equal(refused.status, 1, `expected a refusal, the gate said:\n${refused.out}`);
