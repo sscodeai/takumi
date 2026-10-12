@@ -412,6 +412,8 @@ async function runStepWithTimeout(
   if (!timeoutMs) {
     return runTaskAndCollect(runtime, task);
   }
+  /** The bound's timer, kept so the `finally` below can clear it (see docs/bugs-fixed.md #71). */
+  let handle: ReturnType<typeof setTimeout> | undefined;
   const runPromise = runTaskAndCollect(runtime, task);
   const timeoutResult: AgentResult = {
     taskId: task.id,
@@ -425,17 +427,24 @@ async function runStepWithTimeout(
     error: `timeout after ${timeoutMs}ms`,
   };
   const timer = new Promise<AgentResult>((resolve) => {
-    setTimeout(() => {
+    handle = setTimeout(() => {
       // Best-effort cancel; the in-flight run settles in the background. We
       // resolve FAILED immediately — never hang the workflow on a stuck runtime.
       void runtime.cancel(task.id);
       resolve(timeoutResult);
     }, timeoutMs);
+    // A step's bound must not outlive the step. Without this the handle keeps the event loop alive for the
+    // whole bound after the work is done (observed 2026-10-12: a test whose step declared a 600 s bound
+    // finished all its assertions and then sat there for ten minutes — docs/bugs-fixed.md #71), which is
+    // the one way a declared bound makes a process LESS well behaved than no bound at all.
+    handle.unref?.();
   });
   try {
     return await Promise.race([runPromise, timer]);
   } finally {
-    // no-op; timer already resolved
+    // Cleared, not a no-op: a timer that outlives its step is a leaked handle, and clearing it is what
+    // makes "the step was bounded" true of the process as well as of the workflow.
+    if (handle !== undefined) clearTimeout(handle);
   }
 }
 export async function executeWorkflow(
@@ -968,6 +977,18 @@ export async function executeWorkflow(
             break;
           }
           const acceptance = res.steps.find((s) => sub.steps.find((d) => d.id === s.stepId)?.type === 'acceptance');
+          // THE BRIEF COMES FROM THE STEP THAT FAILED, when the acceptance never ran. The acceptance is
+          // SKIPPED while any step it depends on fails, so on the round after an upstream refusal its
+          // summary is empty and the next attempt would be handed "a judge which reported nothing has told
+          // you nothing" while the run log named the check that refused. Observed 2026-10-12 in the third
+          // unattended chain: a `judge_forge` refusal reached the next attempt as that sentence, and the
+          // implementer — told to repair a failure it could not touch — left the delivery worktree and
+          // edited this repository instead (docs/bugs-fixed.md #68).
+          const lastFailed = res.steps.filter((s) => s.status === 'failed').pop();
+          const brief =
+            acceptance?.status === 'completed'
+              ? (acceptance.summary ?? '')
+              : (lastFailed?.summary ?? acceptance?.summary ?? '');
           for (const s of res.steps) {
             subArtifacts.push(...s.artifacts);
             subTests.push(...s.tests);
@@ -985,7 +1006,20 @@ export async function executeWorkflow(
             if (res.vars['acceptedHead'] !== undefined) vars['acceptedHead'] = res.vars['acceptedHead'];
             break;
           }
-          failures = failureLinesOf(acceptance?.summary ?? '');
+          // A FAILURE NO IMPLEMENTATION CAN REPAIR ENDS THE LOOP. `judge_forge` derives the judge from
+          // the CONFIRMED DOCUMENT, not from the delivery, and a document does not change between
+          // attempts: another round can only spend. (Measured: the round after a `judge_forge` refusal
+          // re-paid 1 047 s to fail identically — docs/bugs-fixed.md #68.) The document is the operator's,
+          // so the run stops here and names the step and its reason rather than burning the last round.
+          const documentLevel = res.steps.find(
+            (s) => s.status === 'failed' && sub.steps.find((d) => d.id === s.stepId)?.type === 'judge_forge',
+          );
+          if (documentLevel !== undefined) {
+            abort = `the judge could not be forged from the confirmed document (${documentLevel.stepId}), and no implementation can change it: the remaining round(s) were not spent\n${documentLevel.summary ?? ''}`;
+            run.stepStatus[stepId] = 'failed';
+            break;
+          }
+          failures = failureLinesOf(brief);
         }
 
         const summary = [

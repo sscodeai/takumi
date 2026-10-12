@@ -146,25 +146,45 @@ test('a declared output the step DID write is a completed step', async () => {
 // (c) the real manifest: the intake's agent step declares the document it must produce
 // ---------------------------------------------------------------------------------------------
 
-test('the REAL request-intake manifest declares the document its agent step must produce', () => {
-  const url = new URL('../../../../extensions/workflows/request-intake/workflow.yaml', import.meta.url);
-  const def = parseYaml(readFileSync(url, 'utf8')) as WorkflowDefinition;
+test('the REAL intake manifests declare the document its agent step must produce, and a repair round around it', () => {
+  // The intake is a `repair` round over its own sub-workflow (ADR-057): the agent that writes the
+  // document and the gate that reads it live together in `intake-attempt`, so a document the gate refuses
+  // gets a SECOND attempt told exactly what was refused, instead of the run being thrown away (measured
+  // 2026-10-12: three of four unattended chains lost the whole run at the gate for three different reasons
+  // — docs/bugs-fixed.md #69, #70).
+  const parent = parseYaml(
+    readFileSync(new URL('../../../../extensions/workflows/request-intake/workflow.yaml', import.meta.url), 'utf8'),
+  ) as WorkflowDefinition;
+  assert.deepEqual(validateWorkflowManifest(parent), [], 'the shipped manifest passes its own validator');
 
-  assert.deepEqual(validateWorkflowManifest(def), [], 'the shipped manifest passes its own validator');
+  const attempt = (parent.steps ?? []).find((s) => s.id === 'intake_attempt');
+  assert.equal(attempt?.type, 'repair', 'the intake runs one repairable attempt, not a bare agent step');
+  assert.equal(attempt?.repairRef, 'intake-attempt');
+  assert.equal(attempt?.maxRounds, 2, 'a bad sample is repaired once rather than losing the run');
+  const confirmation = (parent.steps ?? []).find((s) => s.id === 'ambiguity_confirmation');
+  assert.ok(
+    (confirmation?.dependsOn ?? []).includes('intake_attempt'),
+    'the confirmation happens after the attempt that owns the gate, not after a bare agent step',
+  );
+
+  const def = parseYaml(
+    readFileSync(new URL('../../../../extensions/workflows/intake-attempt/workflow.yaml', import.meta.url), 'utf8'),
+  ) as WorkflowDefinition;
+  assert.deepEqual(validateWorkflowManifest(def), [], 'the attempt manifest passes its own validator');
 
   const agent = (def.steps ?? []).find((s) => s.type === 'agent');
-  assert.ok(agent, 'the intake has an agent step');
+  assert.ok(agent, 'the attempt has an agent step');
   assert.deepEqual(
     agent?.produces,
     ['docs/requirements/intake.yaml'],
     'the agent step declares the document it must write, so an intake that writes nothing is refused instead of graded on a file it did not produce',
   );
-
-  // The step that is not yet reliable is allowed a SECOND attempt inside the same bound, rather than the
-  // run being thrown away: measured 2026-10-12, the same one-sentence request produced a document in
-  // 152.9s on one attempt and, on another, spent 536.8s reading this repository and wrote nothing.
-  assert.equal(agent?.retry?.maxAttempts, 2, 'a wandering attempt is retried instead of losing the run');
-  assert.equal(agent?.timeoutMs, 900_000, 'and the bound per attempt stays where it is: 15 minutes');
+  assert.equal(agent?.timeoutMs, 900_000, 'the bound per attempt stays where it is: 15 minutes');
+  assert.match(
+    String(agent?.prompt ?? ''),
+    /\{repairFailures\}/,
+    'the next attempt is handed the failing checks the gate reported — the whole point of the repair round',
+  );
 
   // The gate that reads the document must depend on the step that produces it, or the declaration
   // is checked after something has already read the stale file.
