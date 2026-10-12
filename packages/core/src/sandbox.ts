@@ -134,6 +134,21 @@ export interface StepSandboxRequest {
 }
 
 /**
+ * The roots an in-process tool adapter may touch (ADR-058 S5). Unlike the
+ * kernel boundary, an in-process `read`/`write`/`edit` cannot be chrooted, so
+ * containment is enforced by resolving real paths and refusing anything outside
+ * these roots — a planted symlink is refused by `realpath`, not followed.
+ */
+export interface SandboxRoots {
+  /** Host roots the adapter may write. */
+  rw: string[];
+  /** Host roots the adapter may read. */
+  ro: string[];
+  /** The mirrored project/working root (inside the boundary at the same path). */
+  cwd: string;
+}
+
+/**
  * The step-command seam. Fail-closed by contract: an implementation that
  * cannot establish its boundary returns `code: SANDBOX_REFUSED_CODE` with a
  * `SANDBOX_REFUSED: <reason>` stderr instead of running the command.

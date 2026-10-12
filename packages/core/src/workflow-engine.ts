@@ -36,6 +36,7 @@ import { writeRunRecord, type RunRecord, type RunRecordStep, type RunStepStatus 
 import { readRequirementConfirmation, type RequirementConfirmation } from './standing-authorization.js';
 import type { Usage } from './types.js';
 import type { StepSandbox } from './sandbox.js';
+import type { SandboxRoots } from './sandbox.js';
 import { parse as parseYamlText } from 'yaml';
 import { readFileSync as readTextFileSync, statSync as statFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
@@ -224,6 +225,13 @@ export interface WorkflowExecutionContext {
    * running its step commands unconfined.
    */
   sandbox?: StepSandbox;
+  /**
+   * The roots the in-process agent tool adapters may touch (ADR-058 S5). The
+   * kernel boundary confines a `bash` command; `read`/`write`/`edit`/`ls`/`find`
+   * run in-process and are contained by resolving real paths against these roots.
+   * Present exactly when `sandbox` is; absent leaves the runtime open (legacy).
+   */
+  sandboxRoots?: SandboxRoots;
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
   /**
@@ -808,6 +816,10 @@ export async function executeWorkflow(
             cwd: ctx.worktree ?? ctx.cwd,
             trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
             context: { workflowStep: stepId, workflow: workflow.name, ...vars },
+            options: {
+              ...(ctx.sandbox === undefined ? {} : { sandbox: ctx.sandbox }),
+              ...(ctx.sandboxRoots === undefined ? {} : { sandboxRoots: ctx.sandboxRoots }),
+            },
           };
           try {
             const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
@@ -2395,6 +2407,10 @@ export async function executeWorkflow(
           cwd: ctx.worktree ?? ctx.cwd,
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
           context: { workflowStep: stepId, workflow: workflow.name, ...vars },
+          options: {
+            ...(ctx.sandbox === undefined ? {} : { sandbox: ctx.sandbox }),
+            ...(ctx.sandboxRoots === undefined ? {} : { sandboxRoots: ctx.sandboxRoots }),
+          },
         };
         try {
           const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);

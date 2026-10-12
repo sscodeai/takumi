@@ -16,7 +16,7 @@ import {
   WorkflowDefinition,
   WorkflowStepResult,
 } from '@takumi/core';
-import type { SandboxCapability, SandboxStagedFile, StepSandbox } from '@takumi/core';
+import type { SandboxCapability, SandboxRoots, SandboxStagedFile, StepSandbox } from '@takumi/core';
 import { AgentRuntimeAdapter, AgentTask, runTaskAndCollect } from '@takumi/core';
 import { FakeRuntime } from '@takumi/runtime-fake';
 import { CliRuntimeAdapter } from '@takumi/runtime-cli';
@@ -410,21 +410,23 @@ export function prepareRunSandbox(input: {
   runId: string;
   worktree?: string | undefined;
   staged: SandboxStagedFile[];
-}): StepSandbox {
+}): { sandbox: StepSandbox; roots: SandboxRoots } {
   const judgeRoot = join(input.cwd, '.takumi', 'acceptance', input.runId);
   mkdirSync(judgeRoot, { recursive: true });
-  if (input.worktree === undefined) {
-    return new UnshareSandbox(buildSandboxPolicy({ projectRoot: input.cwd }));
-  }
-  return new UnshareSandbox(
-    buildSandboxPolicy({
-      projectRoot: input.cwd,
-      worktree: input.worktree,
-      judgeDir: judgeRoot,
-      runId: input.runId,
-      staged: input.staged,
-    }),
-  );
+  const policy =
+    input.worktree === undefined
+      ? buildSandboxPolicy({ projectRoot: input.cwd })
+      : buildSandboxPolicy({
+          projectRoot: input.cwd,
+          worktree: input.worktree,
+          judgeDir: judgeRoot,
+          runId: input.runId,
+          staged: input.staged,
+        });
+  return {
+    sandbox: new UnshareSandbox(policy),
+    roots: { rw: [...policy.rw], ro: [...policy.ro], cwd: policy.cwd },
+  };
 }
 
 /**
@@ -666,6 +668,7 @@ async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): P
       unsafeOverride: unsafeNoSandboxSet(),
     });
     let sandbox: StepSandbox | undefined;
+    let sandboxRoots: SandboxRoots | undefined;
     let sandboxNote = 'none';
     let runId: string | undefined;
     if (decision.mode === 'refused') {
@@ -687,12 +690,14 @@ async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): P
       sandboxNote = decision.note;
     } else if (decision.mode === 'unshare') {
       runId = `wf-${randomUUID().slice(0, 8)}`;
-      sandbox = prepareRunSandbox({
+      const prepared = prepareRunSandbox({
         cwd: opts.cwd,
         runId,
         worktree: worktreePath,
         staged: collectStagedRefs(wf, opts.confirmedRequirement, opts.cwd),
       });
+      sandbox = prepared.sandbox;
+      sandboxRoots = prepared.roots;
       sandboxNote = 'unshare';
       const line = `sandbox: unshare boundary (run ${runId})`;
       events.push(line);
@@ -754,6 +759,7 @@ async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): P
         ...(opts.confirmedRequirement === undefined ? {} : { confirmedRequirement: opts.confirmedRequirement }),
         ...(worktreePath === undefined ? {} : { worktree: worktreePath }),
         ...(sandbox === undefined ? {} : { sandbox }),
+        ...(sandboxRoots === undefined ? {} : { sandboxRoots }),
         ...(runId === undefined ? {} : { runId }),
         sandboxNote,
         onApproval: async (req) => {

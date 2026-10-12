@@ -192,6 +192,7 @@ export type {
   SandboxOptions,
   SandboxPolicy,
   SandboxResult,
+  SandboxRoots,
   SandboxStagedFile,
   StepSandbox,
   StepSandboxRequest,
@@ -235,6 +236,18 @@ export type {
   SandboxToolchainProbe,
   SandboxToolchainProbeOptions,
 } from './sandbox-policy.js';
+export {
+  SandboxFsError,
+  accessWithin,
+  existsWithin,
+  globWithin,
+  mkdirWithin,
+  readFileWithin,
+  readdirWithin,
+  resolveWithinRoots,
+  statWithin,
+  writeFileWithin,
+} from './sandbox-fs-ops.js';
 export { runManagerLoop } from './manager-loop.js';
 export type { LoopRecord, TaskState, LoopDecision, LoopContract, AuditResult, LoopHost } from './manager-loop.js';
 
