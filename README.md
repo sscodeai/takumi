@@ -195,6 +195,7 @@ takumi/
 | Durable resume from audit records | Done |
 | Parallel workflow step execution | Done |
 | Sandbox abstraction with unshare support | Done |
+| Unprivileged mount-policy boundary for step commands and constrained agent tools (fail-closed; named network exception for the delivery agent) | Done (ADR-058) |
 | Web console with live logs | Done |
 | Task-board providers: fake / GitHub / GitLab / Jira / Notion / Redmine, one shared contract suite | Done |
 | Read-only board view: `takumi board --provider <id>` | Done |
@@ -275,7 +276,11 @@ Takumi is currently a Developer Preview.
 - `takumi loop` is v1: manager decisions are still LLM-driven and non-deterministic.
 - Pi runtime is opt-in and depends on an external Pi SDK.
 - Traceability currently relies on ID naming conventions rather than structural foreign keys.
-- Tool plugins run with user privileges unless a sandbox is explicitly selected.
+- Tool plugins run with user privileges unless a sandbox is explicitly selected. A delivery run (one
+  with a worktree) is confined by default: its step commands and the delivery agent's tools run inside
+  an unprivileged mount-policy boundary (ADR-058). The boundary is honest about its limit — the
+  delivery agent keeps model-provider egress — and there is a human-only, loud, recorded escape hatch
+  (`TAKUMI_UNSAFE_NO_SANDBOX=1`).
 - Real-repo-scale evaluation is still on the roadmap.
 - The board layer (ADR-006) covers the work source; the delivery layer (ADR-007) covers branch, pull request, checks and merge. Boards differ in what they can express, on purpose: a Notion database has no pull requests and cannot EDIT a comment, and it records labels only when `labelsProperty` names the column — so each of those operations fails closed instead of quietly doing nothing.
 - Providers are exercised live where it matters most and offline everywhere else: the GitLab board, the GitLab delivery and the Notion mirror have run against real instances (a private project and a Notion database, including a live item delivered end to end and an 8-item projection), while GitHub, Jira and Redmine are covered by the offline suites only. Expect to adjust API details on first use — pagination beyond the first page of ITEMS (`listWork` still reads one page of 100), site-specific status/property names, self-hosted base URLs.
