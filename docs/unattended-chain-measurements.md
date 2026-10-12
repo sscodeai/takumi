@@ -16,6 +16,7 @@ own state, never from the driver's exit code alone.
 | 2 | `6da077e` (boundary merged) | **on** (unshare) | 3 | **0 of 3** | every run died at `judge_forge`: `bash: extensions/judges/metamorphic-forge.sh: No such file or directory`. The boundary made the platform repository invisible to the platform's OWN tools (ledger #75) — **reverted** |
 | 3 | `4387b4f` (boundary reverted) | off | 3 | **2 of 3** | run 1: same 120 s kill as round 1, twice (7,616 ms spoken vs 125,092 ms killed, same judge digest) |
 | 4 | `8056878` (#76 diagnosis, #77 silent-judge, #78 preflight) | off | 3 | **3 of 3** | none |
+| 5 | `3eb0bcc` (#79: the boundary classified — the model's hands confined, the platform's own tooling open) | **on** (userns; `sandbox` read back from every run record) | 3 | **3 of 3** | none — every record says `sandbox=unshare` |
 
 ## Round 4 in detail (15:43Z, 2026-10-12)
 
@@ -24,6 +25,25 @@ own state, never from the driver's exit code alone.
 | 1 | `wf-e368c886` | 3,868 s (64.5 min) | [#21](https://github.com/sscodeai/takumi-delivery-demo/pull/21) merged, 16 files | attempt 1 refused by the judge, **repair round 2 accepted** (11 checks ok) |
 | 2 | `wf-2a491cd3` | 1,770 s (29.5 min) | [#23](https://github.com/sscodeai/takumi-delivery-demo/pull/23) merged, 2 files | accepted on attempt 1 |
 | 3 | `wf-3a2246f4` | 3,831 s (63.9 min) | [#25](https://github.com/sscodeai/takumi-delivery-demo/pull/25) merged, 5 files | intake repaired (attempt 2) AND delivery repaired (attempt 2) |
+
+## The boundary, measured twice
+
+| round | boundary | how it was applied | runs | success |
+|---|---|---|---|---|
+| 2 | ON | to **every** step's shell command | 3 | **0 of 3** |
+| 4 | off | — | 3 | 3 of 3 |
+| 5 | ON | to **the model's seam only** (ledger #79) | 3 | **3 of 3** |
+
+Same boundary, opposite result, and the difference is not the boundary: it is **whose code it was
+applied to**. The platform's own tooling lives inside the repository the boundary makes invisible.
+
+## Round 5 in detail (18:19Z, 2026-10-12) — boundary ON
+
+| Run | run id | wall clock | Pull request | record |
+|---|---|---|---|---|
+| 1 | `wf-6c8cf8a9` | 1,319 s | [#29](https://github.com/sscodeai/takumi-delivery-demo/pull/29) merged | `sandbox=unshare`, `accepted=true` |
+| 2 | `wf-13b5ea67` | 1,276 s | [#31](https://github.com/sscodeai/takumi-delivery-demo/pull/31) merged | `sandbox=unshare`, `accepted=true` |
+| 3 | `wf-66f0e7ca` | 1,575 s | [#33](https://github.com/sscodeai/takumi-delivery-demo/pull/33) merged | `sandbox=unshare`, `accepted=true` |
 
 ## What the numbers say, including what they do not
 
@@ -37,11 +57,15 @@ own state, never from the driver's exit code alone.
    project (900 s, ledger #77) means a FAILING judge now runs to its natural end instead of being
    cut off at 120 s: round-4 runs took 30–65 minutes against 9–29 minutes before. Wall clock is
    the price of not executing correct deliveries.
-4. **There is no isolation.** The boundary is reverted: the delivery agent runs with the
-   operator's own write access to the host, and it has demonstrably edited the platform repository
-   while being judged (ledger #68). Until the boundary returns — redesigned so it confines the
-   agent and not the platform's own tools — this chain is for low-risk, revertible repositories
-   with a human watching. It is not to be pointed at a production repository unattended.
+4. **Isolation is back, and it is classified** (round 5, ledger #79): the boundary confines the
+   MODEL's hands — an agent step's bash and its read/write/edit tools — and runs the platform's own
+   tooling open, because that tooling lives inside the repository a boundary makes invisible (that
+   was ledger #75: the same boundary, applied to every step, took this chain from 4 of 6 to 0 of 3).
+   **What it still does not close, named:** the acceptance step runs the DELIVERED project open (the
+   platform's harness runs it, and the deliverable is model-authored), so this is still not a chain
+   to point at a production repository unattended without a human watching. The next unit of work —
+   a read-only platform for platform steps, plus a repeatable chain check
+   (`scripts/verify-boundary-chain.sh`) — is specified, not built.
 5. **Failures here are cheap and closed.** Every failure in every round stopped the chain and named
    the step; none of them merged anything, and none of them edited a document to get past a check.
 
