@@ -40,6 +40,18 @@ export interface AgentRuntimeAdapter {
 
   /** Artifacts produced by a task. */
   getArtifacts(taskId: TaskId): Promise<Artifact[]>;
+
+  /**
+   * Release whatever this runtime holds. OPTIONAL — a runtime that holds nothing needs no teardown.
+   *
+   * Why it exists: the pi adapter POOLS a live `AgentSession`, and nothing on the run path closed it, so
+   * a `takumi run` process outlived the workflow it had already finished. Measured on 2026-10-12: the
+   * run ended at 01:23:10Z (record written, summary printed) and the CLI was still alive at 01:25:30Z,
+   * and an earlier foreground invocation had to be killed at 600 s. An unattended chain is sequenced by
+   * a supervisor waiting for a process to EXIT; a run that never exits cannot be sequenced, retried or
+   * measured. The caller that CREATED the runtime releases it (`runTask` does, on every path).
+   */
+  close?(): void;
 }
 
 export type { AgentResult } from './types.js';
