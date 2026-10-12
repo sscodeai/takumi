@@ -557,14 +557,32 @@ test('await_checks: a host that cannot report checks at all fails LOUDLY, never 
   }
 });
 
-test('await_checks: a host that reports NO checks fails — "no checks" is not a pass', async () => {
+test('await_checks: a host that reports NO checks fails at the DEADLINE — "no checks" is not a pass', async () => {
   const p = fixture();
   const provider = checkProvider([[]]);
   try {
-    const r = await runStep(p, awaitStep(), provider);
+    // The bound is what tells "no checks YET" from "no checks": an empty answer is only a verdict once
+    // waitSeconds has elapsed.
+    const r = await runStep(p, awaitStep(2), provider);
     assert.equal(r.status, 'failed');
     assert.match(r.step?.summary ?? '', /reported NO checks/);
+    assert.match(r.step?.summary ?? '', /after 2s/);
     assert.match(r.step?.summary ?? '', /"no checks" is not a pass/);
+    assert.ok(provider.calls > 1, `the step must POLL until the bound, not judge the first empty answer (calls: ${provider.calls})`);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('await_checks: a pipeline the host registers a moment LATE still passes (no checks YET is not no checks)', async () => {
+  const p = fixture();
+  // The measured case (run wf-8edeac75, 2026-10-12): a PR whose pipeline PASSED was refused after TWO
+  // SECONDS because the host had not registered the workflow run yet; the checks appeared ~10-20s later.
+  const provider = checkProvider([[], [{ name: 'tests', conclusion: 'success', url: 'https://host/checks/1' }]]);
+  try {
+    const r = await runStep(p, awaitStep(3), provider);
+    assert.equal(r.status, 'completed', r.step?.summary);
+    assert.match(r.step?.summary ?? '', /all 1 check\(s\) succeeded/);
   } finally {
     p.cleanup();
   }
