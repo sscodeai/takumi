@@ -1,0 +1,51 @@
+# A standing authorization (ADR-045) — the ONE human act behind `scripts/autopilot.sh`.
+#
+# SIGNING THIS FILE IS THE HUMAN DECISION. What it says: documents matching the scope below may be
+# confirmed NON-INTERACTIVELY, from the `default:` each document declares for itself, by a machine with
+# nobody at the keyboard. The confirmation still happens and the digest is still the token a delivery is
+# bound to (ADR-025) — what changes is WHO chose the words: the grant signs off the CLASSES, and each
+# document's own defaults supply the answers, listed one by one in the `defaulted:` front-matter so a
+# reviewer can check them afterwards.
+#
+# SCOPE: the FAMILY form (`scope.documents`, repo-relative globs) — the form ADR-045 calls the unattended
+# one. It covers whatever document is at those paths WHENEVER a run produces it, which is exactly what an
+# intake does; a `pin` (SA-001's form: one revision of one document, by digest) cannot be used here,
+# because that document does not exist yet when the grant is signed.
+#
+# HOW TO SIGN: (1) read the scope and the classes below; (2) put a real name in `signedBy`, a real
+# `signedAt`, and an `expiresAt` you are willing to live with; (3) rename this file to
+# docs/authorizations/SA-002.yaml. `scripts/autopilot.sh` refuses to run while that file is missing —
+# there is no default grant, and no way to confirm around one.
+#
+# WHAT IT CANNOT DO (ADR-045, enforced rather than promised): it cannot overwrite a `chosen:` a person
+# already recorded, cannot widen which documents are in reach, cannot default a class it does not name,
+# cannot close a protected path, cannot survive its own expiry or a revocation, and cannot license a
+# FAILED acceptance — a failure is a person's call, always.
+#
+# WHAT TO KNOW BEFORE SIGNING (the boundary, stated): the classes below are the RELATION names the
+# current intake document declares. A future intake can invent a different class for the same kind of
+# claim, and this grant will then REFUSE that document (naming the class it does not cover) rather than
+# confirm it. That is the correct behaviour — a class is a KIND of claim, and a human signed off on the
+# kind — but it means the grant is re-signed when a new document speaks a new vocabulary.
+id: SA-002
+signedBy: "" # a NAME, so a reader can ask — not an identity (ADR-018)
+signedAt: "" # RFC3339, e.g. "2026-10-12T11:00:00Z"
+expiresAt: "" # required: an authorization that never expires is refused at load
+revoked: false
+reason: "unattended confirmation of requirement documents an intake produces (docs/requirements/intake.yaml)"
+scope:
+  documents:
+    - "docs/requirements/intake.yaml"
+decisions:
+  - class: malformed-row-accounting
+    policy: document-default
+  - class: additivity
+    policy: document-default
+  - class: duplicate-resolution
+    policy: document-default
+  - class: row-order-invariance
+    policy: document-default
+  - class: independent-aggregation
+    policy: document-default
+failures:
+  - class: implementation-changes
