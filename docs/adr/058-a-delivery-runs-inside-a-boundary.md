@@ -170,3 +170,19 @@ is copied or linked from util-linux, from orbi (AGPL/SUL), or from the Pi SDK's 
   fixture or a copy of it.
 - `runtimes/pi/src/test/confinement.test.ts` — the confined tool builder drops `grep`, reads/writes
   inside, and refuses an outside path and a symlink escape.
+
+## What CI cannot verify (added 2026-10-12)
+
+GitHub's hosted runners do not permit unprivileged user namespaces: `unshare` fails with
+`unshare: _write_failed_ /proc/self/uid_map: _Operation_not_permitted`. Consequences, stated rather than
+discovered later:
+
+- Every test that needs a real boundary SKIPS there (the boundary self-test reports that it could not be
+  established, and the tests that assert mount propagation, resource limits and the A10 end-to-end run are
+  skipped rather than passed). **A green CI run therefore says nothing about the boundary** — it is
+  verified on hosts that can provide one (this machine: `unprivileged_userns_clone=1`,
+  `max_user_namespaces=63120`), not on the runner.
+- The run-path tests (`apps/cli/src/test/delivery-worktree.test.ts`) drive real runs and would otherwise be
+  refused by the fail-closed preflight on such a host. They set the recorded hatch
+  (`TAKUMI_UNSAFE_NO_SANDBOX=1`) for exactly that reason, so the hatch is also covered behaviour rather
+  than a comment (docs/bugs-fixed.md #73).
