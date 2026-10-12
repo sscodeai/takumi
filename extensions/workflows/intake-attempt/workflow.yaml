@@ -43,14 +43,13 @@ steps:
     produces:
       - docs/requirements/intake.yaml
   - id: intake_shape
-    # The document's contract IS this attempt's acceptance. A `repair` sub-workflow must declare a step of
-    # type `acceptance` — the engine refuses one without ("a repair loop with nothing to judge it cannot
-    # know when to stop"), which is the guard working: it caught this workflow's first version. The gate
-    # runs the same judge forge the delivery will run (ADR-056) plus the validator the human's confirmation
-    # uses, and ends with `ACCEPT_VERDICT: pass|fail`, so its failing checks are what the next attempt is
-    # told (ADR-057).
-    type: acceptance
-    requirementRef: docs/requirements/intake.yaml
-    acceptanceRef: extensions/workflows/request-intake/checks/intake-shape-tap.sh
+    # The document's contract IS this attempt's verdict — a `quality_gate`, not an `acceptance`: an
+    # acceptance is bound to a CONFIRMED requirement and nothing is confirmed yet at intake time, so
+    # declaring one here failed by construction before the gate could even run (docs/bugs-fixed.md #72).
+    # The gate runs the same judge forge the delivery will run (ADR-056) plus the validator the human's
+    # confirmation uses, and its failing checks are what the next attempt is told (ADR-057).
+    type: quality_gate
+    prompt: |
+      bash extensions/workflows/request-intake/checks/intake-shape-tap.sh
     dependsOn: [req_intake]
     timeoutMs: 180000

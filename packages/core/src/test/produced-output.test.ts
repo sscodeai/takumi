@@ -188,7 +188,7 @@ test('the REAL intake manifests declare the document its agent step must produce
 
   // The gate that reads the document must depend on the step that produces it, or the declaration
   // is checked after something has already read the stale file.
-  const gate = (def.steps ?? []).find((s) => s.type === 'acceptance');
+  const gate = (def.steps ?? []).find((s) => s.type === 'quality_gate');
   assert.ok((gate?.dependsOn ?? []).includes(agent?.id ?? ''), 'the shape gate depends on the agent step');
 });
 
