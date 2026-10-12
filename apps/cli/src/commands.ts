@@ -317,13 +317,18 @@ export async function resolveRuntime(id: string, sandbox?: 'none' | 'unshare'): 
       const mod = explicit ?? '@takumi/runtime-pi';
       const m = (await import(mod)) as { PiRuntimeAdapter: new () => AgentRuntimeAdapter };
       return new m.PiRuntimeAdapter();
-    } catch {
+    } catch (cause) {
+      // Never swallow the cause: "the import failed" and "the SDK is not installed"
+      // are different problems with different fixes. A stale runtimes/pi/dist once
+      // threw a SyntaxError here and was reported as a missing SDK.
+      const detail = cause instanceof Error ? cause.message : String(cause);
       throw new Error(
         `runtime "pi" is not available (BLOCKED_BY_EXTERNAL_DEPENDENCY). ` +
           `It requires the unpublished @earendil-works/pi-coding-agent SDK. ` +
           `Set up the pi package (cd runtimes/pi && pnpm install && pnpm build) then either ` +
           `install it into this project (npm i @takumi/runtime-pi) or point TAKUMI_PI_RUNTIME at its dist: ` +
-          `TAKUMI_PI_RUNTIME=/abs/path/to/runtimes/pi/dist/index.js`,
+          `TAKUMI_PI_RUNTIME=/abs/path/to/runtimes/pi/dist/index.js. ` +
+          `Underlying error: ${detail}`,
       );
     }
   }
