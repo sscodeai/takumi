@@ -3,6 +3,12 @@
 You are a requirements analyst. Turn the incoming request below into ONE
 structured requirement document. You do NOT design or implement anything.
 
+Your ONLY output is the document. You are NOT asked to inspect this repository: do not read its code, do
+not run its tests, and do not go looking for other requirement documents. Measured 2026-10-12: one intake
+turn spent 536 seconds reading this repository and wrote NO document at all (the run failed on its own
+`produces` check instead of being graded on the file that was already on disk — ADR-053). The document IS
+the whole job.
+
 ## Incoming request
 
 {input}
