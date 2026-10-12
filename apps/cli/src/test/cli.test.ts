@@ -299,3 +299,36 @@ test('resolveRuntime: cli:<command> bridges an external harness CLI (Gate 24/31)
     await assert.rejects(() => resolveRuntime('pi'), /BLOCKED_BY_EXTERNAL_DEPENDENCY/);
   }
 });
+
+// A runtime that EXISTS but fails to LOAD must name the underlying cause, not blame
+// the unpublished SDK. Real incident (2026-10-12): a stale runtimes/pi/dist made the
+// import throw a SyntaxError, and the CLI reported "the SDK is not installed", which
+// sent the operator after the wrong problem for minutes.
+test('resolveRuntime("pi"): a runtime that fails to load surfaces the real cause', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-load-failure-'));
+  const broken = join(dir, 'index.js');
+  writeFileSync(
+    broken,
+    "import { nope } from './does-not-exist.js';\nexport const PiRuntimeAdapter = class {};\n",
+  );
+  const prev = process.env.TAKUMI_PI_RUNTIME;
+  process.env.TAKUMI_PI_RUNTIME = broken;
+  try {
+    await assert.rejects(
+      () => resolveRuntime('pi'),
+      (e: Error) => {
+        assert.match(e.message, /BLOCKED_BY_EXTERNAL_DEPENDENCY/, 'keeps the stable marker');
+        assert.match(
+          e.message,
+          /does-not-exist|Cannot find|ERR_MODULE_NOT_FOUND/i,
+          'must name the underlying cause, not just the SDK hint',
+        );
+        return true;
+      },
+    );
+  } finally {
+    if (prev === undefined) delete process.env.TAKUMI_PI_RUNTIME;
+    else process.env.TAKUMI_PI_RUNTIME = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
