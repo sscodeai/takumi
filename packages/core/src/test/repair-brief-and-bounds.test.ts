@@ -261,7 +261,12 @@ test('the manifests carry the wiring: the intake is a repair round, and the deli
   assert.match(sub, /- id: req_intake[\s\S]*?timeoutMs: 900000/, 'the agent has a bound');
   assert.match(sub, /- id: req_intake[\s\S]*?produces:\n\s*- docs\/requirements\/intake.yaml/, 'the document is a declared output');
   assert.match(sub, /\{repairFailures\}/, 'the next attempt is told what the contract refused');
-  assert.match(sub, /- id: intake_shape[\s\S]*?type: quality_gate/, 'the gate is the attempt’s verdict — what the engine reads as the brief');
+  assert.match(
+    sub,
+    /- id: intake_shape[\s\S]*?type: acceptance/,
+    'the gate is the attempt’s ACCEPTANCE: a repair sub-workflow without one is refused by the engine, and the gate’s failing checks are the brief',
+  );
+  assert.match(sub, /- id: intake_shape[\s\S]*?acceptanceRef: extensions\/workflows\/request-intake\/checks\/intake-shape-tap\.sh/);
   assert.match(sub, /- id: intake_shape[\s\S]*?dependsOn: \[req_intake\]/, 'the gate runs on the document the agent wrote');
 
   const delivery = read('extensions/workflows/request-to-delivery-attempt/workflow.yaml');
