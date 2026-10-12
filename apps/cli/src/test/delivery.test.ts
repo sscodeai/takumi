@@ -18,9 +18,19 @@ import {
 } from '../delivery-command.js';
 import { createDeliveryWorktree } from '../worktree-command.js';
 import type { GitRunner } from '@takumi/core';
+import { UNSAFE_NO_SANDBOX_ENV } from '../commands.js';
 
 /**
- * The delivery provider, reachable from `takumi.yaml` (ADR-007 / ADR-037).
+ * These tests drive REAL runs (a git worktree, and in one case the REAL Forgejo provider), and a real run
+ * needs a sandbox boundary or the RECORDED hatch: GitHub's hosted runners refuse unprivileged user
+ * namespaces (`unshare: _write_failed_ /proc/self/uid_map: _Operation_not_permitted`), so the fail-closed
+ * preflight refused the positive test and CI went red while every local run passed (docs/bugs-fixed.md
+ * #73). This file tests the DELIVERY path, never the boundary — the boundary has its own tests, which SKIP
+ * where it cannot be established (ADR-058). The hatch is the recorded one: `none (unsafe override)`.
+ */
+process.env[UNSAFE_NO_SANDBOX_ENV] = '1';
+
+/**  * The delivery provider, reachable from `takumi.yaml` (ADR-007 / ADR-037).
  *
  * These tests drive the REAL CLI code path: `loadConfig` reads an actual `takumi.yaml`, and `runTask`
  * is the run the CLI performs. The front-door refusal is exercised through `runTask` — a workflow with

@@ -35,6 +35,8 @@ import { appendFeedback, parseFeedback } from './requirement-feedback.js';
 import { writeRunRecord, type RunRecord, type RunRecordStep, type RunStepStatus } from './run-record.js';
 import { readRequirementConfirmation, type RequirementConfirmation } from './standing-authorization.js';
 import type { Usage } from './types.js';
+import type { StepSandbox } from './sandbox.js';
+import type { SandboxRoots } from './sandbox.js';
 import { parse as parseYamlText } from 'yaml';
 import { readFileSync as readTextFileSync, statSync as statFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
@@ -86,6 +88,80 @@ function renderNotGreenChecks(checks: readonly CheckSummary[]): string[] {
     .map((c) => `- ${c.name}: ${c.conclusion}${c.url !== undefined && c.url.length > 0 ? ` (${c.url})` : ''}`);
 }
 
+/**
+ * One shell/argv command a step wants to run, and where. The engine routes every
+ * step command through `runStepCommand`, which is the single place a step can
+ * reach a boundary. `shell` and `argv` are mutually exclusive: a harness file is
+ * run as argv (`bash <file>`) so a path in a manifest is never shell syntax.
+ */
+export interface StepCommandRequest {
+  /** Shell command, run as `<sh> -c <shell>`. */
+  shell?: string;
+  /** argv form; `argv[0]` is the program, the rest are its arguments. */
+  argv?: string[];
+  /** Host-side working directory. Mirrored at the same absolute path inside a boundary. */
+  cwd: string;
+  /** Extra environment for the command, merged over the host environment. */
+  env?: Record<string, string>;
+  /** Wall-clock timeout in ms (default 120_000). */
+  timeoutMs?: number;
+}
+
+/** The shape `runStepCommand` throws for a non-zero/timed-out command. */
+export type StepCommandError = Error & {
+  stdout?: string;
+  stderr?: string;
+  code?: number;
+  timedOut?: boolean;
+};
+
+/**
+ * Run a step command — a command that comes from the WORKFLOW DEFINITION, i.e. the PLATFORM'S OWN
+ * TOOLING (`run:` scripts in this repository, the judge forge, the acceptance harness). This is
+ * the only path such a command takes.
+ *
+ * It is deliberately NOT the path the MODEL's commands take, and that distinction is ledger #79.
+ * #38 applied the boundary HERE as well, which made the platform repository invisible to the
+ * platform's own tools: the chain died at `judge_forge` with `No such file or directory` while
+ * the boundary's tests stayed green (ledger #75). The model's hands are contained in the runtime
+ * seam (`ctx.runtime` with `sandbox` + `sandboxRoots`), which is where an agent step goes.
+ *
+ * Non-zero exit and timeout are reported by THROWING an error that carries `stdout`/`stderr`/
+ * `code`, which is the contract the call sites already used with `exec`/`execFile`.
+ */
+export async function runStepCommand(
+  ctx: WorkflowExecutionContext,
+  req: StepCommandRequest,
+): Promise<{ stdout: string; stderr: string }> {
+  const timeoutMs = req.timeoutMs ?? 120000;
+  if ((req.shell === undefined) === (req.argv === undefined)) {
+    throw new Error('runStepCommand: exactly one of shell/argv is required');
+  }
+  // NO BOUNDARY ON THIS SEAM, deliberately — see the doc comment above and ledger #79.
+  //
+  // Every caller here is a workflow-defined command: the platform's own tooling, which lives
+  // INSIDE the repository a boundary makes invisible. Confining it confined the platform's
+  // ability to see itself.
+  //
+  // The model's hands are contained in the RUNTIME seam instead, and that is not weakened by
+  // this: an agent step's task carries `sandbox` + `sandboxRoots` into `ctx.runtime`, which
+  // builds a confined session from them (runtimes/pi `confinementOf` → confined tools, and its
+  // bash through the kernel boundary). `ctx.sandbox` is still consumed there; a test below pins
+  // that, so this file cannot lose the boundary by dropping it here.
+  const options = {
+    cwd: req.cwd,
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+    ...(req.env === undefined ? {} : { env: { ...process.env, ...req.env } }),
+  };
+  if (req.argv !== undefined) {
+    const [file, ...args] = req.argv;
+    if (file === undefined) throw new Error('runStepCommand: argv must not be empty');
+    return await execFileAsync(file, args, options);
+  }
+  return await execAsync(req.shell as string, options);
+}
+
 export interface WorkflowExecutionContext {
   /** Project working directory (steps run here). */
   cwd: string;
@@ -123,6 +199,31 @@ export interface WorkflowExecutionContext {
    * separation is a path property a test can assert rather than a promise in a comment.
    */
   worktree?: string;
+  /**
+   * The run id to use. When absent the engine generates one. The CLI pre-generates it
+   * so a boundary can name this run's judge directory before the first step runs.
+   */
+  runId?: string;
+  /**
+   * How this run's commands were sandboxed, as a human-readable string recorded in the
+   * run record: 'unshare', 'none', or 'none (unsafe override)'. Absent records 'none'
+   * honestly rather than implying a boundary that was not there (ADR-058).
+   */
+  sandboxNote?: string;
+  /**
+   * The boundary every step command in this run is routed through (ADR-058).
+   * Absent means no boundary: non-delivery runs pass through, and a delivery run
+   * is refused by the CLI preflight before its first agent step rather than
+   * running its step commands unconfined.
+   */
+  sandbox?: StepSandbox;
+  /**
+   * The roots the in-process agent tool adapters may touch (ADR-058 S5). The
+   * kernel boundary confines a `bash` command; `read`/`write`/`edit`/`ls`/`find`
+   * run in-process and are contained by resolving real paths against these roots.
+   * Present exactly when `sandbox` is; absent leaves the runtime open (legacy).
+   */
+  sandboxRoots?: SandboxRoots;
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
   /**
@@ -463,7 +564,7 @@ export async function executeWorkflow(
   }
 
   const order = topoSort(workflow.steps);
-  const runId = `wf-${randomUUID().slice(0, 8)}`;
+  const runId = ctx.runId ?? `wf-${randomUUID().slice(0, 8)}`;
   const run: WorkflowRun = {
     id: runId,
     workflow,
@@ -677,6 +778,7 @@ export async function executeWorkflow(
       },
       boardRowId,
       cost,
+      sandbox: ctx.sandboxNote ?? 'none',
     };
     const result = writeRunRecord(ctx.cwd, record);
     ctx.onEvent?.(
@@ -706,6 +808,10 @@ export async function executeWorkflow(
             cwd: ctx.worktree ?? ctx.cwd,
             trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
             context: { workflowStep: stepId, workflow: workflow.name, ...vars },
+            options: {
+              ...(ctx.sandbox === undefined ? {} : { sandbox: ctx.sandbox }),
+              ...(ctx.sandboxRoots === undefined ? {} : { sandboxRoots: ctx.sandboxRoots }),
+            },
           };
           try {
             const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
@@ -824,7 +930,7 @@ export async function executeWorkflow(
         const cmd = renderPrompt(step.prompt ?? '', vars);
         try {
           ctx.onEvent?.(stepId, `tool run: ${cmd}`);
-          const { stdout, stderr } = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 120000 });
+          const { stdout, stderr } = await runStepCommand(ctx, { shell: cmd, cwd: ctx.worktree ?? ctx.cwd, timeoutMs: step.timeoutMs ?? 120000 });
           const out = (stdout?.trim() || stderr?.trim() || '(no output)').slice(0, 4000);
           const kind = step.id.split('_')[0] ?? 'tool';
           const artifact = await ctx.artifacts.write({
@@ -861,7 +967,7 @@ export async function executeWorkflow(
         let out = '';
         let exitOk = true;
         try {
-          const r = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 300000 });
+          const r = await runStepCommand(ctx, { shell: cmd, cwd: ctx.worktree ?? ctx.cwd, timeoutMs: step.timeoutMs ?? 300000 });
           out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
         } catch (e) {
           exitOk = false;
@@ -1369,11 +1475,11 @@ export async function executeWorkflow(
         let out = '';
         let exitOk = true;
         try {
-          const r = await execFileAsync('bash', [path.resolve(ctx.cwd, forgeRef)], {
+          const r = await runStepCommand(ctx, {
+            argv: ['bash', path.resolve(ctx.cwd, forgeRef)],
             cwd: judgeDir,
-            timeout: step.timeoutMs ?? 300000,
+            timeoutMs: step.timeoutMs ?? 300000,
             env: {
-              ...process.env,
               TAKUMI_REQUIREMENT: requirementRef,
               TAKUMI_REQUIREMENT_DIGEST: `sha256:${reqDigest}`,
               TAKUMI_WORKTREE: worktreePath,
@@ -1523,16 +1629,16 @@ export async function executeWorkflow(
         const harnessCwd = forgedJudgePath === undefined ? ctx.cwd : (await import('node:path')).dirname(forgedJudgePath);
         let out = '';
         let exitOk = true;
-        // Set when OUR OWN bound killed the harness (node reports killed: true / SIGTERM).
-        // A kill produces "no verdict", which is NOT the same fact as "the harness ran and
-        // printed nothing"; reporting them alike blames the judge for the workflow's clock.
+        // Set when OUR OWN bound killed the harness. A kill produces "no verdict", which is NOT
+        // the same fact as "the harness ran and printed nothing"; reporting them alike blames the
+        // judge for the workflow's clock (ledger #77).
         let killedByBoundMs: number | undefined;
         try {
-          const r = await execFileAsync('bash', [acceptanceRef], {
+          const r = await runStepCommand(ctx, {
+            argv: ['bash', acceptanceRef],
             cwd: harnessCwd,
-            timeout: step.timeoutMs ?? 300000,
+            timeoutMs: step.timeoutMs ?? 300000,
             env: {
-              ...process.env,
               TAKUMI_WORKTREE: worktreePath,
               TAKUMI_PROJECT: ctx.cwd,
               ...(forgedJudgePath === undefined ? {} : { TAKUMI_JUDGE_DIR: harnessCwd }),
@@ -1541,8 +1647,10 @@ export async function executeWorkflow(
           out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
         } catch (e) {
           exitOk = false;
-          const shell = e as { stdout?: string; stderr?: string; killed?: boolean };
-          if (shell.killed === true) killedByBoundMs = step.timeoutMs ?? 300000;
+          const shell = e as { stdout?: string; stderr?: string; killed?: boolean; timedOut?: boolean };
+          // Two shapes depending on which seam ran it: node's exec error reports `killed`/SIGTERM,
+          // the boundary form reports `timedOut`. Both mean the STEP's bound ended the harness.
+          if (shell.killed === true || shell.timedOut === true) killedByBoundMs = step.timeoutMs ?? 300000;
           out = `${shell.stdout ?? ''}${shell.stderr ?? ''}` || (e instanceof Error ? e.message : String(e));
         }
         const verdict = parseAcceptVerdict(out);
@@ -1551,8 +1659,8 @@ export async function executeWorkflow(
           check: (m[2] ?? '').trim(),
         }));
         // The bound is the WORKFLOW's choice, so the engine must not report its own kill as the
-        // judge's silence. The verdict does not change (a killed harness still fails, fail-closed);
-        // only the REASON changes — from implying a broken harness to naming the clock.
+        // judge's silence (ledger #77). The VERDICT is unchanged — a killed harness still fails,
+        // fail-closed — but the reason names the clock instead of implying a broken harness.
         const failureReason =
           killedByBoundMs === undefined
             ? (verdict.error ?? 'the harness reported a failing verdict')
@@ -2305,6 +2413,10 @@ export async function executeWorkflow(
           cwd: ctx.worktree ?? ctx.cwd,
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
           context: { workflowStep: stepId, workflow: workflow.name, ...vars },
+          options: {
+            ...(ctx.sandbox === undefined ? {} : { sandbox: ctx.sandbox }),
+            ...(ctx.sandboxRoots === undefined ? {} : { sandboxRoots: ctx.sandboxRoots }),
+          },
         };
         try {
           const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
