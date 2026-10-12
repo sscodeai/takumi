@@ -40,7 +40,6 @@ ambiguities:
       - "First bounded option: skip the row and count it"
       - "Second bounded option: stop with an error"
     default: "First bounded option: skip the row and count it"
-    chosen: "First bounded option: skip the row and count it"
     checkedAs: skip-count        # ON THE DECISION: what the chosen answer means to a judge
     blocking: true
   - id: AMB-002
@@ -49,7 +48,6 @@ ambiguities:
       - "merge: every occurrence counts as its own reading"
       - "last-row: only the last occurrence is kept"
     default: "merge: every occurrence counts as its own reading"
-    chosen: "merge: every occurrence counts as its own reading"
     checkedAs: merge             # ON THE DECISION, never on the relation that settles it
     blocking: true
   - id: AMB-003
@@ -58,7 +56,6 @@ ambiguities:
       - "half-up: round half away from zero"
       - "truncate: drop the remainder"
     default: "half-up: round half away from zero"
-    chosen: "half-up: round half away from zero"
     checkedAs: half-up           # ON THE DECISION, never on the anchor that settles it
     blocking: true
 deliverable:
@@ -125,6 +122,12 @@ deliverable:
 3. Each ambiguity has 2 to 4 `options`. They must be mutually exclusive and
    bounded — not open questions.
 4. `default` must be exactly one of that ambiguity's `options`.
+4b. Do NOT write `chosen:`. It is not yours to write, and writing it EMPTIES THE REVIEW SURFACE: the
+   confirmation records the answer people (or a signed standing authorization) actually gave, and lists
+   every answer a machine took from your `default:` in the document's `defaulted:` front-matter. A
+   document that arrives with its questions already answered by itself leaves that list empty, so the
+   reviewer sees "0 decisions defaulted" while the decisions were in fact all made by a machine — the
+   one thing ADR-025/ADR-045 exist to keep visible. Propose a `default:`; stop there.
 5. `blocking: true` when implementation must not start until a human decides;
    `blocking: false` when the decision can be deferred but recorded.
 6. An intake with an empty `ambiguities` list is valid only when the request
@@ -193,7 +196,7 @@ from your text alone.
         (skipped and counted, skipped silently, or a hard failure)
       - `independent-aggregation`:   `half-up` | `truncate`   (how numbers round in the recomputation)
     A decision settled by `row-order-invariance` or `additivity` needs no `checkedAs`: those check a
-    property of the output, not the meaning of an answer. `checkedAs` goes ON THE `AMB-nnn` ENTRY (`chosen:`, then `checkedAs:`), NEVER on a relation or an
+    property of the output, not the meaning of an answer. `checkedAs` goes ON THE `AMB-nnn` ENTRY (`default:`, then `checkedAs:`), NEVER on a relation or an
  anchor: the relation says WHICH decision it settles (`decides:`), the decision says what its answer
  MEANS. A missing `checkedAs`, a `checkedAs` outside the list above, or one written on the relation
  instead of the decision is REFUSED — before the human confirms it, and again when the judge is

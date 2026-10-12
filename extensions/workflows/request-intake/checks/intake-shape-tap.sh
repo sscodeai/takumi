@@ -61,5 +61,23 @@ else
   not_ok "the document records at least one requirement (found $REQS)"
 fi
 
+# The intake PROPOSES; the confirmation DECIDES. An intake that writes `chosen:` answers its own
+# questions, and the confirmation then reports "0 decision(s) would be defaulted" — because there is
+# nothing left for it to answer — so a reviewer sees an EMPTY `defaulted:` list while every decision was
+# in fact taken by a machine. That list is the only place a machine's answers are meant to be visible
+# (ADR-025, ADR-045), so a document that pre-chooses them is refused here rather than confirmed later.
+#
+# Scoped on purpose: a document that carries an actual `confirmation:` block HAS a record of who chose
+# (a person, or a signed standing authorization), and re-confirming it is legitimate.
+CHOSEN=$(grep -cE '^[[:space:]]+chosen:[[:space:]]' "$REF" || true)
+if [ "$CHOSEN" -gt 0 ] && ! grep -qE '^confirmation:' "$REF"; then
+  not_ok "the document arrives with $CHOSEN answer(s) already chosen and no record of who chose them"
+  printf '# `chosen:` is the confirmation'"'"'s to write, not the intake'"'"'s: an intake PROPOSES a `default:`.\n'
+  printf '# With the answers already taken, the confirmation defaults 0 decisions and its `defaulted:` list —\n'
+  printf '# the one place a machine'"'"'s answers are visible to a reviewer — comes out EMPTY.\n'
+else
+  ok "the document leaves its answers to the confirmation ($CHOSEN pre-chosen, confirmation block: $(grep -qE '^confirmation:' "$REF" && echo present || echo absent))"
+fi
+
 printf '# tests %d\n# pass %d\n# fail %d\n' "$N" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
