@@ -55,11 +55,21 @@ function gate(dir: string, text: string): { status: number; out: string } {
   }
 }
 
+/** Drop the whole top-level `confirmation:` block (its indented body included), if the document has one. */
+function stripConfirmationBlock(text: string): string {
+  const lines = text.split('\n');
+  const start = lines.findIndex((line) => /^confirmation:\s*$/.test(line));
+  if (start < 0) return text;
+  let end = start + 1;
+  while (end < lines.length && (/^\s/.test(lines[end] ?? '') || (lines[end] ?? '').trim() === '')) end += 1;
+  return [...lines.slice(0, start), ...lines.slice(end)].join('\n');
+}
+
 /** The document as an intake WITHOUT the pre-chosen answers writes it: no `chosen:`, no confirmation. */
 function proposed(): string {
-  return readFileSync(DOC, 'utf8')
+  return stripConfirmationBlock(readFileSync(DOC, 'utf8'))
     .split('\n')
-    .filter((line) => !/^\s+chosen:\s/.test(line) && !line.startsWith('confirmation:'))
+    .filter((line) => !/^\s+chosen:\s/.test(line))
     .join('\n');
 }
 
