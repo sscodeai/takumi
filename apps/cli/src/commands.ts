@@ -398,17 +398,47 @@ export interface RunOptions {
    * judge must live outside it, and naming it is what makes that separation assertable.
    */
   worktree?: string;
+  /**
+   * The runtime to run with, when the caller already has one. Absent means the run resolves one from
+   * `runtimeId`, which is the CLI's own path.
+   *
+   * The run RELEASES whichever runtime it used (`close?.()`), so an injected runtime is released exactly
+   * like a resolved one: a test can assert the contract directly instead of inferring it from a process
+   * that happens to exit, and an embedding caller knows who owns the teardown.
+   */
+  runtime?: AgentRuntimeAdapter;
 }
 
-export async function runTask(opts: RunOptions): Promise<{
+export interface RunTaskResult {
   events: string[];
   summary: string;
   artifacts: string[];
   traceabilityMatrix?: string;
   /** The workflow's own outcome. Absent on the plain (non-workflow) path. */
   status?: 'completed' | 'failed' | 'cancelled';
-}> {
-  const runtime = await resolveRuntime(opts.runtimeId, opts.sandbox);
+}
+
+/**
+ * Run one task, and RELEASE the runtime afterwards — on every path.
+ *
+ * The release is not cosmetic. A runtime holds real resources (the pi adapter pools a live
+ * `AgentSession` so that a retry is cheap), and nothing closed it, so a process that had finished its
+ * work kept its event loop alive: measured 2026-10-12, a real `request-intake` run ended at 01:23:10Z
+ * with its record and artifact written, and the CLI was still alive at 01:25:30Z — an earlier
+ * foreground invocation had to be killed at 600 s. A supervisor sequences unattended runs by waiting
+ * for an EXIT, so a run that never exits cannot be sequenced, retried or measured. `finally` because a
+ * FAILED run is exactly when the operator wants the process back.
+ */
+export async function runTask(opts: RunOptions): Promise<RunTaskResult> {
+  const runtime = opts.runtime ?? (await resolveRuntime(opts.runtimeId, opts.sandbox));
+  try {
+    return await runWithRuntime(opts, runtime);
+  } finally {
+    runtime.close?.();
+  }
+}
+
+async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): Promise<RunTaskResult> {
   const store = new ArtifactStore(join(opts.cwd, opts.config.artifacts));
   const events: string[] = [];
 
