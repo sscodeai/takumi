@@ -214,7 +214,16 @@ test('preflight (A7): a delivery run with --sandbox none is refused before the r
   }
 });
 
-test('preflight (H2): a policy guard failure is refused and audited, with no judge directory left behind', async () => {
+test('preflight (H2): a policy guard failure is refused and audited, with no judge directory left behind', async (t) => {
+  // A policy guard is evaluated INSIDE a boundary, so this test needs a host that can establish one. Where
+  // it cannot, the run is refused for THAT reason instead — a different, correctly audited refusal, and
+  // not what this test asserts. The boundary tests skip for the same reason and on the same probe
+  // (docs/bugs-fixed.md #73; ADR-058, "What CI cannot verify").
+  const capability = await sandboxCapability();
+  if (!capability.available) {
+    t.skip(`a policy guard is only evaluated inside a boundary, which this host cannot establish: ${capability.reason ?? 'unknown'}`);
+    return;
+  }
   // A project root under /tmp that stages a harness file violates G4. The failure
   // must arrive as the SAME audited refusal as an unavailable boundary, not as an
   // unaudited throw, and no empty judge tree may be left behind.
