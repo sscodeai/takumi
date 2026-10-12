@@ -1523,6 +1523,10 @@ export async function executeWorkflow(
         const harnessCwd = forgedJudgePath === undefined ? ctx.cwd : (await import('node:path')).dirname(forgedJudgePath);
         let out = '';
         let exitOk = true;
+        // Set when OUR OWN bound killed the harness (node reports killed: true / SIGTERM).
+        // A kill produces "no verdict", which is NOT the same fact as "the harness ran and
+        // printed nothing"; reporting them alike blames the judge for the workflow's clock.
+        let killedByBoundMs: number | undefined;
         try {
           const r = await execFileAsync('bash', [acceptanceRef], {
             cwd: harnessCwd,
@@ -1537,7 +1541,8 @@ export async function executeWorkflow(
           out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
         } catch (e) {
           exitOk = false;
-          const shell = e as { stdout?: string; stderr?: string };
+          const shell = e as { stdout?: string; stderr?: string; killed?: boolean };
+          if (shell.killed === true) killedByBoundMs = step.timeoutMs ?? 300000;
           out = `${shell.stdout ?? ''}${shell.stderr ?? ''}` || (e instanceof Error ? e.message : String(e));
         }
         const verdict = parseAcceptVerdict(out);
@@ -1545,6 +1550,13 @@ export async function executeWorkflow(
           result: m[1] === 'ok' ? 'pass' : 'fail',
           check: (m[2] ?? '').trim(),
         }));
+        // The bound is the WORKFLOW's choice, so the engine must not report its own kill as the
+        // judge's silence. The verdict does not change (a killed harness still fails, fail-closed);
+        // only the REASON changes — from implying a broken harness to naming the clock.
+        const failureReason =
+          killedByBoundMs === undefined
+            ? (verdict.error ?? 'the harness reported a failing verdict')
+            : `the acceptance harness was KILLED at its ${killedByBoundMs}ms bound after ${checks.length} check(s) had reported, so no verdict was ever reached — this is "we do not know", not "it failed": raise this step's timeoutMs, or have the judge run less inside one step`;
         // The verdict is about a COMMIT: the head of the repository the acceptance is about — the
         // delivery worktree when there is one, else the project. Resolving it in the project repo recorded
         // the wrong commit on a black-box run (the ACCEPT artifact named the project's HEAD, not the
@@ -1562,7 +1574,7 @@ export async function executeWorkflow(
         const id = acceptanceIds.get(stepId) ?? 'ACCEPT-001';
         const requirements = extractTraceIds(requirementText).filter((t) => t.startsWith('REQ-'));
         const summary = [
-          `acceptance ${accepted ? 'PASSED' : 'FAILED'}: ${accepted ? 'the confirmed requirement is satisfied' : (verdict.error ?? 'the harness reported a failing verdict')}`,
+          `acceptance ${accepted ? 'PASSED' : 'FAILED'}: ${accepted ? 'the confirmed requirement is satisfied' : failureReason}`,
           `harness: ${acceptanceRef}`,
           `judge: ${forgedJudgePath === undefined ? '(none forged; a literal harness)' : `${forgedJudgePath} sha256:${shortDigest(forgedJudgeDigest)}`}`,
           `harness cwd: ${harnessCwd}`,

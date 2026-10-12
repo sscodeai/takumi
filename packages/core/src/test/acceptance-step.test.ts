@@ -200,6 +200,49 @@ test('acceptance: a harness with no verdict marker fails, and writes no ACCEPT a
   }
 });
 
+test('acceptance: a harness KILLED at its declared bound says so, instead of blaming a missing marker', async () => {
+  // A judge that runs the DELIVERED project (a mutation harness, 14 mutants observed) can
+  // legitimately take minutes. When the STEP's bound is smaller than that, the judge never
+  // reaches its verdict line — and reporting that as "the verdict marker was missing" blames
+  // the judge for a bound the WORKFLOW chose, which is what happened on 2026-10-12: the same
+  // judge digest spoke in 7,616 ms against one attempt and was killed at 125,092 ms against
+  // the next, holding 4 passed checks and no verdict.
+  const slowHarness = [
+    '#!/bin/sh',
+    'echo "ok 1 - the deliverable runs"',
+    'sleep 5',
+    'echo "ACCEPT_VERDICT: pass"',
+    'exit 0',
+    '',
+  ].join('\n');
+  const dir = project(slowHarness);
+  try {
+    const res = await run(dir, confirmed, { timeoutMs: 1000 });
+    const summary = res.steps.find((s) => s.stepId === 'accept')?.summary ?? '';
+    assert.equal(res.status, 'failed', 'a killed harness is a FAILED acceptance (fail-closed)');
+    assert.match(summary, /KILLED at its 1000ms bound/);
+    assert.doesNotMatch(summary, /verdict marker .*was missing/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the delivery workflow declares an acceptance bound that fits a judge which runs the delivered project', () => {
+  // "The decision, not just the code": a judge with no bound can hang, and a bound below the
+  // cost of what the judge runs kills a correct delivery. Both were real (ledger #77).
+  const yaml = readFileSync(
+    new URL('../../../../extensions/workflows/request-to-delivery-attempt/workflow.yaml', import.meta.url),
+    'utf8',
+  );
+  const block = yaml.slice(yaml.indexOf('- id: artifact_acceptance'));
+  const m = /timeoutMs:\s*(\d+)/.exec(block);
+  assert.ok(m, 'artifact_acceptance must declare a bound');
+  assert.ok(
+    Number(m[1]) >= 600000,
+    `the acceptance bound ${m[1]}ms is below the honest floor for a judge that runs the delivered project`,
+  );
+});
+
 test('acceptance: a failing verdict fails the step even when the harness exits 0', async () => {
   const dir = project('#!/bin/sh\necho "not ok 1 - the row count is wrong"\necho "# tests 1"\necho "# fail 1"\necho "ACCEPT_VERDICT: fail"\nexit 0\n');
   try {
