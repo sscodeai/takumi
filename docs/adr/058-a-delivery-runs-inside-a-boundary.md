@@ -196,10 +196,14 @@ Two properties carry the weight this ADR originally claimed:
 2. **Fail-closed is unchanged**: a runtime whose confined session cannot be built still fails the
    agent step rather than running the model open.
 
-What this boundary does NOT close (added, not a claim): the **acceptance step runs the delivered
-project open**, because it is the platform's harness that runs it; the deliverable is model-authored
-code. Containing the thing under test requires a per-step boundary (read-only platform, worktree
-writable) and a chain-level test — named as the next unit of work, not claimed here.
+**What the acceptance step closes, and what it still does not (2026-10-13).** The acceptance step's
+SUBJECT — the delivered project — now runs inside the read-only-platform boundary: the step ASKS for
+it (`StepCommandRequest.boundary: 'platformReadOnly'`), the run builds it
+(`prepareRunSandbox` returns both flavours), and the declaration is one the workflow makes, never one
+an agent step can grant itself. So a judged delivery can no longer write this repository. It can
+still READ it — the platform is mirrored for that step, not hidden — and hiding it from a harness
+that lives inside it is exactly the shape that produced ledger #75. That is the remaining, narrower
+limitation, stated rather than implied.
 
 ## What CI cannot verify (added 2026-10-12)
 

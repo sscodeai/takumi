@@ -200,3 +200,41 @@ test('step seam: an AGENT step still carries the boundary into its runtime sessi
     cleanup();
   }
 });
+
+// The wiring for ledger #79's open item: ONLY a step that asks gets the platform-flavoured boundary,
+// and the ask is satisfied by the boundary the CLI built for it — never by running open.
+test('step seam: a step that ASKS for the platform boundary runs inside it', async () => {
+  const { dir, ctx, cleanup } = baseCtx();
+  try {
+    const platformSandbox = new RecordingSandbox(() => ok('judged inside the boundary'));
+    const modelSandbox = new RecordingSandbox(() => {
+      throw new Error('the model boundary must not be used for a platform tool');
+    });
+    const r = await runStepCommand(
+      { ...ctx, sandbox: modelSandbox, sandboxPlatform: platformSandbox },
+      { argv: ['bash', 'judge.sh'], cwd: dir, boundary: 'platformReadOnly' },
+    );
+    assert.equal(r.stdout, 'judged inside the boundary');
+    assert.equal(platformSandbox.requests.length, 1, 'the platform boundary ran the command');
+    assert.equal(modelSandbox.requests.length, 0, 'the model boundary was not used');
+  } finally {
+    cleanup();
+  }
+});
+
+test('step seam: a step that does NOT ask still runs open (ledger #79 classification unchanged)', async () => {
+  const { dir, ctx, cleanup } = baseCtx();
+  try {
+    const platformSandbox = new RecordingSandbox(() => {
+      throw new Error('a step that did not ask must not be routed into the platform boundary');
+    });
+    const r = await runStepCommand(
+      { ...ctx, sandboxPlatform: platformSandbox },
+      { argv: ['bash', '-c', 'echo open'], cwd: dir },
+    );
+    assert.ok(r.stdout.includes('open'), 'the platform command ran where it lives');
+    assert.equal(platformSandbox.requests.length, 0);
+  } finally {
+    cleanup();
+  }
+});
