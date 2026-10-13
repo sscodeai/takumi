@@ -105,6 +105,17 @@ export interface StepCommandRequest {
   env?: Record<string, string>;
   /** Wall-clock timeout in ms (default 120_000). */
   timeoutMs?: number;
+  /**
+   * Ask for the PLATFORM-FLAVOURED boundary: the platform repository mirrored READ-ONLY (never
+   * writable), so a platform tool can run from where it lives while whatever IT runs stays
+   * contained. Used by the acceptance step, whose harness is the platform's but whose SUBJECT is
+   * the delivered project — model-authored code.
+   *
+   * Only a step that says so gets it, and only when the run has such a boundary configured
+   * (`ctx.sandboxPlatform`). A run with no boundary at all runs open, which is consistent with
+   * what its own record already says (`sandbox: none`).
+   */
+  boundary?: 'platformReadOnly';
 }
 
 /** The shape `runStepCommand` throws for a non-zero/timed-out command. */
@@ -137,7 +148,32 @@ export async function runStepCommand(
   if ((req.shell === undefined) === (req.argv === undefined)) {
     throw new Error('runStepCommand: exactly one of shell/argv is required');
   }
-  // NO BOUNDARY ON THIS SEAM, deliberately — see the doc comment above and ledger #79.
+  // A step that ASKS for the platform-flavoured boundary gets it (ledger #79's open item: the
+  // acceptance step runs the DELIVERED project, so the subject of the check must be contained even
+  // though the check itself is the platform's). Routed before the open path below, and only when
+  // the run really has one.
+  if (req.boundary === 'platformReadOnly' && ctx.sandboxPlatform !== undefined) {
+    const res = await ctx.sandboxPlatform.runStep({
+      ...(req.shell === undefined ? {} : { shell: req.shell }),
+      ...(req.argv === undefined ? {} : { argv: req.argv }),
+      cwd: req.cwd,
+      ...(req.env === undefined ? {} : { env: req.env }),
+      timeoutMs,
+    });
+    if (res.code !== 0) {
+      const err = new Error(
+        res.timedOut ? `command timed out after ${timeoutMs}ms` : `command exited with code ${res.code}`,
+      ) as StepCommandError;
+      err.stdout = res.stdout;
+      err.stderr = res.stderr;
+      err.code = res.code;
+      err.timedOut = res.timedOut;
+      throw err;
+    }
+    return { stdout: res.stdout, stderr: res.stderr };
+  }
+  // NO BOUNDARY ON THIS SEAM FOR EVERYTHING ELSE, deliberately — see the doc comment above and
+  // ledger #79.
   //
   // Every caller here is a workflow-defined command: the platform's own tooling, which lives
   // INSIDE the repository a boundary makes invisible. Confining it confined the platform's
@@ -217,6 +253,11 @@ export interface WorkflowExecutionContext {
    * running its step commands unconfined.
    */
   sandbox?: StepSandbox;
+  /**
+   * The platform-flavoured boundary (project root mirrored read-only). Present for a delivery run;
+   * a step must ASK for it (`StepCommandRequest.boundary`).
+   */
+  sandboxPlatform?: StepSandbox;
   /**
    * The roots the in-process agent tool adapters may touch (ADR-058 S5). The
    * kernel boundary confines a `bash` command; `read`/`write`/`edit`/`ls`/`find`
@@ -1638,6 +1679,10 @@ export async function executeWorkflow(
             argv: ['bash', acceptanceRef],
             cwd: harnessCwd,
             timeoutMs: step.timeoutMs ?? 300000,
+            // The harness is the PLATFORM'S, but its subject is the DELIVERED project: ask for the
+            // boundary that mirrors the platform read-only so the deliverable is contained too
+            // (ledger #79's open item; #68 is why the containing matters).
+            boundary: 'platformReadOnly',
             env: {
               TAKUMI_WORKTREE: worktreePath,
               TAKUMI_PROJECT: ctx.cwd,
@@ -1686,6 +1731,11 @@ export async function executeWorkflow(
           `harness: ${acceptanceRef}`,
           `judge: ${forgedJudgePath === undefined ? '(none forged; a literal harness)' : `${forgedJudgePath} sha256:${shortDigest(forgedJudgeDigest)}`}`,
           `harness cwd: ${harnessCwd}`,
+          `boundary: ${
+            ctx.sandboxPlatform === undefined
+              ? 'none (this run has no boundary)'
+              : `platform read-only (${ctx.sandboxPlatform.id}); the worktree and the judge dir stay read-write`
+          }`,
           `worktree: ${worktreePath}`,
           `accepted head: ${head ?? '(unknown — the judged repository had no resolvable HEAD)'}`,
           `requirement: ${requirementRef} sha256:${shortDigest(digest)}`,

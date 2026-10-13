@@ -248,9 +248,23 @@ function renderSelfTestScript(policy: SandboxPolicy): string {
   }
   lines.push(`[ -d ${shQuote(policy.cwd)} ] && emit cwd-present OK || emit cwd-present FAIL:missing`);
   if (policy.hiddenProbe !== undefined) {
-    lines.push(
-      `[ -e ${shQuote(policy.hiddenProbe)} ] && emit hidden-probe FAIL:visible || emit hidden-probe OK`,
-    );
+    if (policy.platformReadOnly) {
+      // A platform tool step MIRRORS this repository READ-ONLY, so these paths are expected to be
+      // READABLE — asserting they are invisible would fail every such boundary. What must hold
+      // instead is the property ledger #68 actually needed: visible, and NOT writable.
+      const probe = shQuote(policy.hiddenProbe);
+      const writeProbe = shQuote(path.join(policy.cwd, '.takumi-platform-write-probe'));
+      lines.push(
+        `{ [ -r ${probe} ] && emit platform-probe OK; } || emit platform-probe FAIL:not_readable`,
+      );
+      lines.push(
+        `( : > ${writeProbe} ) 2>/dev/null && { rm -f ${writeProbe}; emit platform-write-refused FAIL:writable; } || emit platform-write-refused OK`,
+      );
+    } else {
+      lines.push(
+        `[ -e ${shQuote(policy.hiddenProbe)} ] && emit hidden-probe FAIL:visible || emit hidden-probe OK`,
+      );
+    }
   }
   if (policy.gitRepoProbe !== undefined) {
     lines.push(

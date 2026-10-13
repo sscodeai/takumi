@@ -421,7 +421,7 @@ export function prepareRunSandbox(input: {
   runId: string;
   worktree?: string | undefined;
   staged: SandboxStagedFile[];
-}): { sandbox: StepSandbox; roots: SandboxRoots } {
+}): { sandbox: StepSandbox; platformSandbox?: StepSandbox; roots: SandboxRoots } {
   const judgeRoot = join(input.cwd, '.takumi', 'acceptance', input.runId);
   // Build and validate the policy FIRST: a guard failure must not leave an empty
   // judge directory behind, and the caller turns the throw into an audited refusal.
@@ -436,8 +436,25 @@ export function prepareRunSandbox(input: {
           staged: input.staged,
         });
   mkdirSync(judgeRoot, { recursive: true });
+  // The SECOND flavour (ledger #79): the same delivery, with the platform repository mirrored
+  // READ-ONLY, for the steps whose SUBJECT is the delivered project (the acceptance harness). A run
+  // with no worktree has no separate subject to contain, so it gets no second boundary.
+  const platformSandbox =
+    input.worktree === undefined
+      ? undefined
+      : new UnshareSandbox(
+          buildSandboxPolicy({
+            projectRoot: input.cwd,
+            worktree: input.worktree,
+            judgeDir: judgeRoot,
+            runId: input.runId,
+            staged: input.staged,
+            platformReadOnly: true,
+          }),
+        );
   return {
     sandbox: new UnshareSandbox(policy),
+    ...(platformSandbox === undefined ? {} : { platformSandbox }),
     roots: { rw: [...policy.rw], ro: [...policy.ro], cwd: policy.cwd },
   };
 }
@@ -687,6 +704,7 @@ async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): P
       unsafeOverride: unsafeNoSandboxSet(),
     });
     let sandbox: StepSandbox | undefined;
+    let sandboxPlatform: StepSandbox | undefined;
     let sandboxRoots: SandboxRoots | undefined;
     let sandboxNote = 'none';
     let runId: string | undefined;
@@ -717,6 +735,7 @@ async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): P
           staged: collectStagedRefs(wf, opts.confirmedRequirement, opts.cwd),
         });
         sandbox = prepared.sandbox;
+        sandboxPlatform = prepared.platformSandbox;
         sandboxRoots = prepared.roots;
       } catch (e) {
         const reason = e instanceof SandboxPolicyError ? e.guard : 'policy_error';
@@ -798,6 +817,7 @@ async function runWithRuntime(opts: RunOptions, runtime: AgentRuntimeAdapter): P
         ...(worktreePath === undefined ? {} : { worktree: worktreePath }),
         ...(sandbox === undefined ? {} : { sandbox }),
         ...(sandboxRoots === undefined ? {} : { sandboxRoots }),
+        ...(sandboxPlatform === undefined ? {} : { sandboxPlatform }),
         ...(runId === undefined ? {} : { runId }),
         sandboxNote,
         onApproval: async (req) => {

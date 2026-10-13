@@ -421,3 +421,31 @@ test('boundary: a self-test for a good policy passes and reports every check', a
     scratch.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// A2' — the SAME repository, for a platform tool step: readable, never writable
+// ---------------------------------------------------------------------------
+
+test("boundary (A2'): with platformReadOnly the platform repository is READABLE and still unwritable", async (t) => {
+  if (!(await boundaryOrSkip(t))) return;
+  const scratch = makeScratch();
+  try {
+    const sentinel = path.join(scratch.projectRoot, 'package.json');
+    const command =
+      `test -e ${shQuote(sentinel)} && echo sentinel=visible || echo sentinel=hidden; ` +
+      `echo files=$(ls -A ${shQuote(scratch.projectRoot)} | wc -l); ` +
+      `touch ${shQuote(path.join(scratch.projectRoot, 'evil'))} 2>/dev/null; echo touch_rc=$?; ` +
+      `mkdir ${shQuote(path.join(scratch.projectRoot, 'evil-dir'))} 2>/dev/null; echo mkdir_rc=$?`;
+
+    const sandbox = new UnshareSandbox(barePolicyFor(scratch, { platformReadOnly: true }));
+    const result = await run(sandbox, { shell: command, cwd: scratch.worktree });
+    assert.match(result.stdout, /sentinel=visible/, 'a platform tool step must be able to READ its own repository');
+    assert.match(result.stdout, /files=[1-9]/, 'and see its files');
+    assert.match(result.stdout, /touch_rc=[1-9]/, 'but must NOT be able to write a file into it');
+    assert.match(result.stdout, /mkdir_rc=[1-9]/, 'nor create a directory — ledger #68 in a new shape');
+    assert.equal(existsSync(path.join(scratch.projectRoot, 'evil')), false);
+    assert.equal(existsSync(path.join(scratch.projectRoot, 'evil-dir')), false);
+  } finally {
+    scratch.cleanup();
+  }
+});

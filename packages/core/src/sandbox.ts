@@ -109,6 +109,14 @@ export interface SandboxPolicy {
   rw: string[];
   /** Host roots exposed read-only (the toolchain and `/etc`). */
   ro: string[];
+  /**
+   * True when this boundary is for a PLATFORM TOOL step: the project root is mirrored READ-ONLY so
+   * the platform's own tooling (a `run:` script, the judge forge, the acceptance harness) can run
+   * from where it lives. Default (false) leaves the project root unmounted entirely — the model's
+   * seam, where the platform must not be visible at all. Read-only is the whole distinction: G2
+   * still refuses the project root as a WRITE root, which is the property ledger #68 needed.
+   */
+  platformReadOnly: boolean;
   /** Files copied read-only into `<cwd>`; the only project paths visible. */
   staged: SandboxStagedFile[];
   /** Host path that exists under `cwd` but must be invisible inside. */

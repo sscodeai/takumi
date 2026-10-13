@@ -141,3 +141,22 @@ test('green lands itself: the merge step is the only step that lands a change, a
     );
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// (c) the wait is sized to what it waits FOR (ledger #80)
+// ---------------------------------------------------------------------------------------------
+
+test('green lands itself: await_checks waits long enough for the host pipeline it is waiting for', () => {
+  // Measured 2026-10-12: the demo repository's own pipeline took 307s end to end (queue + run) and
+  // the chain gave up at 303s — four seconds early — refusing to merge a pipeline that then went
+  // green. The bound is the WORKFLOW's choice, so it has to fit the thing it waits for; the
+  // fail-closed direction is unchanged (a pipeline still pending at the bound never lands).
+  const step = stepsOf(realManifest('request-to-delivery')).find((s) => s.type === 'await_checks') as
+    | { waitSeconds?: number }
+    | undefined;
+  assert.ok(step, 'the real manifest has an await_checks step');
+  assert.ok(
+    (step.waitSeconds ?? 0) >= 600,
+    `await_checks waits ${String(step.waitSeconds)}s, below the honest floor for a hosted pipeline (measured: 307s)`,
+  );
+});

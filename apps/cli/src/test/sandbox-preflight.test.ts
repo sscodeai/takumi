@@ -11,6 +11,7 @@ import {
   UNSAFE_NO_SANDBOX_ENV,
   collectStagedRefs,
   decideSandbox,
+  prepareRunSandbox,
   loadConfig,
   runTask,
   unsafeNoSandboxSet,
@@ -338,6 +339,29 @@ test('preflight: the human-only override runs unconfined and is recorded', async
   } finally {
     if (previous === undefined) delete process.env[UNSAFE_NO_SANDBOX_ENV];
     else process.env[UNSAFE_NO_SANDBOX_ENV] = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The wiring for ledger #79's open item, at the level where it is decided: a delivery run builds TWO
+// boundaries — the model's (platform invisible) and the platform tool's (platform mirrored
+// read-only) — and the second is the one the acceptance step asks for.
+//
+// A regression GUARD, not a RED->GREEN: the behaviour arrives with the wiring. What it pins is the
+// distinction, because losing it silently means the acceptance step runs the DELIVERED project open
+// again with nothing saying so.
+test('prepareRunSandbox: a delivery run builds the read-only-platform boundary too', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'takumi-prep-'));
+  try {
+    const worktree = join(dir, 'worktree');
+    mkdirSync(worktree, { recursive: true });
+    const prepared = prepareRunSandbox({ cwd: dir, runId: 'run-prep', worktree, staged: [] });
+    assert.ok(prepared.platformSandbox, 'a delivery run has the platform-flavoured boundary');
+    assert.ok(prepared.sandbox, 'and still has the model one');
+    // A run with no worktree has no separate subject to contain, so it gets no second boundary.
+    const projectOnly = prepareRunSandbox({ cwd: dir, runId: 'run-prep2', worktree: undefined, staged: [] });
+    assert.equal(projectOnly.platformSandbox, undefined);
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

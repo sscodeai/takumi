@@ -175,8 +175,11 @@ export function probeToolchain(opts: SandboxToolchainProbeOptions): SandboxToolc
 // ---------------------------------------------------------------------------
 
 /** G1 — no read-only root may be, or contain, the project root. */
-export function assertReadOnlyRootsSafe(policy: Pick<SandboxPolicy, 'cwd' | 'ro'>): void {
+export function assertReadOnlyRootsSafe(
+  policy: Pick<SandboxPolicy, 'cwd' | 'ro'> & Partial<Pick<SandboxPolicy, 'platformReadOnly'>>,
+): void {
   const cwd = path.resolve(policy.cwd);
+  const platformVisible = policy.platformReadOnly === true;
   for (const root of policy.ro) {
     const resolved = path.resolve(root);
     if (!path.isAbsolute(root)) {
@@ -185,10 +188,21 @@ export function assertReadOnlyRootsSafe(policy: Pick<SandboxPolicy, 'cwd' | 'ro'
     if (resolved === path.sep) {
       throw new SandboxPolicyError('G1', `read-only root "/" would mirror the whole host, including the project`);
     }
-    if (isInside(resolved, cwd)) {
+    if (resolved === cwd) {
+      // A platform tool step may SEE this repository (it lives here), read-only. A step that is not
+      // the platform may not: for it, the project root stays unmounted (ledger #79).
+      if (platformVisible) continue;
       throw new SandboxPolicyError(
         'G1',
-        `read-only root "${resolved}" contains the project root "${cwd}": mirroring it would re-expose the platform repository`,
+        `read-only root "${resolved}" IS the project root "${cwd}": only a platform tool step may mirror the platform repository, and read-only`,
+      );
+    }
+    if (isInside(resolved, cwd)) {
+      // Refused even for a platform tool step: a parent mirror would also re-expose SIBLINGS of the
+      // project (other workspaces, other repositories), which is the leak this guard exists for.
+      throw new SandboxPolicyError(
+        'G1',
+        `read-only root "${resolved}" contains the project root "${cwd}": mirroring it would re-expose the platform repository${platformVisible ? ' and its siblings' : ''}`,
       );
     }
   }
@@ -305,7 +319,8 @@ export function assertMirroredRootUnmasked(policy: Pick<SandboxPolicy, 'cwd' | '
 
 /** Run every guard. Throws `SandboxPolicyError` naming the guard that failed. */
 export function assertSandboxPolicy(
-  policy: Pick<SandboxPolicy, 'cwd' | 'ro' | 'rw' | 'staged' | 'projectIsRoot' | 'runId'>,
+  policy: Pick<SandboxPolicy, 'cwd' | 'ro' | 'rw' | 'staged' | 'projectIsRoot' | 'runId'> &
+    Partial<Pick<SandboxPolicy, 'platformReadOnly'>>,
 ): void {
   if (!path.isAbsolute(policy.cwd)) {
     throw new SandboxPolicyError('G1', `project root "${policy.cwd}" is not an absolute path`);
@@ -333,6 +348,11 @@ export interface SandboxPolicyInput {
   rw?: string[];
   /** Explicit read-only roots; defaults to the probed toolchain. */
   ro?: string[];
+  /**
+   * Mirror the project root READ-ONLY (a platform tool step). Default false: the project root is
+   * not mirrored at all, which is what the model's seam needs.
+   */
+  platformReadOnly?: boolean;
   staged?: SandboxStagedFile[];
   hiddenProbe?: string;
   gitRepoProbe?: string;
@@ -381,7 +401,11 @@ export function buildSandboxPolicy(input: SandboxPolicyInput): SandboxPolicy {
   const rw =
     input.rw ??
     (projectIsRoot ? [cwd] : [worktree as string, ...(judgeDir === undefined ? [] : [judgeDir])]);
-  const ro = input.ro ?? toolchain.roots;
+  const platformReadOnly = input.platformReadOnly === true;
+  const roBase = input.ro ?? toolchain.roots;
+  // The platform root is ADDED, never substituted: a platform tool still needs the toolchain.
+  const ro =
+    platformReadOnly && !roBase.some((r) => path.resolve(r) === cwd) ? [...roBase, cwd] : roBase;
 
   const hiddenProbe =
     input.hiddenProbe ??
@@ -400,6 +424,7 @@ export function buildSandboxPolicy(input: SandboxPolicyInput): SandboxPolicy {
     ...(input.runId === undefined ? {} : { runId: input.runId }),
     rw,
     ro,
+    platformReadOnly,
     staged: input.staged ?? [],
     ...(hiddenProbe === undefined ? {} : { hiddenProbe }),
     ...(gitRepoProbe === undefined ? {} : { gitRepoProbe }),
