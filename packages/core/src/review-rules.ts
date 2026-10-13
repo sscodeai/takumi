@@ -110,6 +110,17 @@ const DEFAULT_TEST_PATTERNS: readonly string[] = [
   '(^|/)conftest\\.py$',
 ];
 
+/**
+ * Paths a DELIVERY may never contain, however it got there. The protected-path rule covers a change to
+ * something that already EXISTED (protection) and deliberately downgrades a CREATED protected path to a
+ * note, because a delivery's worktree starts empty and a stack choice is written down in exactly those
+ * files. A grant is not a stack choice: a delivery has no legitimate reason to create one, and a copy of
+ * the PLATFORM's own authorization inside a target repository is a leak of the platform's internals and of
+ * the operator's identity into a repository this run does not own. Measured 2026-10-13 (round 13,
+ * ledger #87): a delivery did exactly that and the review reported it as a note, so the review passed.
+ */
+const NEVER_DELIVERED_PATTERNS: readonly string[] = ['(^|/)docs/authorizations/'];
+
 const DEFAULT_PROTECTED_PATTERNS: readonly string[] = [
   '(^|/)\\.github/workflows/',
   '(^|/)\\.gitlab-ci\\.ya?ml$',
@@ -342,6 +353,24 @@ export function runReviewRules(input: ReviewInput, rules: ReviewRules = {}): Rev
           : `this path is protected (CI configuration, dependency manifest, container build or takumi's own configuration): a machine must not wave it through, and an agent must not "fix" a legitimate change by reverting it — a human decides`,
         });
     }
+  }
+
+  // --- paths a delivery may never CONTAIN, however it got there (ledger #87) --
+  // Distinct from the protected-path rule above: that one guards a change to something that existed, and
+  // reports a CREATION as a note. This one is about a delivery that creates the platform's own file, and
+  // its severity is `block` because the fix is mechanical — take it out of your delivery — and because no
+  // delivery is legitimately about a grant. A MODIFICATION of one stays a human's call (ADR-045): a person
+  // may legitimately update a grant, and the agent must never be told to revert that.
+  for (const change of input.changes) {
+    if (change.status !== 'added') continue;
+    if (!matchesAny(change.path, compile(NEVER_DELIVERED_PATTERNS))) continue;
+    findings.push({
+      rule: 'never-delivered-path',
+      severity: 'block',
+      path: change.path,
+      detail:
+        'a delivery may never create this path: it is the PLATFORM\'s own artefact, and a copy of it in a target repository leaks the platform\'s internals and the operator\'s identity into a repository this run does not own — remove it from the change set',
+    });
   }
 
   // --- credentials committed in the change (ADR-019) --------------------------
