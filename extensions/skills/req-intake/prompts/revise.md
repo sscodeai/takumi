@@ -27,6 +27,15 @@ replacing the file:
 2. **Add decisions only for failures no decision covers.** The brief marks each failing check. For a
    check that already exercises a decision, the human decides between "the implementation changes" and
    "the answer changes" — do not add a decision for it, and do not change its options silently.
+2b. **You MAY change which SHAPE the document is.** When a failing check is the forge's, and it says
+   `the document declares a record-aggregate check ... whose expectations are recomputed from the records`,
+   the fix is NOT to invent a rounding decision: if this requirement's answer is not an aggregate of a
+   per-row measure, DROP those relations and the aggregate anchor, and declare what actually checks the
+   answer — a `scenario` that runs the delivered tests and reads their report (plus `mutation-detection`
+   when the request is worth it). The intake prompt's "which of the two shapes" section is the rule. A
+   document that keeps a relation needing the record world is refused again for the same reason, and the
+   round is spent for nothing.
+
 3. **Every new decision cites its failure.** Add `fromFeedback: FB-nnn` to each `AMB-nnn` you add. A
    decision that cites a failure the document does not record is refused by the tooling, and rightly so.
 4. **New decisions keep the shape**: 2-4 bounded, mutually exclusive `options`, a `default` that is
