@@ -118,6 +118,64 @@ deliverable:
     timeoutMs: 900000                   # optional: a mutation run is many test runs (default 900000)
 ```
 
+## Which of the two shapes this document is — decide this BEFORE writing
+
+The `deliverable` block is the contract a judge is forged from, and this chain can judge **two shapes of
+answer**. Decide which one the request is about BEFORE you write anything; the rest of this prompt follows
+from that choice.
+
+**Shape A — the answer is an AGGREGATE of a per-row numeric measure.** The request is about records (rows
+with a group key and a number) and its answer is a count / total / mean / min / max per group, plus the
+whole. Declare the record world: `input_format.columns` with exactly one `id` and one `measure`, a `sample`
+of at least three real rows, a per-id output line, a totals line, and the record relations. Rules 9-14
+below describe this shape and the worked example is this shape.
+
+**Shape B — the answer is NOT such an aggregate**: a path length, a hash, a parsed structure, a duration, a
+decision, a file's contents — anything the request does not express as per-group arithmetic over records.
+
+- **Do NOT declare the record world, and do NOT declare `duplicate-resolution`,
+  `malformed-row-accounting`, or an `independent-aggregation` anchor.** Those three recompute their
+  expectations FROM THE RECORDS, so the forge demands the decision that settles how those values ROUND —
+  and a requirement of this shape has nothing to round. Measured 2026-10-13 (round 8): an intake described
+  a shortest-path request with exactly those relations, the forge refused the document, and the repair
+  round was handed an impossible brief twice ("point a relation at the decision that settles rounding").
+- **DO declare a `scenario` that runs the DELIVERED TESTS and reads the report they write**: `report: tap`
+  (or `junit` / `ctrf`) with the `report_path` your command writes. The judge runs that command in the
+  worktree and fails when the report carries a failing line, so the answer is checked by the tests the
+  deliverable ships; put in `expect:` the words a human would read. Add `mutation-detection` (rule 16) when
+  the request is worth it: it is what stops a suite that would also pass a wrong implementation.
+- A Shape B document needs **no `input_format` and no `output_format`**, and its scenario must not use
+  `{csv}`: that placeholder is a fixture generated from a declared world, and this shape declares none.
+  `deliverable.run` is still required — it names the entry point the requirement text must state.
+
+The document in Shape B differs from the example below in exactly one block:
+
+```yaml
+deliverable:
+  run: "bash pathfind.sh {map}"          # the entry point the requirement text also states
+  timeoutMs: 10000
+  scenarios:
+    - id: SCN-001
+      run: "bash run-tests.sh"
+      expect: "the delivered tests pass and assert the shortest path length"
+      report: tap
+      report_path: reports/tests.tap
+      description: "Run the delivered test suite and read its TAP report."
+  relations:
+    - id: REL-001
+      relation: mutation-detection
+      description: "The delivered tests fail when the delivered behaviour is mutated."
+  mutation:
+    run: "npx stryker run --reporters json"
+    report_path: "reports/mutation/mutation.json"
+    format: survivors-json
+    max_survivors: 0
+```
+
+**Do not mix the two shapes.** A record world with a scenario-shaped answer is the document round 8's
+intake wrote for a grid-map request, and it is refused at the gate every time — which costs a round and
+teaches the next repair round nothing.
+
 ## Rules
 
 1. `requirements[]` is never empty for a non-empty request. Use `REQ-nnn`
