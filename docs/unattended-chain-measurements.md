@@ -19,6 +19,8 @@ own state, never from the driver's exit code alone.
 | 5 | `3eb0bcc` (#79: the boundary classified — the model's hands confined, the platform's own tooling open) | **on** (userns; `sandbox` read back from every run record) | 3 | **3 of 3** | none — every record says `sandbox=unshare` |
 | 6 | `26e7e8e` (#79 + #80 + ADR-059: acceptance bounded, wait sized to the host pipeline) | **on** | 3 | **3 of 3** | none — every record says `sandbox=unshare` |
 
+| 7 | `b3b559c` (a FRESH target repository: 1 commit, a README) | **on** | 3 | **0 of 3** | none reached the delivery leg. The credential is a fine-grained PAT, selected per repository, and the fresh target was not in its list: all three died at `publish` with `remote: Permission to sscodeai/takumi-delivery-demo-2.git denied to sscodeai`. The IMPLEMENTATION leg was **3 of 3 from scratch** (entry point, sources, tests, docs — the delivery agent's own words in earlier rounds were "the branch ALREADY carried a complete delivery, so the work was to VERIFY it") and the forged judge accepted all three (ledger #81) |
+| 8 | `7972d62` (#81: the preflight probes the delivery target) | **on** | 3 | **0 of 3** | a DIFFERENT FAMILY of requirement — the length of the shortest path over a grid map. Every run died at `intake_shape` in ~7 minutes, **before any implementation was paid for**, because this chain's judge checks a deliverable's ANSWER with exactly one relation (an aggregate of a per-row numeric measure) and a path length is not one (ledger #82) |
 ## Round 4 in detail (15:43Z, 2026-10-12)
 
 | Run | run id | wall clock | Pull request | What it took |
@@ -77,6 +79,51 @@ applied to**. The platform's own tooling lives inside the repository the boundar
 | 2 | `wf-13b5ea67` | 1,276 s | [#31](https://github.com/sscodeai/takumi-delivery-demo/pull/31) merged | `sandbox=unshare`, `accepted=true` |
 | 3 | `wf-66f0e7ca` | 1,575 s | [#33](https://github.com/sscodeai/takumi-delivery-demo/pull/33) merged | `sandbox=unshare`, `accepted=true` |
 
+## Round 8 in detail (06:12Z, 2026-10-13) — a different FAMILY, and the chain says no
+
+| Run | run id | wall clock | Outcome | Where it stopped |
+|---|---|---|---|---|
+| 1 | `wf-74c1978d` | 429 s | refused | `intake_shape`: `quality_gate FAILED (1 failing)` → `ACCEPT_VERDICT: fail` |
+| 2 | `wf-b932b10f` | 402 s | refused | same, after the repair round rewrote the document |
+| 3 | `wf-1478fd10` | 461 s | refused | same; `attempt 1 of 2: refused` |
+
+The three runs are one finding: the intake wrote a good document (**7 requirements, 3 decisions, all
+of the graph described** — 4-neighbour movement, moves-vs-cells, the malformed-record policy, and an
+`independent-aggregation` anchor that means "an independent breadth-first recomputation matches the
+tool's result line", which is the RIGHT intent for a path length), the shape gate passed 5 of its 6
+checks, and `judge_forge` refused the sixth:
+
+```
+the judge in this chain checks a deliverable's ANSWER with exactly one relation,
+independent-aggregation: an independent recomputation of an AGGREGATE of a per-row numeric measure,
+which needs the decision that settles how those values are rounded. ... IF IT DOES NOT — its answer is
+not an aggregate of a per-row measure, so nothing in it is ever rounded — then NO REPAIR TO THE
+DOCUMENT CAN CLOSE THIS: the judge layer implements one family of answer ...
+```
+
+Until ledger #82 that sentence read "…so the judge would have to assume how **salaries** are rounded:
+point a relation or anchor at the decision that settles it", which sent the repair round to add a
+rounding decision a shortest-path requirement cannot have — twice per run, six times across the round —
+and the run then reported the INTAKE as the fault.
+
+**What this round is worth.** It is the first round that is not about the CSV-summary family, and it
+answers the largest gap named in `docs/limitations.yaml` — not with a success rate but with a boundary:
+this chain cannot judge that family, it refuses in ~7 minutes without spending a cent on an
+implementation, and (after #82) it says so. A failure that is cheap, closed, attributed to the right
+layer and named in a file a machine reads is a better outcome than a lucky pass; and it is the reason
+no "3 of 3" above should be read as a statement about requirements in general.
+
+## Round 7 in detail — the implementation leg generalises, the delivery leg was blocked
+
+`sscodeai/takumi-delivery-demo-2`, created for the round: public, one commit, a README, nothing else.
+Same sentence as rounds 4–6, same model, boundary ON. All three runs wrote a complete deliverable from
+scratch — `summary.sh`, `src/`, `tests/`, `run-tests.sh`, `docs/`, three commits (`cc581b2` initial,
+`8830fb7` feat, `782ec6c` test) — passed their own quality gate, and were ACCEPTED by their forged
+judge; then all three died at `publish` because the delivery credential (a fine-grained PAT) had not
+been selected for the new repository. Ledger #81 turned that into a preflight check, so the wasted
+1.5 hours cannot repeat. **The end-to-end number for a fresh repository still does not exist** — it
+needs the operator to add that repository to the token's list, which is a GitHub UI action.
+
 ## What the numbers say, including what they do not
 
 1. **3 of 3 is three runs.** Three rounds have now ended in 3 of 3 (rounds 4, 5 and 6), which is
@@ -106,6 +153,16 @@ applied to**. The platform's own tooling lives inside the repository the boundar
    in `docs/limitations.yaml`, which a test enforces (ADR-059).
 6. **Failures here are cheap and closed.** Every failure in every round stopped the chain and named
    the step; none of them merged anything, and none of them edited a document to get past a check.
+
+7. **The judge has ONE family of answer, and that is the real bound on every number above**
+   (rounds 7 and 8, ledgers #81 and #82). A deliverable's ANSWER is checked by exactly one relation,
+   `independent-aggregation`: an independent recomputation of an aggregate of a per-row numeric measure
+   with a rounding rule. The other relations check the INPUT (`duplicate-resolution`,
+   `malformed-row-accounting`) or the SHAPE of the report (`row-order-invariance`, `additivity`). So
+   "3 of 3" means **3 of 3 for that family** — every round measured here is the same sentence — and
+   round 8 is what happens outside it: 0 of 3, refused at intake in ~7 minutes, before any spend, and
+   (after #82) with the boundary named instead of a document defect. **This is the largest named gap,
+   and it is not a code gap: it is the judge's vocabulary.**
 
 ## Reproducing a round
 

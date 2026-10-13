@@ -508,8 +508,23 @@ EOF
 
 # The judge computes its expectations from the fixture, so it needs to know how values are rounded.
 # Assuming one would be the judge inventing a requirement: refuse instead.
+#
+# WHAT THIS REFUSAL IS — and whose boundary it names (ledger #82). Exactly ONE relation in this forge can
+# check a deliverable's ANSWER: `independent-aggregation`, which it implements as an independent
+# recomputation of an AGGREGATE of a per-row numeric measure, and which therefore needs the decision that
+# settles how those values are rounded. `row-order-invariance` and `additivity` are properties of a
+# REPORT and `duplicate-resolution` / `malformed-row-accounting` are properties of the INPUT: none of them
+# can say whether a number is right. So a document whose answer is NOT such an aggregate has no answer
+# this chain can check.
+#
+# The old message told its reader the opposite: "...how salaries are rounded: point a relation or anchor
+# at the decision that settles it". Measured 2026-10-13 (round 8): a shortest-path requirement produced
+# six identical refusals across three runs (~7 minutes each, before any implementation was paid for),
+# every one of them sending the repair round to add a rounding decision that requirement cannot have —
+# and the run came back reporting the INTAKE as the fault. Fail-closed is right; "fixable by editing the
+# document" is a claim about a DIFFERENT situation, and the two must not share one sentence.
 if [ -z "$ROUNDING_MODE" ]; then
-  refuse "no declared relation or anchor exercises a rounding decision, so the judge would have to assume how salaries are rounded: point a relation or anchor at the decision that settles it (\"decides: AMB-nnn\")"
+  refuse "the judge in this chain checks a deliverable's ANSWER with exactly one relation, independent-aggregation: an independent recomputation of an AGGREGATE of a per-row numeric measure, which needs the decision that settles how those values are rounded. This document declares no decision that settles one. IF THIS DELIVERABLE HAS SUCH AN AGGREGATE: point the anchor at the decision that settles its rounding (\"decides: AMB-nnn\") — an option nobody chose cannot be invented, because that would be a decision the judge made for you. IF IT DOES NOT — its answer is not an aggregate of a per-row measure, so nothing in it is ever rounded — then NO REPAIR TO THE DOCUMENT CAN CLOSE THIS: the judge layer implements one family of answer, and the chain refuses rather than build a judge that would pass any number it was handed (ledger #82)"
 fi
 
 blocking_note() { [ "$(amb_blocking "$1")" = "true" ] && printf ' (BLOCKING — the forge should have refused)' || printf ' (non-blocking decision)'; }

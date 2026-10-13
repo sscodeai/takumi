@@ -94,3 +94,41 @@ and without it the mode is only as honest as the harness.
 - The forge is a file in this repository, so a future slice can swap the vocabulary (or a
   cross-family model generating relations) without touching the engine: the seam is
   `forgeRef` + the `deliverable` contract.
+
+## The one family of answer this judge can check
+
+Measured 2026-10-13 (round 8, ledger #82). The chain was pointed at a requirement from a DIFFERENT
+family — "the length of the shortest path from S to E on a grid map, or 'unreachable' when the exit
+cannot be reached" — and three unattended runs died at intake, about 7 minutes each, **before any
+implementation was paid for**, with one refusal repeated twice per run:
+
+```
+no declared relation or anchor exercises a rounding decision, so the judge would have to assume how
+salaries are rounded: point a relation or anchor at the decision that settles it ("decides: AMB-nnn")
+```
+
+The refusal was RIGHT. The deliverable's ANSWER is checked by exactly one relation,
+`independent-aggregation`, and this forge implements that relation as an independent recomputation of
+an AGGREGATE of a per-row numeric measure — which needs the decision that settles how those values are
+rounded. `row-order-invariance` and `additivity` are properties of a REPORT, and
+`duplicate-resolution` and `malformed-row-accounting` are properties of the INPUT: none of them can say
+whether a number is right. A shortest path is never rounded, so **no repair to that document could have
+added the decision the message asked for**. The intake's own repair round was handed that impossible
+brief twice, and the run came back reporting the intake as the fault.
+
+**The boundary, stated plainly: this chain can judge a deliverable whose answer is an aggregate of a
+per-row numeric measure with a rounding rule, and nothing else.** That is the honest reading of the
+"3 of 3" figures in `docs/unattended-chain-measurements.md`: they are 3 of 3 **for a family**, not for
+requirements in general, and rounds 7–8 are what that distinction costs when it is ignored.
+
+Three properties of this failure are worth keeping. It cost 7 minutes and **no model spend on an
+implementation**, because the gate asks the judge's own question before the confirmation (ADR-056). It
+was **fail-closed**: the chain refused to build a judge that would have passed any number it was handed
+(the alternative — a judge that checks only input handling and never the answer — is exactly the
+decoration ADR-026 exists to prevent). And its stated reason was **wrong in a way that wasted the
+repair loop**, which is the defect that was fixed: the refusal now names the judge's own relation, says
+which of the two situations applies, and carries the boundary in the machine-read inventory
+(`docs/limitations.yaml`).
+
+What is still wrong is the ATTRIBUTION: a capability boundary of the judge layer is reported as
+`step intake_attempt: failed`, which is the next slice, not this one.

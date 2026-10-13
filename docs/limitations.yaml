@@ -46,3 +46,19 @@ limitations:
       contains: "repaired"
     closes_when: >-
       the first attempt produces a confirmable document at a measured rate the operator accepts.
+
+  - id: the-judge-checks-one-family-of-answer
+    what: >-
+      The forged judge checks a deliverable's ANSWER with exactly one relation, independent-aggregation:
+      an independent recomputation of an aggregate of a per-row numeric measure, which needs the decision
+      that settles how those values are rounded. A requirement whose answer is not such an aggregate can
+      be implemented but not judged, so this chain refuses it at intake rather than build a judge that
+      would pass any number it was handed. Measured 2026-10-13, round 8: 0 of 3, ~7 minutes each, before
+      any implementation was paid for.
+    where:
+      file: docs/adr/026-a-forged-judge.md
+      contains: "## The one family of answer this judge can check"
+    closes_when: >-
+      the forge can check an answer that is not an aggregate of a per-row measure — a second relation
+      implemented for another family, or relations built from the document rather than from a fixed
+      vocabulary (ADR-026 already names that seam).

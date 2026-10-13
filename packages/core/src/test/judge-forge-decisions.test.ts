@@ -266,7 +266,7 @@ test('decisions: a checkedAs the forge cannot act on is refused, with the modes 
 });
 
 test('decisions: the judge refuses to guess a rounding rule the document never decides', () => {
-  // AMB-004 stays non-blocking and nothing exercises it, so no relation can say how salaries round.
+  // AMB-004 stays non-blocking and nothing exercises it, so no relation can say how the values round.
   // The forge must refuse rather than invent one: an invented rounding rule is an invented requirement.
   const doc = requirement({ dropDecides: 'AMB-004' }).replace(
     ['    checkedAs: half-up', '    blocking: true'].join('\n'),
@@ -275,7 +275,34 @@ test('decisions: the judge refuses to guess a rounding rule the document never d
   const f = forge(doc);
   try {
     assert.notEqual(f.forge.status, 0, 'the forge must refuse');
-    assert.match(f.forge.out, /would have to assume how salaries are rounded/);
+    assert.match(f.forge.out, /needs the decision that settles how those values are rounded/);
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('decisions: a document whose ANSWER this judge cannot recompute is refused as a JUDGE boundary', () => {
+  // Measured 2026-10-13 (round 8, ledger #82). Three unattended runs died at intake, ~7 minutes each
+  // (before any implementation was paid for) with one refusal, twice per run:
+  //
+  //   no declared relation or anchor exercises a rounding decision, so the judge would have to assume
+  //   how salaries are rounded: point a relation or anchor at the decision that settles it
+  //
+  // The requirement was a shortest path over a grid map. A path length is not rounded, and no repair to
+  // that document could ever produce a rounding decision — so the repair round was handed an impossible
+  // brief twice, and the run came back blaming the intake. The REFUSAL is right (this forge cannot check
+  // that answer); the REASON was wrong: it named a document defect where the situation is a boundary of
+  // the judge layer, and "salaries" is a word from the family the forge happens to implement.
+  // Read from the SOURCE tree: tsc does not copy YAML into dist, and a test that reads its fixture
+  // from next to the compiled JS passes locally and dies on CI (the fixture is simply not there).
+  const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+  const doc = readFileSync(join(REPO, 'packages/core/src/test/fixtures/graph-requirement.yaml'), 'utf8');
+  const f = forge(doc);
+  try {
+    assert.notEqual(f.forge.status, 0, 'the forge must refuse: it cannot check this answer');
+    assert.match(f.forge.out, /independent-aggregation/);
+    assert.match(f.forge.out, /no repair to the document can close this/i);
+    assert.doesNotMatch(f.forge.out, /salaries/);
   } finally {
     cleanup(f);
   }
