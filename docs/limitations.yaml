@@ -47,18 +47,18 @@ limitations:
     closes_when: >-
       the first attempt produces a confirmable document at a measured rate the operator accepts.
 
-  - id: the-judge-checks-one-family-of-answer
+  - id: the-world-assembly-is-demanded-of-every-document
     what: >-
-      The forged judge checks a deliverable's ANSWER with exactly one relation, independent-aggregation:
-      an independent recomputation of an aggregate of a per-row numeric measure, which needs the decision
-      that settles how those values are rounded. A requirement whose answer is not such an aggregate can
-      be implemented but not judged, so this chain refuses it at intake rather than build a judge that
-      would pass any number it was handed. Measured 2026-10-13, round 8: 0 of 3, ~7 minutes each, before
-      any implementation was paid for.
+      The forge demands a declared world — input_format.columns, input_format.sample, a per-id output line
+      and a totals line — from EVERY requirement document, including documents whose only checks are a
+      scenario (a command plus the report it writes) and a report property, which use none of it. Measured
+      2026-10-13, round 8: the demand refused a document the forge could otherwise fully implement, with a
+      message about output roles, and it is the same defect one layer above ledger #83 (the rounding rule,
+      fixed there): a demand made on behalf of the record-aggregate family, of documents outside it.
     where:
       file: docs/adr/026-a-forged-judge.md
-      contains: "## The one family of answer this judge can check"
+      contains: "## What this judge can check, and the two demands made of every document"
     closes_when: >-
-      the forge can check an answer that is not an aggregate of a per-row measure — a second relation
-      implemented for another family, or relations built from the document rather than from a fixed
-      vocabulary (ADR-026 already names that seam).
+      the world assembly is emitted only for the checks that consume it — a document declaring a scenario
+      and a report property, with no declared world, gets a judge written
+      (packages/core/src/test/fixtures/graph-requirement-with-scenario-no-world.yaml is the case).

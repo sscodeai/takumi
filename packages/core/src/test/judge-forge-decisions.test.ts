@@ -16,6 +16,10 @@ import { fileURLToPath } from 'node:url';
 // flip cases below, and they are the reason this file exists.
 
 const FORGE = join(dirname(fileURLToPath(import.meta.url)), '../../../../extensions/judges/metamorphic-forge.sh');
+const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+/** A requirement document from the fixtures directory. Read from SOURCE: tsc does not copy YAML into
+ *  dist, so a test that reads it next to the compiled JS passes locally and dies on CI. */
+const fixture = (name: string): string => readFileSync(join(REPO, 'packages/core/src/test/fixtures', name), 'utf8');
 
 /** The human wording of each mode, so a document reads like a document and a judge still knows the meaning. */
 const PROSE: Record<string, string> = {
@@ -275,34 +279,82 @@ test('decisions: the judge refuses to guess a rounding rule the document never d
   const f = forge(doc);
   try {
     assert.notEqual(f.forge.status, 0, 'the forge must refuse');
-    assert.match(f.forge.out, /needs the decision that settles how those values are rounded/);
+    assert.match(f.forge.out, /no decision in this document settles it/);
   } finally {
     cleanup(f);
   }
 });
 
-test('decisions: a document whose ANSWER this judge cannot recompute is refused as a JUDGE boundary', () => {
-  // Measured 2026-10-13 (round 8, ledger #82). Three unattended runs died at intake, ~7 minutes each
-  // (before any implementation was paid for) with one refusal, twice per run:
+test('decisions: a document that declares the record-aggregate checks is told what would fit instead', () => {
+  // Measured 2026-10-13 (round 8, ledger #82). Three unattended runs died at intake with one refusal,
+  // twice per run:
   //
   //   no declared relation or anchor exercises a rounding decision, so the judge would have to assume
   //   how salaries are rounded: point a relation or anchor at the decision that settles it
   //
-  // The requirement was a shortest path over a grid map. A path length is not rounded, and no repair to
-  // that document could ever produce a rounding decision — so the repair round was handed an impossible
-  // brief twice, and the run came back blaming the intake. The REFUSAL is right (this forge cannot check
-  // that answer); the REASON was wrong: it named a document defect where the situation is a boundary of
-  // the judge layer, and "salaries" is a word from the family the forge happens to implement.
-  // Read from the SOURCE tree: tsc does not copy YAML into dist, and a test that reads its fixture
-  // from next to the compiled JS passes locally and dies on CI (the fixture is simply not there).
-  const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
-  const doc = readFileSync(join(REPO, 'packages/core/src/test/fixtures/graph-requirement.yaml'), 'utf8');
-  const f = forge(doc);
+  // The requirement was a shortest path over a grid map — a family that is NOT a record aggregate — and
+  // the intake had described it with relations from the record family (a malformed-row relation, an
+  // aggregate anchor). Those relations' expectations are recomputed from the records, so the judge does
+  // need a rounding rule for them; a path length is never rounded, so the second half of the old
+  // sentence sent the repair round after a decision this requirement cannot have. What the brief must
+  // say instead is the OTHER way out, and it exists: declare a scenario instead (ledger #83).
+  const f = forge(fixture('graph-requirement.yaml'));
   try {
-    assert.notEqual(f.forge.status, 0, 'the forge must refuse: it cannot check this answer');
-    assert.match(f.forge.out, /independent-aggregation/);
-    assert.match(f.forge.out, /no repair to the document can close this/i);
+    assert.notEqual(f.forge.status, 0, 'the forge must refuse: it cannot parameterise this answer');
+    assert.match(f.forge.out, /independent-aggregation|malformed-row-accounting/, 'it names the check that needs the rule');
+    assert.match(f.forge.out, /scenario/, 'and names the declaration that would fit this deliverable instead');
+    assert.match(f.forge.out, /mutation-detection/);
     assert.doesNotMatch(f.forge.out, /salaries/);
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('decisions: a document that checks its answer with a scenario IS forgeable — no rounding rule needed', () => {
+  // The decisive case (ledger #83). This document declares `row-order-invariance` (a property of the
+  // REPORT) and a CLI scenario (run the delivered tests, read the TAP report they write). Neither uses
+  // the aggregate recomputation, so neither needs a rounding rule — and the old unconditional check
+  // refused it anyway, with a message about aggregates and rounding. A document this forge can fully
+  // implement must produce a judge, and that is what this pins.
+  const f = forge(fixture('graph-requirement-with-scenario.yaml'));
+  try {
+    assert.equal(f.forge.status, 0, `the forge must write a judge: ${f.forge.out}`);
+    assert.ok(existsSync(join(f.judgeDir, 'judge.sh')), 'a judge was written');
+    assert.match(readFileSync(join(f.judgeDir, 'judge.sh'), 'utf8'), /SCN-001/, 'the declared scenario is in it');
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('decisions: a document where NOTHING can say whether the answer is right is refused, naming the two ways', () => {
+  const f = forge(fixture('graph-requirement-no-answer-check.yaml'));
+  try {
+    assert.notEqual(f.forge.status, 0, 'a judge that cannot check the answer is decoration');
+    assert.match(f.forge.out, /scenario/, 'name the mechanism that would check it');
+    assert.match(f.forge.out, /mutation-detection/);
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('decisions: a scenario-only document with no declared world is refused by the ASSEMBLY (ledger #84)', (t) => {
+  // The second unconditional demand, pinned as a KNOWN DEFECT rather than as a contract: nothing in this
+  // document uses the declared world, so the assembly should not be emitted for it at all. It is refused
+  // today, and this test says WHICH refusal it must be — the world assembly (#84), not the rounding rule
+  // (#83, fixed) — and skips itself the moment a judge is written (HD-lang's known-failure-list shape,
+  // mechanism only).
+  const f = forge(fixture('graph-requirement-with-scenario-no-world.yaml'));
+  try {
+    if (f.forge.status === 0) {
+      t.skip('ledger #84 is fixed: the world assembly no longer refuses a document whose checks need no world');
+      return;
+    }
+    assert.match(
+      f.forge.out,
+      /declares no input_format\.columns|carrying a role "id"/,
+      'the refusal must be the world assembly (#84) — the columns demand is the first of them',
+    );
+    assert.doesNotMatch(f.forge.out, /rounded/, 'the rounding rule must not apply to a document that needs none (#83 is fixed)');
   } finally {
     cleanup(f);
   }

@@ -95,40 +95,55 @@ and without it the mode is only as honest as the harness.
   cross-family model generating relations) without touching the engine: the seam is
   `forgeRef` + the `deliverable` contract.
 
-## The one family of answer this judge can check
+## What this judge can check, and the two demands made of every document
 
-Measured 2026-10-13 (round 8, ledger #82). The chain was pointed at a requirement from a DIFFERENT
-family — "the length of the shortest path from S to E on a grid map, or 'unreachable' when the exit
-cannot be reached" — and three unattended runs died at intake, about 7 minutes each, **before any
-implementation was paid for**, with one refusal repeated twice per run:
+Round 8 (2026-10-13) pointed the chain at a requirement from a DIFFERENT family — "the length of the
+shortest path from S to E on a grid map, or 'unreachable' when the exit cannot be reached" — and three
+unattended runs died at intake, about 7 minutes each, before any implementation was paid for. The
+refusal was
 
 ```
 no declared relation or anchor exercises a rounding decision, so the judge would have to assume how
 salaries are rounded: point a relation or anchor at the decision that settles it ("decides: AMB-nnn")
 ```
 
-The refusal was RIGHT. The deliverable's ANSWER is checked by exactly one relation,
-`independent-aggregation`, and this forge implements that relation as an independent recomputation of
-an AGGREGATE of a per-row numeric measure — which needs the decision that settles how those values are
-rounded. `row-order-invariance` and `additivity` are properties of a REPORT, and
-`duplicate-resolution` and `malformed-row-accounting` are properties of the INPUT: none of them can say
-whether a number is right. A shortest path is never rounded, so **no repair to that document could have
-added the decision the message asked for**. The intake's own repair round was handed that impossible
-brief twice, and the run came back reporting the intake as the fault.
+and it cost two further findings, in this order.
 
-**The boundary, stated plainly: this chain can judge a deliverable whose answer is an aggregate of a
-per-row numeric measure with a rounding rule, and nothing else.** That is the honest reading of the
-"3 of 3" figures in `docs/unattended-chain-measurements.md`: they are 3 of 3 **for a family**, not for
-requirements in general, and rounds 7–8 are what that distinction costs when it is ignored.
+**One: the sentence was wrong (ledger #82).** It named a document defect where the situation was the
+judge's own capability, and it sent the repair round after a rounding decision that a path length can
+never have. The refusal was already fail-closed — the chain would not build a judge that passes any
+number it was handed — but a refusal that misdescribes its own cause wastes the loop that reads it.
+
+**Two: the demand was asked of a document that did not need it (ledger #83).** `independent-aggregation`,
+`duplicate-resolution` and `malformed-row-accounting` recompute their expectations FROM THE RECORDS and
+therefore need the rounding rule. `row-order-invariance` and `additivity` are properties of a report, and
+a declared SCENARIO (ADR-035) runs a command and reads the report or the HTTP surface the document names —
+none of those three touches the rounding parameter. The check asked "did you declare an aggregate?" where
+the question is "can I parameterise what I am about to emit?", so a document declaring a report property
+plus a CLI scenario was refused, with a message about aggregates, and **no judge was written for it at
+all** — measured 2026-10-13 with `packages/core/src/test/fixtures/graph-requirement-with-scenario.yaml`,
+which is now the test that pins the fix. The rounding rule is now required only by the checks that use it,
+and a document where NOTHING can say whether the answer is right is refused with both ways out named.
+
+**So the honest statement of what this judge can check is not "one family".** A judge can be built from:
+
+| Declaration | What it checks | Needs the declared world + rounding? |
+|---|---|---|
+| `independent-aggregation` (relation or differential anchor) | an independent recomputation of an aggregate of a per-row measure | **yes** |
+| `duplicate-resolution`, `malformed-row-accounting` | how the input was handled, against a recomputed expectation | **yes** |
+| `row-order-invariance`, `additivity` | properties of the report | the report shapes |
+| `SCN-nnn` scenario (ADR-035) | a command's exit status, an HTTP surface's status/body, or a declared report (TAP/JUnit/CTRF) | no |
+| `mutation-detection` (ADR-039) | that the delivered tests can fail | no |
+
+**What still limits it, named (ledger #84):** the WORLD ASSEMBLY — `input_format.columns`,
+`input_format.sample`, a per-id output line and a totals line — is demanded of every document, including
+documents whose only checks are a scenario and a report property. That is the same defect as #83 one layer
+up, and it is not yet fixed: `packages/core/src/test/fixtures/graph-requirement-with-scenario-no-world.yaml`
+pins the refusal as a known defect and skips itself when a judge gets written for it. Until then, a
+requirement from outside the record world must declare a world it does not use — which this ADR's own
+principle ("a declaration that is never executed reads as compliance") says is exactly the wrong thing to
+ask for.
 
 Three properties of this failure are worth keeping. It cost 7 minutes and **no model spend on an
-implementation**, because the gate asks the judge's own question before the confirmation (ADR-056). It
-was **fail-closed**: the chain refused to build a judge that would have passed any number it was handed
-(the alternative — a judge that checks only input handling and never the answer — is exactly the
-decoration ADR-026 exists to prevent). And its stated reason was **wrong in a way that wasted the
-repair loop**, which is the defect that was fixed: the refusal now names the judge's own relation, says
-which of the two situations applies, and carries the boundary in the machine-read inventory
-(`docs/limitations.yaml`).
-
-What is still wrong is the ATTRIBUTION: a capability boundary of the judge layer is reported as
-`step intake_attempt: failed`, which is the next slice, not this one.
+implementation**, because the gate asks the judge's own question before the confirmation (ADR-056). It was
+**fail-closed**. And its refusals now name the layer they come from.

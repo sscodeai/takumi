@@ -107,11 +107,14 @@ rounding decision a shortest-path requirement cannot have — twice per run, six
 and the run then reported the INTAKE as the fault.
 
 **What this round is worth.** It is the first round that is not about the CSV-summary family, and it
-answers the largest gap named in `docs/limitations.yaml` — not with a success rate but with a boundary:
-this chain cannot judge that family, it refuses in ~7 minutes without spending a cent on an
-implementation, and (after #82) it says so. A failure that is cheap, closed, attributed to the right
-layer and named in a file a machine reads is a better outcome than a lucky pass; and it is the reason
-no "3 of 3" above should be read as a statement about requirements in general.
+answers the largest gap named in `docs/limitations.yaml` — by exposing two demands the chain makes of
+**every** document (ledgers #83 and #84) rather than by producing a success rate. Until #83 the refusal
+also told its repair round to add a rounding decision, which a path length cannot have, and the round
+came back reporting the INTAKE as the fault; now it names both ways out. #83 is fixed (a document whose
+answer is checked by a scenario gets a judge); #84 — the world assembly — is measured, recorded in the
+machine-read inventory, and pinned by a test that skips itself when it closes. A failure that is cheap,
+closed, attributed to the right layer and written down is a better outcome than a lucky pass, and it is
+why no "3 of 3" above should be read as a statement about requirements in general.
 
 ## Round 7 in detail — the implementation leg generalises, the delivery leg was blocked
 
@@ -154,8 +157,16 @@ needs the operator to add that repository to the token's list, which is a GitHub
 6. **Failures here are cheap and closed.** Every failure in every round stopped the chain and named
    the step; none of them merged anything, and none of them edited a document to get past a check.
 
-7. **The judge has ONE family of answer, and that is the real bound on every number above**
-   (rounds 7 and 8, ledgers #81 and #82). A deliverable's ANSWER is checked by exactly one relation,
+7. **Round 8 aimed at the largest named gap — a requirement from another family — and found two demands
+   the chain makes of every document** (rounds 7 and 8, ledgers #81-#84). It refused in ~7 minutes, before
+   any spend, which is what a wrong-family measurement should cost. But the finding is not "this family
+   cannot be judged": the three relation types that recompute their expectations FROM THE RECORDS need a
+   rounding decision, while a scenario, mutation-detection, `row-order-invariance` and `additivity` need
+   none. #83 removed the rounding demand from the documents that need no rounding rule — a
+   scenario-checked document now gets a judge — and #84 is the same defect one layer up (the world
+   assembly, still open). The honest reading of every "3 of 3" above is therefore: **3 of 3 for the
+   record-aggregate family, with the door to the others opened by #83 and still blocked, for a document
+   that declares no world, by #84.** A deliverable's ANSWER is checked by exactly one relation,
    `independent-aggregation`: an independent recomputation of an aggregate of a per-row numeric measure
    with a rounding rule. The other relations check the INPUT (`duplicate-resolution`,
    `malformed-row-accounting`) or the SHAPE of the report (`row-order-invariance`, `additivity`). So

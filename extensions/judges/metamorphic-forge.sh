@@ -17,7 +17,11 @@
 #   * a `decides:` naming a decision the document does not contain is a REFUSAL;
 #   * a `chosen` value this forge cannot mechanise is a REFUSAL, with the mechanisable values named;
 #   * a decision that would need a rounding rule the document never decides is a REFUSAL, because the
-#     alternative is a judge silently inventing one.
+#     alternative is a judge silently inventing one — and the rule is required ONLY by the checks whose
+#     expectations are recomputed from the records (#83);
+#   * a document that declares no check able to say whether the ANSWER is right is a REFUSAL, and the
+#     refusal names the declarations that would fix it: a scenario, mutation-detection, or an
+#     independent recomputation with its rounding decision.
 #
 # ADR-033 changed WHERE the fixtures come from. Before it, this forge carried the fixture rows and the
 # row-validity predicates inside itself, in one hard-coded employee/department world; a requirement about
@@ -523,8 +527,33 @@ EOF
 # every one of them sending the repair round to add a rounding decision that requirement cannot have —
 # and the run came back reporting the INTAKE as the fault. Fail-closed is right; "fixable by editing the
 # document" is a claim about a DIFFERENT situation, and the two must not share one sentence.
-if [ -z "$ROUNDING_MODE" ]; then
-  refuse "the judge in this chain checks a deliverable's ANSWER with exactly one relation, independent-aggregation: an independent recomputation of an AGGREGATE of a per-row numeric measure, which needs the decision that settles how those values are rounded. This document declares no decision that settles one. IF THIS DELIVERABLE HAS SUCH AN AGGREGATE: point the anchor at the decision that settles its rounding (\"decides: AMB-nnn\") — an option nobody chose cannot be invented, because that would be a decision the judge made for you. IF IT DOES NOT — its answer is not an aggregate of a per-row measure, so nothing in it is ever rounded — then NO REPAIR TO THE DOCUMENT CAN CLOSE THIS: the judge layer implements one family of answer, and the chain refuses rather than build a judge that would pass any number it was handed (ledger #82)"
+# WHAT THE ROUNDING RULE IS FOR, and when the judge may go without one (ledger #83).
+#
+# Three relation types have their EXPECTATIONS recomputed from the records — `independent-aggregation`,
+# `duplicate-resolution` and `malformed-row-accounting` all recompute through `check_report`/`aggregate`
+# — and that recomputation needs the rounding rule. The others do not: `row-order-invariance` and
+# `additivity` are properties of a REPORT, and a scenario (ADR-035) runs a command and reads the report
+# or the HTTP surface the document declares.
+#
+# This check used to demand a rounding rule from EVERY document, and so refused documents this forge can
+# implement completely: measured 2026-10-13, a document declaring a report property and a CLI scenario —
+# neither of which touches the rounding parameter — was refused with a message about aggregates and no
+# judge was written (ledger #83). A check that asks "did you declare an aggregate?" where the question is
+# "can I parameterise what I am about to emit?" produces exactly that: a refusal for a reason that does
+# not apply, whose brief sends the repair round after a decision the requirement cannot have (#82).
+REL_TYPES=" $(printf '%s\n' "$RELATIONS" | awk 'NF { printf "%s ", $2 }') "
+AGG_MACHINERY=0; ANSWER_CHECK=0
+case "$REL_TYPES" in
+  *" independent-aggregation "*|*" duplicate-resolution "*|*" malformed-row-accounting "*) AGG_MACHINERY=1 ;;
+esac
+case "$REL_TYPES" in
+  *" browser-scenario "*|*" mutation-detection "*) ANSWER_CHECK=1 ;;
+esac
+if [ -z "$ROUNDING_MODE" ] && [ "$AGG_MACHINERY" = 1 ]; then
+  refuse "the document declares a record-aggregate check (independent-aggregation / duplicate-resolution / malformed-row-accounting) whose expectations are recomputed from the records, so the judge must know how those values are rounded — and no decision in this document settles it. TWO WAYS OUT. Point the check at the decision that settles its rounding (\"decides: AMB-nnn\") — an option nobody chose cannot be invented, because that would be a decision the judge made for you. And if this deliverable is NOT an aggregate of a per-row measure, so that nothing in it is ever rounded, then those relations are the wrong vocabulary for it: drop them and declare what actually checks this answer — a scenario (run a command and declare the report it writes, or an HTTP surface with expect_status/expect_body) or mutation-detection (ledger #83)"
+fi
+if [ -z "$ROUNDING_MODE" ] && [ "$ANSWER_CHECK" = 0 ]; then
+  refuse "nothing this document declares can say whether its ANSWER is right: row-order-invariance and additivity are properties of a REPORT, and duplicate-resolution / malformed-row-accounting are properties of the INPUT. Declare a check of the answer — a scenario (run a command and declare the report it writes, or an HTTP surface with expect_status/expect_body) or mutation-detection (which proves the delivered tests can fail), or an independent recomputation of an aggregate of a per-row measure together with the decision that settles its rounding — or the judge would pass any number it was handed (ledger #83)"
 fi
 
 blocking_note() { [ "$(amb_blocking "$1")" = "true" ] && printf ' (BLOCKING — the forge should have refused)' || printf ' (non-blocking decision)'; }
