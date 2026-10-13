@@ -25,6 +25,7 @@ own state, never from the driver's exit code alone.
 | 10 | `8be7e142` (#54: the intake is told which of the two shapes it is writing) | **on** | 3 | **0 of 3** | the intake wrote **exactly** the Shape B document the prompt asks for (one scenario, no world) — and every run died at `intake_shape` **check 2**, the front door validator, in **2.5 minutes** each: `the deliverable block declares no input_format`. The forge never saw the document (ledger #85) |
 | 11 | `a5f016d` (#55: the front door demands the world only where it is used) | **on** | 3 | **0 of 3** | **all three got past the intake** (one on the first attempt) and into the delivery side, 30-60 min each: RUN 1 and 3's ATTEMPT 1 passed the gate (620/625 tests) and was refused by the JUDGE (`artifact_acceptance FAILED`), and only their ATTEMPT 2 died at a gate that could not read a test summary (`0 failing over 0 tests`, `shape: unrecognised`, exit 0) — a symptom of the repair round being briefed with the PASSING gate; RUN 2 reached the **forged judge**, which refused the delivery — and the repair round was briefed from a gate that had PASSED (ledger #86) |
 | 12 | `b45068c` (#56: the attempt's verdict and brief come from the JUDGE, not from a gate that passed) | **on** | 3 | **2 of 3** | **the first cross-family round.** The sentence was a graph shortest path over a grid map. Two runs delivered and MERGED it: `wf-cd0be302` 3,297 s (55 min) → demo PR [#46](https://github.com/sscodeai/takumi-delivery-demo/pull/46), and `wf-41f48e83` 767 s (12.8 min) → PR [#48](https://github.com/sscodeai/takumi-delivery-demo/pull/48); both records `accepted=true`, `sandbox=unshare`, every step `done`, both PRs `MERGED`. The failure (RUN 2) is a **legitimate judge rejection**, and its reason is now ON RECORD: `not ok 5 - DEC-001 AMB-001 NOT honoured … (checked by REL-001, which failed)`, `failing checks: REL-001, DEC-001` (ledger #86 fixed the path that used to lose it) |
+| 13 | `37744ab` (#57) | **on** | 3 | **3 of 3** | a **THIRD family**: *a JSON file holding an array of objects → the keys common to every object, sorted, or `none`*. All three delivered and MERGED (`wf-26464daa` 1,174 s → PR [#50](https://github.com/sscodeai/takumi-delivery-demo/pull/50); `wf-eed989e0` 2,429 s → PR [#52](https://github.com/sscodeai/takumi-delivery-demo/pull/52); `wf-69435629` 2,300 s → PR [#54](https://github.com/sscodeai/takumi-delivery-demo/pull/54)), every record `accepted=true sandbox=unshare`. **RUN 2 is the repair path working for a non-record family**: its judge refused attempt 1 (`acceptance FAILED`) and attempt 2 was accepted — what round 12 could not do. RUN 3's attempt 1 failed a quality gate and was repaired too. The round also EXPOSED a leak (ledger #87): RUN 2's delivery copied the platform's `docs/authorizations/SA-002.yaml` into the PUBLIC target repository |
 ## Round 4 in detail (15:43Z, 2026-10-12)
 
 | Run | run id | wall clock | Pull request | What it took |
@@ -199,6 +200,39 @@ and the judge for this family checks the answer through the DELIVERED TESTS' rep
 detection, which is weaker than an independent recomputation: the document declares that, and the chain
 reports it as declared, not as stronger than it is.
 
+## Round 13 in detail (13:34Z, 2026-10-13) — a third family, 3 of 3, and the repair loop working
+
+| Run | run id | wall clock | Pull request | first attempt | record |
+|---|---|---|---|---|---|
+| 1 | `wf-26464daa` | 1,174 s (19.6 min) | [#50](https://github.com/sscodeai/takumi-delivery-demo/pull/50) **MERGED** | accepted | `accepted=true`, `sandbox=unshare` |
+| 2 | `wf-eed989e0` | 2,429 s (40.5 min) | [#52](https://github.com/sscodeai/takumi-delivery-demo/pull/52) **MERGED** | **refused by the judge**, accepted on attempt 2 | `accepted=true`, `sandbox=unshare` |
+| 3 | `wf-69435629` | 2,300 s (38.3 min) | [#54](https://github.com/sscodeai/takumi-delivery-demo/pull/54) **MERGED** | gate failed, accepted on attempt 2 | `accepted=true`, `sandbox=unshare` |
+
+The sentence: *"a small command-line tool that reads a JSON file holding an array of objects and prints the
+keys that appear in every one of those objects, one per line, sorted alphabetically, or the single word
+`none` when no key is common to all of them."* What arrived: `common-keys.sh` + `common_keys.py` +
+`tests/common_keys_tests.py` + a mutation config + a CI workflow. Three families have now been delivered
+end-to-end: the record aggregate (rounds 4-6), a graph shortest path (round 12), and this set operation.
+
+**The repair loop, on a family where the gate is weak.** A scenario-judged delivery's quality gate passes by
+construction (the implementer wrote those tests), so the JUDGE is the only real check — and in round 12 a
+judge refusal could not be repaired. In round 13 RUN 2 it was: attempt 1's judge refused the delivery,
+`#86` handed attempt 2 the judge's own failing checks, and attempt 2 was accepted. RUN 3 shows the same for
+a failed quality gate. **First attempt: 1 of 3. With the loop: 3 of 3** — the same shape as the record
+family, and the first time it holds outside it.
+
+**And the round found a leak (ledger #87).** RUN 2's delivery copied the platform's
+`docs/authorizations/SA-002.yaml` — the standing authorization, the operator's identity inside it,
+byte-identical — into the target repository, which is PUBLIC. An earlier round had already put `SA-001.yaml`
+there. The protected-path rule reports a CREATED protected path as a note (right for `package.json`, wrong
+for a grant), so the review passed. A new rule now BLOCKS any delivery that creates `docs/authorizations/**`
+before the acceptance can run.
+
+**Caveats, unchanged and one new.** The target repository carries the previous deliveries, so the numbers
+above include them; the sample is three families, not requirements in general; and the copies of the two
+authorization files are STILL PUBLIC in that repository — removing them is an operator's decision about a
+repository the chain does not own, and it is named here rather than quietly cleaned.
+
 ## What the numbers say, including what they do not
 
 1. **3 of 3 is three runs.** Three rounds have now ended in 3 of 3 (rounds 4, 5 and 6), which is
@@ -254,6 +288,11 @@ reports it as declared, not as stronger than it is.
    for a world (#55), the step the repair round is briefed from (#56), and the sentence the forge printed
    when it could not parameterise an answer (#52). Failures here keep being about the CHAIN's own contracts,
    and round 12 is the first round where the only failure was the delivery's.
+
+9. **Three families, and the loop is what carries it.** Round 13 delivered a third family 3 of 3 with **1 of 3
+   on the first attempt**: the repair round did the rest, including on a family whose quality gate is weak by
+   construction. The honest summary of this file is therefore not "N of M deliveries" but "N of M deliveries
+   **with a repair loop that is load-bearing**", measured now on two families.
 
 ## Reproducing a round
 
