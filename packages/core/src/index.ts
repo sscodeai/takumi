@@ -63,7 +63,8 @@ export { detectHardFailure, parseTestReport, judgeGate } from './quality-gate.js
 export type { TestReport, TestShape } from './quality-gate.js';
 
 export { ArtifactStore } from './artifact-store.js';
-export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
+export { buildTraceability, renderTraceabilityMatrix, traceabilityCoverage } from './traceability.js';
+export type { TraceabilityCoverage } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
 export {

@@ -207,6 +207,10 @@ limitation, stated rather than implied.
 
 ## What CI cannot verify (added 2026-10-12)
 
+The machine-readable inventory of this boundary's limitations — and of the chain's — is
+`docs/limitations.yaml`, enforced by a test (ADR-059). A limitation stated here but absent there
+fails that test.
+
 GitHub's hosted runners do not permit unprivileged user namespaces: `unshare` fails with
 `unshare: _write_failed_ /proc/self/uid_map: _Operation_not_permitted`. Consequences, stated rather than
 discovered later:
