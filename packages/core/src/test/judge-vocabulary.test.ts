@@ -5,6 +5,7 @@ import { parse as parseYaml } from 'yaml';
 import {
   JUDGE_DECISION_MODES,
   JUDGE_RELATION_VOCABULARY,
+  JUDGE_RELATIONS_THAT_NEED_THE_WORLD,
   parseDecisionBindings,
   parseRequirements,
   validateRequirementDocument,
@@ -72,6 +73,28 @@ test('vocabulary: the intake prompt offers exactly the relations the validator a
   // And it must not offer anything else: the fenced list in the prompt is read as the whole vocabulary.
   const offered = [...prompt.matchAll(/^\s+-\s+`([a-z-]+)`\s{2,}/gm)].map((m) => m[1] ?? '');
   assert.deepEqual(offered.sort(), [...JUDGE_RELATION_VOCABULARY].sort());
+});
+
+// The world requirement exists in the same two languages, and drifted the same way (ledger #85): the
+// forge learned that a scenario needs no declared world (#83, #84) while the front door went on demanding
+// one, so documents the forge could implement were refused before it ever saw them. Measured 2026-10-13:
+// round 10's three runs died at the front door, in 2.5 minutes each, with "declares no input_format".
+
+test('vocabulary: the relations that need the declared world are one list in the validator and the forge', () => {
+  const forge = read('extensions/judges/metamorphic-forge.sh');
+  const line = /WORLD_NEEDED=1 ;;/.exec(forge);
+  assert.ok(line !== null, 'the forge marks its world-consuming relations on one WORLD_NEEDED line');
+  const worldLine = forge.split('\n').find((l) => l.includes('WORLD_NEEDED=1 ;;')) ?? '';
+  const fromForge = [...worldLine.matchAll(/"\s+([a-z-]+)\s+"/g)].map((m) => m[1] ?? '').sort();
+  assert.deepEqual(fromForge, [...JUDGE_RELATIONS_THAT_NEED_THE_WORLD].sort());
+});
+
+test('vocabulary: a document whose checks need no declared world passes the front door (ledger #85)', () => {
+  // One scenario, no input_format, no output_format: a scenario needs neither, and the forge writes a
+  // judge for it (see judge-forge-decisions.test.ts, which RUNS that judge). The front door must agree.
+  const text = read('packages/core/src/test/fixtures/graph-requirement-with-scenario-no-world.yaml');
+  const issues = validateRequirementDocument(text);
+  assert.deepEqual(issues, [], `a world-free document must pass the front door: ${issues.join('; ')}`);
 });
 
 // The `checkedAs` placement defect (ADR-045 §7). `checkedAs` is read from the `AMB-nnn` ENTRY, beside
