@@ -150,3 +150,20 @@ emitted — which is why that test runs the judge instead of asserting that a fi
 Three properties of this failure are worth keeping. It cost 7 minutes and **no model spend on an
 implementation**, because the gate asks the judge's own question before the confirmation (ADR-056). It was
 **fail-closed**. And its refusals now name the layer they come from.
+
+### The same demand lived at the FRONT DOOR (ledger #85)
+
+The world requirement exists in two languages: the TypeScript validator that refuses a document before a
+human confirms it (`validateRequirementDocument`, and therefore `takumi requirement confirm --dry-run`),
+and the shell forge that implements the checks. #83 and #84 taught the FORGE that a scenario needs no
+declared world; the front door went on demanding one from every document.
+
+Measured 2026-10-13, round 10: the intake — having finally been told which of the two shapes it is writing
+— produced exactly the shape the prompt asks for (one scenario, no world), and all three runs were refused
+at `intake_shape` check 2, in 2.5 minutes each, **before the forge ever saw the document**. The chain's two
+doors disagreed about what a document must declare.
+
+The fix is the one this repository already uses for the relation vocabulary (ADR-031): the list lives in
+ONE exported constant, the front door conditions its refusal on it, and a test compares it against the
+forge's own `WORLD_NEEDED` case, so a drift between the doors is a test failure rather than a document that
+passes one and dies at the other.
