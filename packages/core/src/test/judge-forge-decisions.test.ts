@@ -337,24 +337,47 @@ test('decisions: a document where NOTHING can say whether the answer is right is
   }
 });
 
-test('decisions: a scenario-only document with no declared world is refused by the ASSEMBLY (ledger #84)', (t) => {
-  // The second unconditional demand, pinned as a KNOWN DEFECT rather than as a contract: nothing in this
-  // document uses the declared world, so the assembly should not be emitted for it at all. It is refused
-  // today, and this test says WHICH refusal it must be — the world assembly (#84), not the rounding rule
-  // (#83, fixed) — and skips itself the moment a judge is written (HD-lang's known-failure-list shape,
-  // mechanism only).
+test('decisions: a document whose only check is a scenario gets a judge that RUNS, with no world declared', () => {
+  // Ledger #84, FIXED. This document declares one scenario and NO world at all — no columns, no sample,
+  // no output shapes — because a scenario needs none: it runs the command the document names and reads
+  // the report that command writes. The world assembly used to be demanded of every document, so this
+  // one was refused with "declares no input_format.columns" even though nothing it declares uses a world.
+  //
+  // The test RUNS the forged judge in both directions, because a judge nobody ran is a judge nobody has
+  // seen work — and it is what caught the first version of this fix, which gated a shared helper out of
+  // the scenario branch (the judge then reported "the forged judge has no run for this scenario" and
+  // every argument for it was wrong: the world machinery had been cut in the wrong place).
   const f = forge(fixture('graph-requirement-with-scenario-no-world.yaml'));
   try {
-    if (f.forge.status === 0) {
-      t.skip('ledger #84 is fixed: the world assembly no longer refuses a document whose checks need no world');
-      return;
-    }
-    assert.match(
-      f.forge.out,
-      /declares no input_format\.columns|carrying a role "id"/,
-      'the refusal must be the world assembly (#84) — the columns demand is the first of them',
-    );
-    assert.doesNotMatch(f.forge.out, /rounded/, 'the rounding rule must not apply to a document that needs none (#83 is fixed)');
+    assert.equal(f.forge.status, 0, `a judge must be written: ${f.forge.out}`);
+    assert.ok(existsSync(join(f.judgeDir, 'judge.sh')), 'a judge was written');
+    // The delivered tests, exactly as the scenario declares them: `bash run-tests.sh`, TAP at
+    // reports/tests.tap. A wrong answer shows up as a failing line in that report.
+    const delivered = (verdict: 'ok' | 'not ok'): void => {
+      writeFileSync(
+        join(f.worktree, 'run-tests.sh'),
+        [
+          '#!/usr/bin/env bash',
+          'mkdir -p reports',
+          "cat > reports/tests.tap <<'TAP'",
+          `${verdict} 1 - the shortest path on the fixture map is three moves`,
+          '# tests 1',
+          `# pass ${verdict === 'ok' ? 1 : 0}`,
+          `# fail ${verdict === 'ok' ? 0 : 1}`,
+          'TAP',
+          'exit 0',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+    };
+    delivered('not ok');
+    const failing = judge(f);
+    assert.match(failing.out, /ACCEPT_VERDICT: fail/, `a failing delivered report must FAIL the judge: ${failing.out}`);
+    assert.match(failing.out, /SCN-001/);
+    delivered('ok');
+    const passing = judge(f);
+    assert.match(passing.out, /ACCEPT_VERDICT: pass/, `a passing delivered report must pass: ${passing.out}`);
   } finally {
     cleanup(f);
   }

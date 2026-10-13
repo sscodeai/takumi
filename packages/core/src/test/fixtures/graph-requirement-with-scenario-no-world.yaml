@@ -1,9 +1,9 @@
 # THE SECOND UNCONDITIONAL DEMAND, pinned so it cannot be forgotten (ledger #84).
 #
-# This is `graph-requirement-with-scenario.yaml` with the declared WORLD removed (input_format.columns,
-# input_format.sample and the output shapes). Nothing it declares uses that world: `row-order-invariance`
-# is a property of the report, and the scenario runs the delivered tests and reads the TAP report they
-# write. So the judge built from this document would run the scenario and recompute nothing.
+# This document declares ONE check — a scenario that runs the delivered tests and reads the TAP report
+# they write — and no world at all. A scenario needs none: it runs the command the document names and
+# reads the report that command writes. (A `row-order-invariance` relation WOULD need the world: it
+# reshuffles the sample and re-runs the tool, which is why that relation is not here.)
 #
 # It is refused TODAY, with:
 #   the deliverable block declares 0 output line(s) carrying a role "id" where exactly one is needed
@@ -110,10 +110,6 @@ ambiguities:
 deliverable:
   run: "bash pathfind.sh {csv}"
   timeoutMs: 10000
-  relations:
-    - id: REL-002
-      relation: row-order-invariance
-      description: "Reordering the input records leaves the result line unchanged, because records carry an explicit y and are interpreted in ascending y order."
 
   scenarios:
     - id: SCN-001

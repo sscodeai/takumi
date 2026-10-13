@@ -135,14 +135,17 @@ and a document where NOTHING can say whether the answer is right is refused with
 | `SCN-nnn` scenario (ADR-035) | a command's exit status, an HTTP surface's status/body, or a declared report (TAP/JUnit/CTRF) | no |
 | `mutation-detection` (ADR-039) | that the delivered tests can fail | no |
 
-**What still limits it, named (ledger #84):** the WORLD ASSEMBLY — `input_format.columns`,
-`input_format.sample`, a per-id output line and a totals line — is demanded of every document, including
-documents whose only checks are a scenario and a report property. That is the same defect as #83 one layer
-up, and it is not yet fixed: `packages/core/src/test/fixtures/graph-requirement-with-scenario-no-world.yaml`
-pins the refusal as a known defect and skips itself when a judge gets written for it. Until then, a
-requirement from outside the record world must declare a world it does not use — which this ADR's own
-principle ("a declaration that is never executed reads as compliance") says is exactly the wrong thing to
-ask for.
+**What limited it, and was fixed the same day (ledger #84):** the WORLD ASSEMBLY —
+`input_format.columns`, `input_format.sample`, a per-id output line and a totals line — was demanded of
+every document, so a document whose only check is a scenario and which needs none of it was refused. That
+is the same defect as #83 one layer up, and it is now closed: the assembly, the fixtures it generates and
+the machinery that reads them are emitted only for the checks that consume them (the five world relations),
+while the scenario and mutation branches get a judge of their own. Measured:
+`packages/core/src/test/fixtures/graph-requirement-with-scenario-no-world.yaml` — one scenario, no world —
+produces a 364-line judge, and the test RUNS it both ways: a failing line in the delivered tests' TAP
+report fails the judge, a clean report passes it. The first attempt at that fix gated a shared helper
+(`subst`, `alloc_port`) into the world half and the scenario branch called a function that was never
+emitted — which is why that test runs the judge instead of asserting that a file exists.
 
 Three properties of this failure are worth keeping. It cost 7 minutes and **no model spend on an
 implementation**, because the gate asks the judge's own question before the confirmation (ADR-056). It was

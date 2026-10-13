@@ -46,19 +46,3 @@ limitations:
       contains: "repaired"
     closes_when: >-
       the first attempt produces a confirmable document at a measured rate the operator accepts.
-
-  - id: the-world-assembly-is-demanded-of-every-document
-    what: >-
-      The forge demands a declared world — input_format.columns, input_format.sample, a per-id output line
-      and a totals line — from EVERY requirement document, including documents whose only checks are a
-      scenario (a command plus the report it writes) and a report property, which use none of it. Measured
-      2026-10-13, round 8: the demand refused a document the forge could otherwise fully implement, with a
-      message about output roles, and it is the same defect one layer above ledger #83 (the rounding rule,
-      fixed there): a demand made on behalf of the record-aggregate family, of documents outside it.
-    where:
-      file: docs/adr/026-a-forged-judge.md
-      contains: "## What this judge can check, and the two demands made of every document"
-    closes_when: >-
-      the world assembly is emitted only for the checks that consume it — a document declaring a scenario
-      and a report property, with no declared world, gets a judge written
-      (packages/core/src/test/fixtures/graph-requirement-with-scenario-no-world.yaml is the case).
