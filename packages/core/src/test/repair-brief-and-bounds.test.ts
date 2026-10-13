@@ -96,6 +96,15 @@ echo "ACCEPT_VERDICT: fail"
 exit 1
 `;
 
+/** A quality gate that PASSES: in a scenario-judged delivery the delivered tests do just that. */
+const PASSING_GATE = `#!/usr/bin/env bash
+echo "ok 1 - the delivered tests pass"
+echo "# tests 1"
+echo "# pass 1"
+echo "# fail 0"
+exit 0
+`;
+
 /** A forge that cannot build a judge from the document — a DOCUMENT-level refusal, by construction. */
 const REFUSING_FORGE = `#!/usr/bin/env bash
 echo "the deliverable block declares 0 output line(s) that are neither a per-id line nor a skipped line, where exactly one totals line is needed" >&2
@@ -305,4 +314,46 @@ test('a repair sub-workflow whose verdict is a SHAPE GATE still repairs (no acce
   } finally {
     rmSync(p.dir, { recursive: true, force: true });
   }
+});
+
+test('an attempt its JUDGE refused is briefed from the judge, not from a gate that passed', async () => {
+  // Measured 2026-10-13 (round 11, ledger #86). A Shape B delivery's quality gate PASSED — "0 failing over
+  // 592 tests", the delivered project's own suite, which the implementer wrote — and its forged judge
+  // REFUSED the delivery. The engine took the attempt's verdict from the FIRST step that is an acceptance or
+  // a quality gate, and the delivery attempt declares BOTH, with `quality_gate` before
+  // `artifact_acceptance`. So the next attempt was handed "quality_gate PASSED: 0 failing over 592 tests"
+  // as its brief: NOTHING to repair. It spent 30 minutes and timed out, and the run record showed the
+  // passing gate where the judge's verdict should have been — which is also why the judge's reason was
+  // nowhere to be found afterwards.
+  const p = project();
+  writeFileSync(join(p.dir, 'passing-gate.sh'), PASSING_GATE, { mode: 0o755 });
+  const sub: WorkflowDefinition = {
+    name: 'the-attempt',
+    version: '0.1.0',
+    description: '',
+    steps: [
+      { id: 'implementation', type: 'agent', prompt: 'Attempt {repairRound}. Brief:\n{repairFailures}\n— end.', timeoutMs: 600000 },
+      { id: 'quality_gate', type: 'quality_gate', prompt: 'bash passing-gate.sh', dependsOn: ['implementation'], timeoutMs: 120000 },
+      {
+        id: 'artifact_acceptance',
+        type: 'acceptance',
+        requirementRef: 'docs/requirements/feature.yaml',
+        acceptanceRef: join(p.dir, 'harness.sh'),
+        dependsOn: ['quality_gate'],
+      },
+    ],
+  };
+  const res = await run(p, sub, () => {
+    /* never repaired */
+  });
+
+  assert.equal(res.status, 'failed');
+  assert.equal(res.prompts.length, 2, 'the second attempt is made');
+  assert.match(
+    res.prompts[1] ?? '',
+    /not ok 1 - REL-001 additivity: the totals do not add up/,
+    'the brief must be the JUDGE\'s failing check',
+  );
+  assert.doesNotMatch(res.prompts[1] ?? '', /the delivered tests pass/, 'a gate that PASSED is not a brief');
+  assert.match(res.step.summary, /REL-001 additivity: the totals do not add up/, 'and the record carries it too');
 });

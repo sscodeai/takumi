@@ -1132,9 +1132,17 @@ export async function executeWorkflow(
           // The attempt's verdict: an `acceptance` OR a `quality_gate` (see the guard above). Both end in
           // TAP and both name their failing checks, which is what a repair round needs and all it needs.
           const verdictType = (id: string): string | undefined => sub.steps.find((d) => d.id === id)?.type;
-          const acceptance = res.steps.find(
-            (s) => verdictType(s.stepId) === 'acceptance' || verdictType(s.stepId) === 'quality_gate',
-          );
+          // WHICH STEP IS THE ATTEMPT'S VERDICT, WHEN IT DECLARES BOTH (ledger #86). The delivery attempt
+          // has a `quality_gate` over the delivered project's OWN tests AND the forged `acceptance`, and the
+          // acceptance is the authority: it is the check the DOCUMENT declared, while in a scenario-judged
+          // delivery the gate passes by construction (the implementer wrote those tests). Taking the first
+          // match made the gate the verdict, so an attempt its JUDGE refused was briefed to the next round
+          // as "quality_gate PASSED: 0 failing over 592 tests" — nothing to repair. Measured 2026-10-13:
+          // the repair round then spent 30 minutes and timed out, and the run record showed the passing gate
+          // where the judge's verdict belonged, so the judge's reason was nowhere to be found afterwards.
+          // The intake's attempt declares NO acceptance (ADR-057), so its shape gate stays its verdict.
+          const pickVerdict = (kind: string) => res.steps.find((s) => verdictType(s.stepId) === kind);
+          const acceptance = pickVerdict('acceptance') ?? pickVerdict('quality_gate');
           // THE BRIEF COMES FROM THE STEP THAT FAILED, when the acceptance never ran. The acceptance is
           // SKIPPED while any step it depends on fails, so on the round after an upstream refusal its
           // summary is empty and the next attempt would be handed "a judge which reported nothing has told
