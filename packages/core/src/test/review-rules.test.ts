@@ -191,6 +191,29 @@ test('a delivery may not edit or revoke the authorization that let it run (ADR-0
   }
 });
 
+test('a delivery may not CREATE an authorization, and that is the AGENT\'s work, not a note (ledger #87)', () => {
+  // Measured 2026-10-13 (round 13): a delivery agent CREATED `docs/authorizations/SA-002.yaml` — the
+  // PLATFORM's standing authorization, the operator's identity inside it — as part of its own delivery
+  // into a PUBLIC target repository. The protected-path rule above downgrades a CREATED protected path to
+  // a note, which is right for a stack choice (the delivery's worktree starts empty, so package.json and
+  // a CI workflow are written down there) and exactly wrong for a grant. So the file was reported as a
+  // note, the review passed, and a copy of the platform's grant is now public.
+  //
+  // The severity is `block`, not `human`: the fix is mechanical — take it out of your delivery — and a
+  // delivery has NO legitimate reason to contain a grant. A MODIFICATION stays a human's call (ADR-045):
+  // a person may legitimately update a grant, and the agent must never be told to revert that.
+  const created = runReviewRules(input(change('docs/authorizations/SA-002.yaml', null, 'id: SA-002\n', 'added')));
+  const finding = created.find((f) => f.rule === 'never-delivered-path');
+  assert.ok(finding, 'a created authorization must be reported by its own rule');
+  assert.equal(finding.severity, 'block', 'the agent must take it out of the delivery before it can merge');
+  assert.equal(hasBlockingFinding(created), true);
+
+  const modified = runReviewRules(
+    input(change('docs/authorizations/SA-001.yaml', 'id: SA-001\n', 'id: SA-001\nrevoked: true\n')),
+  );
+  assert.equal(hasBlockingFinding(modified), false, 'a modification stays a human\'s decision, never a revert order');
+});
+
 test('protected paths and test patterns are configurable', () => {
   const custom = runReviewRules(input(change('infra/terraform.tf', 'a', 'b')), {
     protectedPaths: ['(^|/)infra/'],
