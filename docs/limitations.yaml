@@ -1,0 +1,48 @@
+# Named limitations of the unattended chain — MACHINE-READ, not a journal.
+#
+# Why this file exists: limitations used to be stated only in prose (an ADR's "Named limitations"
+# section, a ledger row). Prose rots in BOTH directions: a limitation that has been closed sits
+# there looking current, and a limitation stated in an ADR need not appear anywhere a machine reads.
+# The test beside this file enforces the three rules that make it an inventory:
+#
+#   1. every entry names WHERE it is stated, and that text really is there;
+#   2. every entry states when it CLOSES (a limitation nobody can close is a design, not a gap);
+#   3. an entry whose `closes_when_path` EXISTS must be DELETED — a closed limitation left in the
+#      list is a lie in the other direction.
+#
+# Shapes borrowed from a spec-suite repository (mechanism only: that repository carries NO licence
+# at all, so not one line of its code may be taken): a known-defect list a TEST consumes, and a
+# pass / fail / UNSUPPORTED third state.
+
+limitations:
+  - id: ci-cannot-verify-the-boundary
+    what: >-
+      GitHub-hosted runners refuse unprivileged user namespaces, so the boundary's kernel tests skip
+      in CI: a green CI says nothing about the boundary.
+    where:
+      file: docs/adr/058-a-delivery-runs-inside-a-boundary.md
+      contains: "## What CI cannot verify"
+    closes_when: >-
+      a CI runner grants unprivileged user namespaces (the tests then stop skipping, and the skip
+      becomes a failure).
+
+  - id: deliverable-can-read-the-platform
+    what: >-
+      The acceptance step's subject — the delivered project — runs inside the read-only-platform
+      boundary: it cannot WRITE this repository, but it can READ it.
+    where:
+      file: docs/adr/058-a-delivery-runs-inside-a-boundary.md
+      contains: "still READ it — the platform is mirrored for that step, not hidden"
+    closes_when: >-
+      the platform is hidden from the acceptance harness without hiding the harness's own scripts —
+      the shape that produced ledger #75.
+
+  - id: intake-reliability
+    what: >-
+      The intake is REPAIRED, not made reliable: a bad document costs another attempt instead of
+      losing the run, and the first-attempt rate is not something the chain claims.
+    where:
+      file: docs/adr/057-the-intake-is-repaired-not-thrown-away.md
+      contains: "repaired"
+    closes_when: >-
+      the first attempt produces a confirmable document at a measured rate the operator accepts.
