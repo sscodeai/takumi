@@ -38,8 +38,9 @@ replacing the file:
    (ADR-028), so a decision you cannot bind is a decision that will stop the run.
 6. **Do not invent options the machine cannot mechanise.** A relation can only decide answers it knows
    how to test. The forge's vocabulary today covers: which duplicate row wins (`duplicate-resolution`),
-   what a malformed row does (`malformed-row-accounting`), and how salaries are rounded
-   (`independent-aggregation`). If the failure needs an answer outside that vocabulary, do not pretend:
+   what a malformed row does (`malformed-row-accounting`), and how the values of a per-row numeric
+   measure are rounded (`independent-aggregation` — the one relation that checks the ANSWER, and the
+   reason a requirement whose answer is not such an aggregate cannot be judged here at all). If the failure needs an answer outside that vocabulary, do not pretend:
    propose the decision, and put the boundary in the requirement text so a human sees what is checked
    and what is not.
 
