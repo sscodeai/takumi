@@ -21,6 +21,9 @@ own state, never from the driver's exit code alone.
 
 | 7 | `b3b559c` (a FRESH target repository: 1 commit, a README) | **on** | 3 | **0 of 3** | none reached the delivery leg. The credential is a fine-grained PAT, selected per repository, and the fresh target was not in its list: all three died at `publish` with `remote: Permission to sscodeai/takumi-delivery-demo-2.git denied to sscodeai`. The IMPLEMENTATION leg was **3 of 3 from scratch** (entry point, sources, tests, docs — the delivery agent's own words in earlier rounds were "the branch ALREADY carried a complete delivery, so the work was to VERIFY it") and the forged judge accepted all three (ledger #81) |
 | 8 | `7972d62` (#81: the preflight probes the delivery target) | **on** | 3 | **0 of 3** | a DIFFERENT FAMILY of requirement — the length of the shortest path over a grid map. Every run died at `intake_shape` in ~7 minutes, **before any implementation was paid for**, because this chain's judge checks a deliverable's ANSWER with exactly one relation (an aggregate of a per-row numeric measure) and a path length is not one (ledger #82) |
+| 9 | `99b4e66` (#52: rounding asked only of the checks that need it) | **on** | 3 | **0 of 3** | the same sentence and the same refusal as round 8, ~7 min each: the intake still described a graph requirement with record-family relations, and the repair round — handed the two ways out in words — added `mutation-detection` ON TOP of them instead of replacing them (ledger #83's condition was fixed; the document was the problem) |
+| 10 | `8be7e142` (#54: the intake is told which of the two shapes it is writing) | **on** | 3 | **0 of 3** | the intake wrote **exactly** the Shape B document the prompt asks for (one scenario, no world) — and every run died at `intake_shape` **check 2**, the front door validator, in **2.5 minutes** each: `the deliverable block declares no input_format`. The forge never saw the document (ledger #85) |
+| 11 | `a5f016d` (#55: the front door demands the world only where it is used) | **on** | 3 | **0 of 3** | **all three got past the intake** (one on the first attempt) and into the delivery side, 30-60 min each: RUN 1 and 3 died at a delivery quality gate that could not read a test summary (`0 failing over 0 tests`, `shape: unrecognised`, exit 0) after the delivery had genuinely been written; RUN 2 reached the **forged judge**, which refused the delivery — and the repair round was briefed from a gate that had PASSED (ledger #86) |
 ## Round 4 in detail (15:43Z, 2026-10-12)
 
 | Run | run id | wall clock | Pull request | What it took |
@@ -126,6 +129,36 @@ judge; then all three died at `publish` because the delivery credential (a fine-
 been selected for the new repository. Ledger #81 turned that into a preflight check, so the wasted
 1.5 hours cannot repeat. **The end-to-end number for a fresh repository still does not exist** — it
 needs the operator to add that repository to the token's list, which is a GitHub UI action.
+
+## Rounds 9-11: the intake wall, the front door, and the delivery side
+
+Three rounds, one requirement family outside the record world, one door fixed each time. The rate did not
+move (0 of 3, 0 of 3, 0 of 3) and the WALL moved three times, which is the useful part:
+
+1. **Round 9 — the intake cannot write a document for a family it was never told about.** Asked for the
+   length of the shortest path on a grid map, it wrote a record world it invented (`row_index:id,
+   row_text:other,open_cells:measure`), declared `malformed-row-accounting` / `duplicate-resolution` and an
+   `independent-aggregation` anchor, and the forge refused it (correctly: those relations need a rounding
+   decision). Handed the two ways out, the repair round added a mechanism on top of them. Fixed by telling
+   the intake which of the TWO SHAPES it is writing (#54).
+2. **Round 10 — the front door. 2.5 minutes per run, the fastest failures so far.** The intake wrote
+   exactly the Shape B document the prompt asks for, and the TypeScript validator — which had not learned
+   what the forge learned in #83/#84 — refused it for having no declared world. Fixed by sharing one list
+   between the two doors, with a drift test (#55, ledger #85).
+3. **Round 11 — the delivery side: the first round that IMPLEMENTED anything for this family.** All three
+   runs got past the intake; the deliveries ran 30-60 minutes; RUN 1 and 3 died at a quality gate that
+   could not read a test summary, and RUN 2 reached the forged judge.  Both are delivery-side findings
+   (ledger #86 for the second).
+
+**What round 11 delivers that no earlier round did:** a non-record requirement reached the implementation
+and, in one run, the forged judge — the acceptance step ran the delivered artifact and returned a verdict.
+The remaining failures are about EVIDENCE: which test command the gate runs, and which step's output the
+repair round is briefed from.
+
+**Two measurement caveats, stated rather than hidden.** The target repository carries the PREVIOUS
+deliverable, so a quality gate that runs "the project's tests" runs both suites (620, 592 and 625 tests in
+round 11's three runs) — the number in the gate output is not the new deliverable's suite alone. And the
+one-family sample is still one family: three rounds of it now, with three different walls.
 
 ## What the numbers say, including what they do not
 
