@@ -29,6 +29,47 @@ fail() { printf 'PREFLIGHT FAIL: %s\n' "$*" >&2; exit 3; }
 # second instead of killing three runs.
 # NOTE: the exit status is read from the CONTENT, not from `$?`: after a pipeline `$?` is the
 # status of `head`, which is always 0 — a guard that can never fire is worse than no guard.
+# THE DELIVERY TARGET MUST BE WRITABLE BY THE CREDENTIAL THE RUN WILL USE.
+#
+# Measured 2026-10-13 (ledger #81): three runs (1.5 h) implemented a deliverable FROM SCRATCH against
+# a fresh repository, passed their own quality gates, and were ACCEPTED by their forged judges — and
+# then all three died at `publish` with
+#   remote: Permission to sscodeai/takumi-delivery-demo-2.git denied to sscodeai.
+# A fine-grained PAT is scoped to explicitly selected repositories, so a target that is not in that
+# list is unusable — a fact that costs nothing to check and 1.5 h to discover.
+delivery_repo() {
+  # An EXPLICITLY SET variable wins even when empty: a test (or a caller with nothing to deliver to)
+  # sets TAKUMI_DELIVERY_REPO='' to skip the target check hermetically, instead of inheriting whatever
+  # the operator's gitignored takumi.local.yaml happens to point at.
+  if [ -n "${TAKUMI_DELIVERY_REPO+set}" ]; then printf '%s' "$TAKUMI_DELIVERY_REPO"; return; fi
+  for f in takumi.local.yaml takumi.yaml; do
+    [ -f "$f" ] || continue
+    line=$(awk '/^delivery:/{d=1;next} d&&/^[^ ]/{d=0} d&&/^[[:space:]]+repo:/{print $2;exit}' "$f")
+    [ -n "$line" ] && { printf '%s' "$line"; return; }
+  done
+}
+delivery_branch() {
+  awk '/^delivery:/{d=1;next} d&&/^[^ ]/{d=0} d&&/^[[:space:]]+baseBranch:/{print $2;exit}' takumi.local.yaml 2>/dev/null || printf 'main'
+}
+REPO=$(delivery_repo)
+if [ -n "$REPO" ]; then
+  # A DRY-RUN PUSH, because the cheap API answer LIES here. `gh api repos/<r> --jq .permissions.push`
+  # returned `true` for a repository this credential cannot push to — that field describes the USER's
+  # permission, not what a fine-grained token was SELECTED for. Measured 2026-10-13: that false
+  # positive would have passed the very case this check exists for. A dry-run push exercises the
+  # credential and the transport the `publish` step actually uses, and it writes NOTHING on the host.
+  # No credential appears on the command line: the helper is the same one the chain pushes with.
+  probe_ref=refs/heads/takumi-preflight-probe
+  if push_output=$(git -c credential.helper=store push --dry-run --quiet "https://github.com/$REPO.git" "HEAD:$probe_ref" 2>&1); then
+    printf 'PREFLIGHT ok: a push to the delivery target %s is accepted by the host (dry run)\n' "$REPO"
+  else
+    fail "a push to $REPO was REFUSED by the host: ${push_output##*$'\n'}. A fine-grained token only reaches the repositories SELECTED for it, and this one is not in that list — add it, or point delivery.repo at a repository this credential already covers. Refused BEFORE an implementation is paid for (ledger #81)"
+  fi
+  BASE=$(delivery_branch); BASE=${BASE:-main}
+  GH_TOKEN="${GITHUB_TOKEN:-}" gh api "repos/$REPO/branches/$BASE" --jq '.name' >/dev/null 2>&1 \
+    || fail "the delivery target $REPO has no base branch \"$BASE\" (delivery.baseBranch): the chain would publish onto a branch the host does not have"
+fi
+
 keys=$(node -e "import(process.argv[1]).then(m=>console.log(Object.keys(m).join(','))).catch(e=>{console.log('IMPORT_FAILED: '+e.message);process.exit(1)})" "$PI_DIST" 2>&1 | head -1)
 case "$keys" in
   IMPORT_FAILED:*) fail "the pi runtime does not load: ${keys#IMPORT_FAILED: }" ;;
