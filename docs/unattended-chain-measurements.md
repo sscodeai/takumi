@@ -164,9 +164,10 @@ needs the operator to add that repository to the token's list, which is a GitHub
    rounding decision, while a scenario, mutation-detection, `row-order-invariance` and `additivity` need
    none. #83 removed the rounding demand from the documents that need no rounding rule — a
    scenario-checked document now gets a judge — and #84 is the same defect one layer up (the world
-   assembly, still open). The honest reading of every "3 of 3" above is therefore: **3 of 3 for the
-   record-aggregate family, with the door to the others opened by #83 and still blocked, for a document
-   that declares no world, by #84.** A deliverable's ANSWER is checked by exactly one relation,
+   assembly). Both were fixed the same day (#83, #84), so the honest reading of every "3 of 3" above is:
+   **3 of 3 for the record-aggregate family, with the door to the others opened** — a document whose only
+   check is a scenario now gets a judge, with or without a declared world. Whether a requirement from
+   another family now survives the WHOLE chain is a separate measurement, and it has not been made yet. A deliverable's ANSWER is checked by exactly one relation,
    `independent-aggregation`: an independent recomputation of an aggregate of a per-row numeric measure
    with a rounding rule. The other relations check the INPUT (`duplicate-resolution`,
    `malformed-row-accounting`) or the SHAPE of the report (`row-order-invariance`, `additivity`). So
