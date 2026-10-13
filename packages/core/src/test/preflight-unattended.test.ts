@@ -62,8 +62,21 @@ test('the preflight refuses a delivery target this credential cannot push to (le
   // describes the USER's permission, not what the token was selected for, and it returned true for
   // exactly the repository this test proves unusable. torvalds/linux is never pushable by this
   // credential, and `--dry-run` writes nothing on the host.
-  const r = preflight({ TAKUMI_UNSAFE_NO_SANDBOX: '', TAKUMI_DELIVERY_REPO: 'torvalds/linux' });
-  assert.equal(r.status, 3, `${r.stdout}${r.stderr}`);
-  assert.match(`${r.stdout}${r.stderr}`, /REFUSED by the host/);
-  assert.match(`${r.stdout}${r.stderr}`, /SELECTED for it/);
+  //
+  // The test brings its OWN runtime. The preflight checks the MACHINE before the TARGET, and
+  // runtimes/pi is not built on CI (it needs the unpublished SDK), so without a fixture this test
+  // never reached the check it is named after: it passed locally, where dist exists, and on CI it
+  // failed with 'the pi runtime dist is missing' — a test whose outcome depends on machine state is
+  // not a test of the target check. (Same family as #69-#73: local green, CI red.)
+  const dir = mkdtempSync(join(tmpdir(), 'pf-target-'));
+  const runtime = join(dir, 'index.js');
+  writeFileSync(runtime, 'export const PiRuntimeAdapter = class {};\n');
+  try {
+    const r = preflight({ TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'torvalds/linux' });
+    assert.equal(r.status, 3, `${r.stdout}${r.stderr}`);
+    assert.match(`${r.stdout}${r.stderr}`, /REFUSED by the host/);
+    assert.match(`${r.stdout}${r.stderr}`, /SELECTED for it/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
