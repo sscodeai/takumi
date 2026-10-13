@@ -23,7 +23,8 @@ own state, never from the driver's exit code alone.
 | 8 | `7972d62` (#81: the preflight probes the delivery target) | **on** | 3 | **0 of 3** | a DIFFERENT FAMILY of requirement — the length of the shortest path over a grid map. Every run died at `intake_shape` in ~7 minutes, **before any implementation was paid for**, because this chain's judge checks a deliverable's ANSWER with exactly one relation (an aggregate of a per-row numeric measure) and a path length is not one (ledger #82) |
 | 9 | `99b4e66` (#52: rounding asked only of the checks that need it) | **on** | 3 | **0 of 3** | the same sentence and the same refusal as round 8, ~7 min each: the intake still described a graph requirement with record-family relations, and the repair round — handed the two ways out in words — added `mutation-detection` ON TOP of them instead of replacing them (ledger #83's condition was fixed; the document was the problem) |
 | 10 | `8be7e142` (#54: the intake is told which of the two shapes it is writing) | **on** | 3 | **0 of 3** | the intake wrote **exactly** the Shape B document the prompt asks for (one scenario, no world) — and every run died at `intake_shape` **check 2**, the front door validator, in **2.5 minutes** each: `the deliverable block declares no input_format`. The forge never saw the document (ledger #85) |
-| 11 | `a5f016d` (#55: the front door demands the world only where it is used) | **on** | 3 | **0 of 3** | **all three got past the intake** (one on the first attempt) and into the delivery side, 30-60 min each: RUN 1 and 3 died at a delivery quality gate that could not read a test summary (`0 failing over 0 tests`, `shape: unrecognised`, exit 0) after the delivery had genuinely been written; RUN 2 reached the **forged judge**, which refused the delivery — and the repair round was briefed from a gate that had PASSED (ledger #86) |
+| 11 | `a5f016d` (#55: the front door demands the world only where it is used) | **on** | 3 | **0 of 3** | **all three got past the intake** (one on the first attempt) and into the delivery side, 30-60 min each: RUN 1 and 3's ATTEMPT 1 passed the gate (620/625 tests) and was refused by the JUDGE (`artifact_acceptance FAILED`), and only their ATTEMPT 2 died at a gate that could not read a test summary (`0 failing over 0 tests`, `shape: unrecognised`, exit 0) — a symptom of the repair round being briefed with the PASSING gate; RUN 2 reached the **forged judge**, which refused the delivery — and the repair round was briefed from a gate that had PASSED (ledger #86) |
+| 12 | `b45068c` (#56: the attempt's verdict and brief come from the JUDGE, not from a gate that passed) | **on** | 3 | **2 of 3** | **the first cross-family round.** The sentence was a graph shortest path over a grid map. Two runs delivered and MERGED it: `wf-cd0be302` 3,297 s (55 min) → demo PR [#46](https://github.com/sscodeai/takumi-delivery-demo/pull/46), and `wf-41f48e83` 767 s (12.8 min) → PR [#48](https://github.com/sscodeai/takumi-delivery-demo/pull/48); both records `accepted=true`, `sandbox=unshare`, every step `done`, both PRs `MERGED`. The failure (RUN 2) is a **legitimate judge rejection**, and its reason is now ON RECORD: `not ok 5 - DEC-001 AMB-001 NOT honoured … (checked by REL-001, which failed)`, `failing checks: REL-001, DEC-001` (ledger #86 fixed the path that used to lose it) |
 ## Round 4 in detail (15:43Z, 2026-10-12)
 
 | Run | run id | wall clock | Pull request | What it took |
@@ -160,6 +161,44 @@ deliverable, so a quality gate that runs "the project's tests" runs both suites 
 round 11's three runs) — the number in the gate output is not the new deliverable's suite alone. And the
 one-family sample is still one family: three rounds of it now, with three different walls.
 
+## Round 12 in detail (11:35Z, 2026-10-13) — a requirement from ANOTHER family, delivered
+
+| Run | run id | wall clock | Pull request | record |
+|---|---|---|---|---|
+| 1 | `wf-cd0be302` | 3,297 s (55 min) | [#46](https://github.com/sscodeai/takumi-delivery-demo/pull/46) **MERGED** | `accepted=true`, `sandbox=unshare`, every step `done` |
+| 2 | `wf-…` | 2,388 s (40 min) | none — the judge refused it twice | `accepted=false`; failing checks `REL-001, DEC-001` |
+| 3 | `wf-41f48e83` | 767 s (12.8 min) | [#48](https://github.com/sscodeai/takumi-delivery-demo/pull/48) **MERGED** | `accepted=true`, `sandbox=unshare`, every step `done` |
+
+The sentence was the same one rounds 8–11 could not get past: *"a small command-line tool that reads a
+grid map from a text file (walls `#`, free cells `.`, one `S` and one `E`) and prints the length of the
+shortest path … or `unreachable`"*. What arrived in the target repository: `pathfind.sh` + `pathfind.py` +
+`tests/pathfind_tests.py` + `mutation/` + `run-tests.sh` + a CI workflow + the confirmed requirement
+document — implemented, tested, judged, published, and merged, with nobody at the keyboard.
+
+**Where each round's failure had been, and where it is now:**
+
+| Round | The wall | Fixed by |
+|---|---|---|
+| 9 | the intake described a graph requirement with invented record-family relations | #54 (the intake is told which of the two shapes it is writing) |
+| 10 | the front door demanded a declared world the forge no longer required | #55 (one shared list, drift-tested) |
+| 11 | the repair round was briefed from a quality gate that had PASSED, so an attempt its judge refused was told there was nothing to repair — and the judge's reason was in no record at all | #56 (the acceptance is the verdict whenever there is one) |
+| 12 | **nothing structural.** One run's delivery was refused by its judge, for a reason the record now carries: `DEC-001 AMB-001 NOT honoured … checked by REL-001, which failed` | — |
+
+**Round 11's detail, corrected.** Its row above says RUN 1 and 3 died at a delivery quality gate; the
+event sequence says something more precise, and it matters for what was fixed. In RUN 1, ATTEMPT 1 ran
+`implementation → unit_and_integration_tests → quality_gate PASSED (620 tests) → rule_review →
+judge_forge → artifact_acceptance FAILED` — the judge refused the delivery — and only ATTEMPT 2's gate
+failed with `0 failing over 0 tests, shape: unrecognised`. The unreadable gate was a SYMPTOM: the repair
+round had been briefed with the passing gate, so it changed the test runner without knowing what the judge
+objected to. Both are ledger #86, and round 12 is the round that shows the fix working.
+
+**What this does NOT show.** Two merged deliveries of ONE non-record requirement, on a target repository
+that already carried a previous deliverable: the second success reused what the first merged. The sample
+is now two families (the record aggregate, and this scenario-judged CLI), not "requirements in general" —
+and the judge for this family checks the answer through the DELIVERED TESTS' report plus mutation
+detection, which is weaker than an independent recomputation: the document declares that, and the chain
+reports it as declared, not as stronger than it is.
+
 ## What the numbers say, including what they do not
 
 1. **3 of 3 is three runs.** Three rounds have now ended in 3 of 3 (rounds 4, 5 and 6), which is
@@ -208,6 +247,13 @@ one-family sample is still one family: three rounds of it now, with three differ
    round 8 is what happens outside it: 0 of 3, refused at intake in ~7 minutes, before any spend, and
    (after #82) with the boundary named instead of a document defect. **This is the largest named gap,
    and it is not a code gap: it is the judge's vocabulary.**
+
+8. **The chain has delivered a requirement from a second family** (round 12, ledgers #83-#86): a graph
+   shortest path, implemented, judged, published and merged — twice. It took four walls to get there, one
+   per round, and none of them was the requirement: the intake's vocabulary (#54), the front door's demand
+   for a world (#55), the step the repair round is briefed from (#56), and the sentence the forge printed
+   when it could not parameterise an answer (#52). Failures here keep being about the CHAIN's own contracts,
+   and round 12 is the first round where the only failure was the delivery's.
 
 ## Reproducing a round
 
