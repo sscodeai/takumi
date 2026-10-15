@@ -13,6 +13,8 @@ import {
   runRecordPath,
   summarizeRuns,
   type RunRecord,
+  type SandboxRoots,
+  type StepSandbox,
   type WorkflowDefinition,
 } from '../index.js';
 import { TestRuntime } from '../test-utils.js';
@@ -354,6 +356,144 @@ test('run record: a document with no confirmation block reads as digest-only, no
     assert.equal(confirmation?.method, null);
     assert.equal(confirmation?.authorization, null);
     assert.deepEqual(confirmation?.defaulted, []);
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// WHICH BOUNDARY WAS IN FORCE (ledger #88)
+//
+// `sandbox: unshare` conflated three properties, and reading it as "the model's hands were
+// contained" is exactly the mistake the stale pi artifact recorded. The AGENT's-tools boundary is
+// DERIVED from what the runtime reports it did, never asserted from configuration — the engine
+// supplies `sandbox` + `sandboxRoots`, but only the runtime turns them into confined tools.
+// ---------------------------------------------------------------------------------------------
+
+/** A runtime that reports it built a confined session — the pi adapter's contract, without importing pi. */
+class ConfiningTestRuntime extends TestRuntime {
+  agentToolBoundary(): 'confined' | 'open' {
+    return 'confined';
+  }
+}
+
+const STUB_SANDBOX: StepSandbox = {
+  id: 'stub',
+  runStep: async () => ({ stdout: '', stderr: '', code: 0, timedOut: false }),
+  close: async () => {},
+};
+
+const ROOTS = (dir: string): SandboxRoots => ({ rw: [dir], ro: [], cwd: dir });
+
+test('run record: a confined runtime names the agent-tools boundary, derived from what it reported', async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'boundary-confined',
+      version: '0.1.0',
+      description: 'one agent step',
+      steps: [{ id: 'impl', type: 'agent', prompt: 'implement it' }],
+    };
+    const res = await executeWorkflow(wf, {
+      ...c.exec,
+      runtime: new ConfiningTestRuntime(() => 'done', { capabilities: ['streaming'], maxParallelTasks: 4 }, 'pi'),
+      sandbox: STUB_SANDBOX,
+      sandboxRoots: ROOTS(c.dir),
+    });
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    assert.equal(record.boundaries?.agentTools, 'confined');
+    assert.equal(record.boundaries?.agentRuntime, 'pi', 'the runtime that ran the agent step is named');
+    assert.equal(record.boundaries?.stepCommands, 'none', "the platform's own commands are not confined (ledger #79)");
+    assert.equal(record.boundaries?.acceptanceSubject, 'none', 'no acceptance step ran, so no subject was contained');
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+test("run record: a runtime that cannot confine the agent's tools does NOT claim confinement", async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'boundary-open',
+      version: '0.1.0',
+      description: 'one agent step',
+      steps: [{ id: 'impl', type: 'agent', prompt: 'implement it' }],
+    };
+    // A boundary was SUPPLIED, but this runtime has no `agentToolBoundary`: it may not be recorded
+    // as confined. `open` is the honest answer (a boundary was asked for and not confirmed).
+    const res = await executeWorkflow(wf, {
+      ...c.exec,
+      sandbox: STUB_SANDBOX,
+      sandboxRoots: ROOTS(c.dir),
+    });
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    assert.equal(record.boundaries?.agentTools, 'open');
+    assert.notEqual(record.boundaries?.agentTools, 'confined');
+    assert.equal(record.boundaries?.agentRuntime, 'test');
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+/** A runtime that confined SOME of its sessions: the mixed case the record must not flatten. */
+class PartlyConfiningTestRuntime extends TestRuntime {
+  private asked = 0;
+  agentToolBoundary(): 'confined' | 'open' {
+    this.asked += 1;
+    return this.asked === 1 ? 'confined' : 'open';
+  }
+}
+
+test('run record: a PARTIALLY confined run is not recorded as confined (it is mixed)', async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'boundary-mixed',
+      version: '0.1.0',
+      description: 'two agent steps, only one of them confined',
+      steps: [
+        { id: 'impl_a', type: 'agent', prompt: 'first' },
+        { id: 'impl_b', type: 'agent', prompt: 'second' },
+      ],
+    };
+    const res = await executeWorkflow(wf, {
+      ...c.exec,
+      runtime: new PartlyConfiningTestRuntime(() => 'done', { capabilities: ['streaming'], maxParallelTasks: 4 }, 'pi'),
+      sandbox: STUB_SANDBOX,
+      sandboxRoots: ROOTS(c.dir),
+    });
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    // One confined step and one open step must NOT read as "confined": that is the same
+    // one-word-for-two-facts mistake the `boundaries` block exists to remove (ledger #88).
+    assert.equal(record.boundaries?.agentTools, 'mixed');
+    assert.notEqual(record.boundaries?.agentTools, 'confined');
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+test('run record: with no boundary supplied there is no agent-tools boundary to claim', async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'boundary-none',
+      version: '0.1.0',
+      description: 'one tool step, sandbox: none',
+      steps: [{ id: 'probe', type: 'tool', prompt: 'echo hello' }],
+    };
+    const res = await executeWorkflow(wf, c.exec); // no sandbox/sandboxRoots/sandboxNote
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    assert.equal(record.sandbox, 'none', 'the compatibility string is unchanged');
+    assert.equal(record.boundaries?.agentTools, 'none');
+    assert.equal(record.boundaries?.acceptanceSubject, 'none');
   } finally {
     rmSync(c.dir, { recursive: true, force: true });
   }

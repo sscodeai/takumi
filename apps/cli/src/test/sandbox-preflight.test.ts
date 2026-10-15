@@ -365,3 +365,48 @@ test('prepareRunSandbox: a delivery run builds the read-only-platform boundary t
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Ledger #88: the record's `sandbox` string must not be read as "the agent's hands were contained".
+// A run is only recorded as agent-tools-confined when its RUNTIME reports that it built a confined
+// session; the fake runtime cannot, so this run must say so. (`runtime: fake` is the brief's own
+// example of "a runtime that cannot be confined".)
+test('preflight: a runtime that cannot confine its agent tools is not recorded as confined (ledger #88)', async (t) => {
+  const capability = await sandboxCapability();
+  if (!capability.available) {
+    t.skip(`the boundary cannot be established on this host: ${capability.reason ?? 'unknown'}`);
+    return;
+  }
+  const dir = makeProject();
+  try {
+    writeWorkflow(dir, 'agent', [
+      'name: agent',
+      'version: 0.1.0',
+      'description: one agent step',
+      'steps:',
+      '  - id: impl',
+      '    type: agent',
+      "    prompt: 'do it'",
+    ]);
+    const cfg = loadConfig(dir);
+    const out = await runTask({
+      cwd: dir,
+      prompt: 'x',
+      runtimeId: 'fake',
+      workflow: 'agent',
+      sandbox: 'unshare',
+      config: cfg,
+    });
+    assert.equal(out.status, 'completed', out.events.join('\n'));
+    const records = runRecords(dir);
+    assert.equal(records.length, 1);
+    const boundaries = records[0]?.boundaries as
+      | { agentTools?: string; agentRuntime?: string; stepCommands?: string }
+      | undefined;
+    assert.equal(boundaries?.agentTools, 'open', 'the fake runtime does not confine the agent tools, so the record must not claim it');
+    assert.notEqual(boundaries?.agentTools, 'confined');
+    assert.equal(boundaries?.agentRuntime, 'fake', 'the runtime that ran the agent step is named');
+    assert.equal(boundaries?.stepCommands, 'none', "the platform's own step commands are not confined (ledger #79)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -97,6 +97,42 @@ export interface RunRecordPublished {
   mergedSha: string | null;
 }
 
+/**
+ * WHICH boundary was actually in force, as three separate facts.
+ *
+ * The single `sandbox` string conflated three different properties, and reading `sandbox: unshare`
+ * as "the model's hands were contained" is exactly the mistake ledger #88 records: on 2026-10-13 the
+ * record said `unshare` while the stale pi artifact handed the agent the SDK's BUILTIN tools. This
+ * block is DERIVED from what ran — the runtime reported whether the session it built was confined —
+ * never asserted from the configuration.
+ */
+export interface RunRecordBoundaries {
+  /**
+   * The boundary the platform's OWN step commands ran under. Deliberately `'none'`: a platform
+   * command must see the repository it lives in, so the boundary is not applied to that seam at all
+   * (ledger #79). Present so a reader cannot read the run-level boundary into the step commands.
+   */
+  stepCommands: 'none';
+  /**
+   * The boundary the AGENT's own tools ran under, as the RUNTIME reported it:
+   *  - `'confined'` — a boundary was supplied and the runtime confirmed its session used it for
+   *    EVERY agent step that ran;
+   *  - `'open'` — a boundary was supplied but the runtime did not confine (or did not report);
+   *  - `'mixed'` — a boundary was supplied and the runtime confined SOME of the run's agent steps,
+   *    not all: read the steps, never this word;
+   *  - `'none'` — no boundary was supplied (or no agent step ran at all).
+   */
+  agentTools: 'confined' | 'open' | 'mixed' | 'none';
+  /** The runtime the agent step used, so `agentTools` cannot be read against the wrong runtime. */
+  agentRuntime: string;
+  /**
+   * The boundary the ACCEPTANCE harness put its SUBJECT (the DELIVERED project) under. The harness
+   * itself is the platform's and runs with the platform readable (ledger #79); this records whether
+   * the delivered code it exercised was contained, which is a different property.
+   */
+  acceptanceSubject: 'platformReadOnly' | 'none';
+}
+
 export interface RunRecord {
   /** The record's own identity: the same run id the marker and the board row carry. */
   runId: string;
@@ -141,6 +177,11 @@ export interface RunRecord {
    * indistinguishable from one that used it.
    */
   sandbox?: string;
+  /**
+   * Which boundary was actually in force, per seam (see {@link RunRecordBoundaries}). Absent on a
+   * record written before this field existed; present on every run this engine records.
+   */
+  boundaries?: RunRecordBoundaries;
   /** Present and true when this record is incomplete. */
   partial?: boolean;
   /** Why the record is partial; present exactly when `partial` is true. */

@@ -26,6 +26,36 @@ own state, never from the driver's exit code alone.
 | 11 | `a5f016d` (#55: the front door demands the world only where it is used) | **on** | 3 | **0 of 3** | **all three got past the intake** (one on the first attempt) and into the delivery side, 30-60 min each: RUN 1 and 3's ATTEMPT 1 passed the gate (620/625 tests) and was refused by the JUDGE (`artifact_acceptance FAILED`), and only their ATTEMPT 2 died at a gate that could not read a test summary (`0 failing over 0 tests`, `shape: unrecognised`, exit 0) — a symptom of the repair round being briefed with the PASSING gate; RUN 2 reached the **forged judge**, which refused the delivery — and the repair round was briefed from a gate that had PASSED (ledger #86) |
 | 12 | `b45068c` (#56: the attempt's verdict and brief come from the JUDGE, not from a gate that passed) | **on** | 3 | **2 of 3** | **the first cross-family round.** The sentence was a graph shortest path over a grid map. Two runs delivered and MERGED it: `wf-cd0be302` 3,297 s (55 min) → demo PR [#46](https://github.com/sscodeai/takumi-delivery-demo/pull/46), and `wf-41f48e83` 767 s (12.8 min) → PR [#48](https://github.com/sscodeai/takumi-delivery-demo/pull/48); both records `accepted=true`, `sandbox=unshare`, every step `done`, both PRs `MERGED`. The failure (RUN 2) is a **legitimate judge rejection**, and its reason is now ON RECORD: `not ok 5 - DEC-001 AMB-001 NOT honoured … (checked by REL-001, which failed)`, `failing checks: REL-001, DEC-001` (ledger #86 fixed the path that used to lose it) |
 | 13 | `37744ab` (#57) | **on** | 3 | **3 of 3** | a **THIRD family**: *a JSON file holding an array of objects → the keys common to every object, sorted, or `none`*. All three delivered and MERGED (`wf-26464daa` 1,174 s → PR [#50](https://github.com/sscodeai/takumi-delivery-demo/pull/50); `wf-eed989e0` 2,429 s → PR [#52](https://github.com/sscodeai/takumi-delivery-demo/pull/52); `wf-69435629` 2,300 s → PR [#54](https://github.com/sscodeai/takumi-delivery-demo/pull/54)), every record `accepted=true sandbox=unshare`. **RUN 2 is the repair path working for a non-record family**: its judge refused attempt 1 (`acceptance FAILED`) and attempt 2 was accepted — what round 12 could not do. RUN 3's attempt 1 failed a quality gate and was repaired too. The round also EXPOSED a leak (ledger #87): RUN 2's delivery copied the platform's `docs/authorizations/SA-002.yaml` into the PUBLIC target repository |
+> **CORRECTION (2026-10-15) — in rounds 12 and 13 the AGENT's hands were OPEN.**
+>
+> Both rounds ran against the pi runtime artifact built 2026-10-12 20:20 JST
+> (`runtimes/pi/dist/index.js`). It predated the confinement source by ~4.5 h and carried none of it:
+> `grep -c 'noTools\|createConfinedTools\|confinementOf' runtimes/pi/dist/index.js` = `0/0/0`, while
+> `runtimes/pi/src/index.ts` and `runtimes/pi/src/confinement.ts` landed at 00:48 JST on 2026-10-13.
+> `runtimes/pi` is not a pnpm workspace member and `dist/` is gitignored, so `pnpm -r build` never
+> rebuilt it, and a stale build loads fine — so the runtime that ran rounds 12 and 13 handed the
+> model the SDK's BUILTIN tools (`read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`) while the
+> record said `sandbox: unshare` (verified in this repository's own run records:
+> `.takumi/runs/wf-cd0be302.json`, `wf-41f48e83.json`, `wf-26464daa.json`, `wf-eed989e0.json`,
+> `wf-69435629.json`, each `"sandbox": "unshare"`).
+>
+> Read the `sandbox=unshare` in rows 12 and 13 (and in the per-run detail beginning at
+> `docs/unattended-chain-measurements.md:169` and `:203`) as the boundary that was CONFIGURED, not as
+> "the model's hands were contained". The one thing under a boundary in those runs was the ACCEPTANCE
+> HARNESS's subject — the delivered project, via `sandboxPlatform` (platform read-only). The
+> platform's own step commands were not confined either, and deliberately so (ledger #79 runs them
+> where the platform lives). What happened in the agent's session is the consequence ledger #88 was
+> written for: round 13 RUN 2 read the platform's own `docs/authorizations/SA-002.yaml` and copied it
+> byte-identical into the target repository (`sha256:8067ab6c…`, commit `47ab7996`, PR #52) — a read a
+> confined agent could not have made (ledger #87 records the copy; ledger #88 records why the
+> boundary was absent).
+>
+> This is a correction of the CLAIM, not a re-measurement: no figure in the tables above changes, and
+> the success counts (round 12: 2 of 3; round 13: 3 of 3) stand. The fix is ledger #88: the runtime
+> is rebuilt, `runtimes/pi/src/test/session-confinement.test.ts` measures the artifact's own tools,
+> `scripts/preflight-unattended.sh` refuses a dist older than its source, and the run record now
+> carries a derived `boundaries.agentTools` so this cannot be read past again.
+
 ## Round 4 in detail (15:43Z, 2026-10-12)
 
 | Run | run id | wall clock | Pull request | What it took |

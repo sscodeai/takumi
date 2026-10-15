@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +33,52 @@ test('the preflight refuses a dist that EXISTS but does not load, naming the rea
     assert.equal(r.status, 3);
     assert.match(`${r.stdout}${r.stderr}`, /PREFLIGHT FAIL: the pi runtime does not load/);
     assert.match(`${r.stdout}${r.stderr}`, /does-not-exist|Cannot find|ERR_MODULE_NOT_FOUND/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Ledger #88: the source carried the confined tools at 2026-10-13 00:48 JST, but the GITIGNORED
+// artifact that ran was the 2026-10-12 20:20 build. runtimes/pi is not a pnpm workspace member (its
+// @earendil-works/pi-coding-agent SDK is an unpublished peer dependency), so `pnpm -r build` and CI
+// never rebuild it — and the two checks above cannot see it, because a stale build EXISTS and LOADS.
+// Refuse it by its AGE: an artifact older than its newest source is a boundary that is not there.
+test('the preflight refuses a runtime dist OLDER than its source, naming the cause (ledger #88)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pf-stale-'));
+  try {
+    const dist = join(dir, 'dist');
+    const src = join(dir, 'src');
+    mkdirSync(dist, { recursive: true });
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(dist, 'index.js'), 'export const PiRuntimeAdapter = class {};\n');
+    writeFileSync(join(src, 'confinement.ts'), 'export const x = 1;\n');
+    // The source is NEWER than the artifact: exactly the 2026-10-13 shape.
+    const older = new Date(Date.now() - 60_000);
+    utimesSync(join(dist, 'index.js'), older, older);
+    const r = preflight({ TAKUMI_PI_RUNTIME: join(dist, 'index.js'), TAKUMI_DELIVERY_REPO: '' });
+    assert.equal(r.status, 3, `${r.stdout}${r.stderr}`);
+    assert.match(`${r.stdout}${r.stderr}`, /PREFLIGHT FAIL: .*OLDER than its source/);
+    assert.match(`${r.stdout}${r.stderr}`, /confinement\.ts/, 'the refusal NAMES the file that is newer');
+    assert.match(`${r.stdout}${r.stderr}`, /pnpm build/, 'and the command that fixes it');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the preflight passes a runtime dist that is NEWER than its source', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pf-current-'));
+  try {
+    const dist = join(dir, 'dist');
+    const src = join(dir, 'src');
+    mkdirSync(dist, { recursive: true });
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'confinement.ts'), 'export const x = 1;\n');
+    writeFileSync(join(dist, 'index.js'), 'export const PiRuntimeAdapter = class {};\n');
+    const older = new Date(Date.now() - 60_000);
+    utimesSync(join(src, 'confinement.ts'), older, older);
+    const r = preflight({ TAKUMI_PI_RUNTIME: join(dist, 'index.js'), TAKUMI_DELIVERY_REPO: '' });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /PREFLIGHT ok: pi runtime loads and exports PiRuntimeAdapter/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

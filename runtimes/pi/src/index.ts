@@ -51,6 +51,8 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
   /** The last assistant message's stop reason per task: 'length' means the turn was cut off. */
   private readonly lastStopReasons = new Map<TaskId, string>();
   private readonly eventsCount = new Map<TaskId, number>();
+  /** Task ids whose session was built with a boundary: what `agentToolBoundary` reports. */
+  private readonly confinedTasks = new Set<TaskId>();
   // Session pool keyed by cwd: holds ONE session at a time for a single task
   // id, reused only by a retry of the SAME task (keeps retry context). A new
   // workflow step always starts a FRESH session (prevents long-session
@@ -85,6 +87,7 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
     this.eventsCount.clear();
     this.lastMessages.clear();
     this.sessions.clear();
+    this.confinedTasks.clear();
   }
 
   metadata(): RuntimeMetadata {
@@ -137,6 +140,7 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
       // assistant content became [] after several followUp prompts).
       const existing = this.pool.get(poolKey);
       if (existing && existing.taskId === taskId && this.options.reuseSession) {
+        if (confinement !== undefined) this.confinedTasks.add(taskId);
         return { session: existing.session, isReused: true };
       }
       // A previous session exists for a DIFFERENT task: retire it (close the
@@ -177,6 +181,7 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
         // the pool entry just holds the session alive for reuse.
       });
       this.pool.set(poolKey, { session, unsubscribe, taskId });
+      if (confinement !== undefined) this.confinedTasks.add(taskId);
       return { session, isReused: false };
     } finally {
       release();
@@ -407,5 +412,16 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
 
   async getArtifacts(taskId: TaskId): Promise<Artifact[]> {
     return this.artifacts.get(taskId) ?? [];
+  }
+
+  /**
+   * What the session this adapter built for `taskId` really was: `'confined'` when the task carried
+   * a boundary and the confined tools were registered on it, `'open'` otherwise (a session with the
+   * SDK's builtin tools, or a task that never acquired one). This is the fact the run record's
+   * `boundaries.agentTools` is derived from (ledger #88) — the adapter reports what it DID, so the
+   * engine never has to assume that supplying `sandbox`/`sandboxRoots` confined anything.
+   */
+  agentToolBoundary(taskId: TaskId): 'confined' | 'open' {
+    return this.confinedTasks.has(taskId) ? 'confined' : 'open';
   }
 }
