@@ -42,6 +42,21 @@ export interface AgentRuntimeAdapter {
   getArtifacts(taskId: TaskId): Promise<Artifact[]>;
 
   /**
+   * The boundary this runtime's OWN agent tools ran under for a task, when the runtime can say.
+   *
+   * The engine SUPPLIES a confined task with `sandbox` + `sandboxRoots`, but only the runtime turns
+   * those into confined tools — so the engine may not assert the outcome on the runtime's behalf.
+   * Ledger #88: the record said `sandbox: unshare` while the stale pi artifact handed the model the
+   * SDK's builtin tools. Optional: a runtime that does not confine its tools, or cannot say, omits
+   * the method, and the run record then says so (`open`/`none`) rather than claiming confinement.
+   *
+   * `'confined'` means the session this runtime built for that task was built with the boundary;
+   * `'open'` means it ran its tools with host access. A runtime that did not run the task may return
+   * `undefined`.
+   */
+  agentToolBoundary?(taskId: TaskId): 'confined' | 'open' | undefined;
+
+  /**
    * Release whatever this runtime holds. OPTIONAL — a runtime that holds nothing needs no teardown.
    *
    * Why it exists: the pi adapter POOLS a live `AgentSession`, and nothing on the run path closed it, so

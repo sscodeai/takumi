@@ -32,7 +32,7 @@ import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { requirementDigest, shortDigest } from './review-digest.js';
 import { appendFeedback, parseFeedback } from './requirement-feedback.js';
-import { writeRunRecord, type RunRecord, type RunRecordStep, type RunStepStatus } from './run-record.js';
+import { writeRunRecord, type RunRecord, type RunRecordBoundaries, type RunRecordStep, type RunStepStatus } from './run-record.js';
 import { readRequirementConfirmation, type RequirementConfirmation } from './standing-authorization.js';
 import type { Usage } from './types.js';
 import type { StepSandbox } from './sandbox.js';
@@ -747,6 +747,19 @@ export async function executeWorkflow(
    */
   let pipelineIssueFiled = false;
 
+  // WHICH BOUNDARY WAS ACTUALLY IN FORCE (ledger #88). `sandbox: unshare` in the record must not be
+  // readable as "the model's hands were contained": the boundary the engine SUPPLIED is not the
+  // boundary the runtime USED. Confinement is therefore taken from the runtime's own report
+  // (`agentToolBoundary`), and the acceptance subject from whether the harness actually asked for
+  // the platform-read-only boundary — never asserted from configuration.
+  let agentStepsRan = 0;
+  let confinedAgentSteps = 0;
+  let acceptanceSubjectConfined = false;
+  const noteAgentBoundary = (taskId: string): void => {
+    agentStepsRan++;
+    if (ctx.runtime.agentToolBoundary?.(taskId) === 'confined') confinedAgentSteps++;
+  };
+
   /**
    * Assemble and write the run's machine-readable record: `.takumi/runs/<run-id>.json`.
    *
@@ -820,6 +833,13 @@ export async function executeWorkflow(
       boardRowId,
       cost,
       sandbox: ctx.sandboxNote ?? 'none',
+      boundaries: {
+        stepCommands: 'none',
+        agentTools:
+          agentStepsRan === 0 ? 'none' : confinedAgentSteps > 0 ? 'confined' : ctx.sandboxRoots === undefined ? 'none' : 'open',
+        agentRuntime: run.runtimeId,
+        acceptanceSubject: acceptanceSubjectConfined ? 'platformReadOnly' : 'none',
+      },
     };
     const result = writeRunRecord(ctx.cwd, record);
     ctx.onEvent?.(
@@ -857,6 +877,7 @@ export async function executeWorkflow(
           try {
             const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
             collectUsage(res.usage);
+            noteAgentBoundary(task.id);
             if (res.status === 'completed') {
               const art = res.summary ? await ctx.artifacts.write({
                 taskId: task.id, kind: stepArtifactKind(step, stepId.split('_')[0] ?? 'output'),
@@ -1682,6 +1703,9 @@ export async function executeWorkflow(
         // the same fact as "the harness ran and printed nothing"; reporting them alike blames the
         // judge for the workflow's clock (ledger #77).
         let killedByBoundMs: number | undefined;
+        // The harness asked for the platform-read-only boundary; record that the DELIVERED project
+        // was actually put under it (the subject), as distinct from the agent's tools above.
+        if (ctx.sandboxPlatform !== undefined) acceptanceSubjectConfined = true;
         try {
           const r = await runStepCommand(ctx, {
             argv: ['bash', acceptanceRef],
@@ -2479,6 +2503,7 @@ export async function executeWorkflow(
         try {
           const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
           collectUsage(res.usage);
+          noteAgentBoundary(task.id);
           // A cancelled task (user abort / hard timeout cancel) should NOT be
           // retried as a failure, and remaining work should stop: cancellation
           // is an explicit control signal, not a transient error (High fix).

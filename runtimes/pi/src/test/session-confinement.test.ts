@@ -118,6 +118,13 @@ test('session confinement: a confined task gets the contained tools, not the bui
     for (const name of ['read', 'write', 'edit', 'ls', 'find', 'bash']) {
       assert.ok(active.includes(name), `a confined session must offer ${name}: ${active.join(', ')}`);
     }
+    // The adapter REPORTS the boundary it built, which is what the run record derives from: the
+    // engine must never have to assume that supplying sandbox/sandboxRoots confined anything.
+    assert.equal(
+      fixture.adapter.agentToolBoundary('probe-session'),
+      'confined',
+      'the adapter reports the confined session it actually built',
+    );
   } finally {
     fixture.cleanup();
   }

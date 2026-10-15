@@ -351,6 +351,7 @@ export type {
   RunAggregate,
   RunCostAggregate,
   RunRecord,
+  RunRecordBoundaries,
   RunRecordCost,
   RunRecordPublished,
   RunRecordStep,
