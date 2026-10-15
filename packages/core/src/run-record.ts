@@ -115,11 +115,14 @@ export interface RunRecordBoundaries {
   stepCommands: 'none';
   /**
    * The boundary the AGENT's own tools ran under, as the RUNTIME reported it:
-   *  - `'confined'` — a boundary was supplied and the runtime confirmed its session used it;
+   *  - `'confined'` — a boundary was supplied and the runtime confirmed its session used it for
+   *    EVERY agent step that ran;
    *  - `'open'` — a boundary was supplied but the runtime did not confine (or did not report);
+   *  - `'mixed'` — a boundary was supplied and the runtime confined SOME of the run's agent steps,
+   *    not all: read the steps, never this word;
    *  - `'none'` — no boundary was supplied (or no agent step ran at all).
    */
-  agentTools: 'confined' | 'open' | 'none';
+  agentTools: 'confined' | 'open' | 'mixed' | 'none';
   /** The runtime the agent step used, so `agentTools` cannot be read against the wrong runtime. */
   agentRuntime: string;
   /**

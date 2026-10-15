@@ -439,6 +439,45 @@ test("run record: a runtime that cannot confine the agent's tools does NOT claim
   }
 });
 
+/** A runtime that confined SOME of its sessions: the mixed case the record must not flatten. */
+class PartlyConfiningTestRuntime extends TestRuntime {
+  private asked = 0;
+  agentToolBoundary(): 'confined' | 'open' {
+    this.asked += 1;
+    return this.asked === 1 ? 'confined' : 'open';
+  }
+}
+
+test('run record: a PARTIALLY confined run is not recorded as confined (it is mixed)', async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'boundary-mixed',
+      version: '0.1.0',
+      description: 'two agent steps, only one of them confined',
+      steps: [
+        { id: 'impl_a', type: 'agent', prompt: 'first' },
+        { id: 'impl_b', type: 'agent', prompt: 'second' },
+      ],
+    };
+    const res = await executeWorkflow(wf, {
+      ...c.exec,
+      runtime: new PartlyConfiningTestRuntime(() => 'done', { capabilities: ['streaming'], maxParallelTasks: 4 }, 'pi'),
+      sandbox: STUB_SANDBOX,
+      sandboxRoots: ROOTS(c.dir),
+    });
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    // One confined step and one open step must NOT read as "confined": that is the same
+    // one-word-for-two-facts mistake the `boundaries` block exists to remove (ledger #88).
+    assert.equal(record.boundaries?.agentTools, 'mixed');
+    assert.notEqual(record.boundaries?.agentTools, 'confined');
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
 test('run record: with no boundary supplied there is no agent-tools boundary to claim', async () => {
   const c = ctx();
   try {

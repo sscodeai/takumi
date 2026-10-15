@@ -835,8 +835,19 @@ export async function executeWorkflow(
       sandbox: ctx.sandboxNote ?? 'none',
       boundaries: {
         stepCommands: 'none',
+        // `confined` ONLY when EVERY agent step that ran was confined. A run whose runtime confirmed
+        // one session and not another must not read as confined — that is the same
+        // one-word-for-two-facts mistake this block exists to remove, one layer down.
         agentTools:
-          agentStepsRan === 0 ? 'none' : confinedAgentSteps > 0 ? 'confined' : ctx.sandboxRoots === undefined ? 'none' : 'open',
+          agentStepsRan === 0
+            ? 'none'
+            : confinedAgentSteps === 0
+              ? ctx.sandboxRoots === undefined
+                ? 'none'
+                : 'open'
+              : confinedAgentSteps === agentStepsRan
+                ? 'confined'
+                : 'mixed',
         agentRuntime: run.runtimeId,
         acceptanceSubject: acceptanceSubjectConfined ? 'platformReadOnly' : 'none',
       },
