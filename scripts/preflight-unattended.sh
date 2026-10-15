@@ -70,6 +70,21 @@ if [ -n "$REPO" ]; then
     || fail "the delivery target $REPO has no base branch \"$BASE\" (delivery.baseBranch): the chain would publish onto a branch the host does not have"
 fi
 
+# A STALE BUILD LOOKS EXACTLY LIKE A GOOD ONE UNTIL THE MODEL USES THE TOOLS IT LACKS.
+#
+# runtimes/pi is NOT a pnpm workspace member (its @earendil-works/pi-coding-agent SDK is an
+# unpublished peer dependency) and dist/ is gitignored, so neither `pnpm -r build` nor CI ever
+# rebuilds it. On 2026-10-13 the source carried the confined tools from 00:48 JST but the artifact
+# on disk was the 2026-10-12 20:20 build, so every delivery run handed the model the SDK's BUILTIN
+# tools while its record said `sandbox: unshare` (ledger #88). The checks below cannot see this:
+# a stale build EXISTS and LOADS FINE. Refuse it by its AGE instead — a dist older than the newest
+# file under its sibling `src/` is a boundary that is not there.
+PI_PKG_DIR=$(cd "$(dirname "$PI_DIST")/.." 2>/dev/null && pwd) || PI_PKG_DIR=""
+if [ -n "$PI_PKG_DIR" ] && [ -d "$PI_PKG_DIR/src" ]; then
+  newest_src=$(find "$PI_PKG_DIR/src" -type f -newer "$PI_DIST" -print -quit 2>/dev/null)
+  [ -n "$newest_src" ] && fail "the pi runtime dist is OLDER than its source: $newest_src is newer than $PI_DIST. runtimes/pi is not a pnpm workspace member (its SDK is an unpublished peer dependency), so pnpm -r build and CI never rebuild it, and a stale dist loads fine while silently giving the model the builtin tools (ledger #88). Rebuild: (cd runtimes/pi && pnpm build)"
+fi
+
 keys=$(node -e "import(process.argv[1]).then(m=>console.log(Object.keys(m).join(','))).catch(e=>{console.log('IMPORT_FAILED: '+e.message);process.exit(1)})" "$PI_DIST" 2>&1 | head -1)
 case "$keys" in
   IMPORT_FAILED:*) fail "the pi runtime does not load: ${keys#IMPORT_FAILED: }" ;;
