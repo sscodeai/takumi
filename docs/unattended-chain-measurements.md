@@ -19,7 +19,7 @@ own state, never from the driver's exit code alone.
 | 5 | `3eb0bcc` (#79: the boundary classified — the model's hands confined, the platform's own tooling open) | **on** (userns; `sandbox` read back from every run record) | 3 | **3 of 3** | none — every record says `sandbox=unshare` |
 | 6 | `26e7e8e` (#79 + #80 + ADR-059: acceptance bounded, wait sized to the host pipeline) | **on** | 3 | **3 of 3** | none — every record says `sandbox=unshare` |
 
-| 7 | `b3b559c` (a FRESH target repository: 1 commit, a README) | **on** | 3 | **0 of 3** | none reached the delivery leg. The credential is a fine-grained PAT, selected per repository, and the fresh target was not in its list: all three died at `publish` with `remote: Permission to sscodeai/takumi-delivery-demo-2.git denied to sscodeai`. The IMPLEMENTATION leg was **3 of 3 from scratch** (entry point, sources, tests, docs — the delivery agent's own words in earlier rounds were "the branch ALREADY carried a complete delivery, so the work was to VERIFY it") and the forged judge accepted all three (ledger #81) |
+| 7 | `b3b559c` (a FRESH target repository: 1 commit, a README) | **on** | 3 | **0 of 3** | none reached the delivery leg. All three died at `publish` with `remote: Permission to sscodeai/takumi-delivery-demo-2.git denied to sscodeai` (recorded here as a credential that had not been selected for the new repository — see the CORRECTION below, ledger #89). The IMPLEMENTATION leg was **3 of 3 from scratch** (entry point, sources, tests, docs — the delivery agent's own words in earlier rounds were "the branch ALREADY carried a complete delivery, so the work was to VERIFY it") and the forged judge accepted all three (ledger #81) |
 | 8 | `7972d62` (#81: the preflight probes the delivery target) | **on** | 3 | **0 of 3** | a DIFFERENT FAMILY of requirement — the length of the shortest path over a grid map. Every run died at `intake_shape` in ~7 minutes, **before any implementation was paid for**, because this chain's judge checks a deliverable's ANSWER with exactly one relation (an aggregate of a per-row numeric measure) and a path length is not one (ledger #82) |
 | 9 | `99b4e66` (#52: rounding asked only of the checks that need it) | **on** | 3 | **0 of 3** | the same sentence and the same refusal as round 8, ~7 min each: the intake still described a graph requirement with record-family relations, and the repair round — handed the two ways out in words — added `mutation-detection` ON TOP of them instead of replacing them (ledger #83's condition was fixed; the document was the problem) |
 | 10 | `8be7e142` (#54: the intake is told which of the two shapes it is writing) | **on** | 3 | **0 of 3** | the intake wrote **exactly** the Shape B document the prompt asks for (one scenario, no world) — and every run died at `intake_shape` **check 2**, the front door validator, in **2.5 minutes** each: `the deliverable block declares no input_format`. The forge never saw the document (ledger #85) |
@@ -55,6 +55,26 @@ own state, never from the driver's exit code alone.
 > is rebuilt, `runtimes/pi/src/test/session-confinement.test.ts` measures the artifact's own tools,
 > `scripts/preflight-unattended.sh` refuses a dist older than its source, and the run record now
 > carries a derived `boundaries.agentTools` so this cannot be read past again.
+
+> **CORRECTION (2026-10-18) — round 7's cause was recorded one layer too high (ledger #89).**
+>
+> Round 7 is written above as "the credential is a fine-grained PAT, selected per repository, and the
+> fresh target was not in its list". The failure MESSAGE said that; the CAUSE was not established.
+> Measured 2026-10-18: the credential **is** selected for the target — the API answered **201** for
+> creating a branch, writing a file and opening a pull request on `sscodeai/takumi-delivery-demo-2` —
+> while the transport the `publish` step really uses (`git push`, per
+> `packages/delivery-forgejo/src/index.ts`, with the pull request opened after it) was rejected for
+> **every** repository. The controlled triple: the same token pushed with `http.extraheader` to BOTH
+> the fresh target and the working target (exit 0, exit 0); the `credential.helper=store` path failed
+> for BOTH (exit 128). Two successes and one failure isolate the CREDENTIAL, not the repository.
+> `Invalid username or token` / `Authentication failed` is the host rejecting the credential, and
+> `Permission to <repo>.git denied` is a repository not granted — the same face, two faults, and the
+> preflight printed the second message for both (now fixed; it classifies).
+>
+> **What this changes for the numbers: nothing, and the row above is left standing with a pointer.**
+> Round 7 is still 0 of 3. What changes is which layer the failure is attributed to, and therefore
+> which layer the operator has to fix. **The end-to-end number for a fresh repository still does not
+> exist** — it now waits on the credential transport rather than on a GitHub UI selection.
 
 ## Round 4 in detail (15:43Z, 2026-10-12)
 
