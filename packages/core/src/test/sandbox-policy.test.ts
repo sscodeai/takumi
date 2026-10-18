@@ -22,13 +22,13 @@ import type { SandboxPolicyInput, SandboxToolchainProbe } from '../sandbox-polic
 // The pure half of the boundary: guards G1-G3 and the mount script. No
 // namespace is created here, so these run everywhere.
 
-const PROJECT = '/srv/hermes/workspaces/takumi';
+const PROJECT = '/home/dev/workspaces/proj';
 const WORKTREE = path.join(PROJECT, '.takumi', 'worktrees', 'takumi-run-1');
 const RUN_ID = 'takumi-run-1';
 const JUDGE = path.join(PROJECT, '.takumi', 'acceptance', RUN_ID, 'accept_step');
 
 const CLEAN_TOOLCHAIN: SandboxToolchainProbe = {
-  roots: ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/srv/hermes/.local/bin'],
+  roots: ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/home/dev/.local/bin'],
   dropped: [],
   tools: [],
   missing: [],
@@ -77,15 +77,15 @@ test('sandbox policy: isInside is a resolved, segment-aware containment check', 
 test('sandbox policy (G1): the toolchain probe drops a PATH entry that contains the project', () => {
   const probe = probeToolchain({
     cwd: PROJECT,
-    pathValue: ['/srv/hermes', '/srv/hermes/.local/bin', '/usr/bin', '/usr/bin'].join(path.delimiter),
+    pathValue: ['/home/dev', '/home/dev/.local/bin', '/usr/bin', '/usr/bin'].join(path.delimiter),
     exists: () => true,
     realpath: (p) => p,
   });
-  assert.ok(!probe.roots.includes('/srv/hermes'), 'a directory containing the project must not be mirrored');
-  assert.ok(probe.roots.includes('/srv/hermes/.local/bin'), 'a sibling of the project is safe to mirror');
+  assert.ok(!probe.roots.includes('/home/dev'), 'a directory containing the project must not be mirrored');
+  assert.ok(probe.roots.includes('/home/dev/.local/bin'), 'a sibling of the project is safe to mirror');
   assert.deepEqual(
     probe.dropped.map((entry) => entry.path),
-    ['/srv/hermes'],
+    ['/home/dev'],
     'the dropped candidate must be reported, not silently ignored',
   );
 });
@@ -107,17 +107,17 @@ test('sandbox policy (G1): the toolchain probe mirrors the real path behind a sy
   const probe = probeToolchain({
     cwd: PROJECT,
     requiredTools: ['node'],
-    pathValue: '/srv/hermes/.local/bin',
+    pathValue: '/home/dev/.local/bin',
     exists: () => true,
-    realpath: () => '/srv/hermes/.hermes/node/bin/node',
+    realpath: () => '/home/dev/.toolchain/node/bin/node',
   });
   // Without the real directory the mirrored `node` symlink dangles inside.
-  assert.ok(probe.roots.includes('/srv/hermes/.hermes/node/bin'));
+  assert.ok(probe.roots.includes('/home/dev/.toolchain/node/bin'));
   assert.deepEqual(probe.missing, []);
 });
 
 test('sandbox policy (G1): a read-only root that contains the project is refused', () => {
-  const guard = guardOf(() => deliveryPolicy({ ro: ['/srv/hermes'] }));
+  const guard = guardOf(() => deliveryPolicy({ ro: ['/home/dev'] }));
   assert.equal(guard, 'G1');
   const root = guardOf(() => deliveryPolicy({ ro: ['/'] }));
   assert.equal(root, 'G1');
@@ -126,17 +126,17 @@ test('sandbox policy (G1): a read-only root that contains the project is refused
 test('sandbox policy (G1): the probed toolchain has no read-only root above the project (A8)', () => {
   // Injected `exists`/`pathValue` so the property is tested on ANY host, not only
   // one whose PATH happens to contain the sibling toolchain directory.
-  const nodeBin = '/srv/hermes/.local/bin';
+  const nodeBin = '/home/dev/.local/bin';
   const insideProject = path.join(PROJECT, 'node_modules', '.bin');
   const probe = probeToolchain({
     cwd: PROJECT,
-    pathValue: [nodeBin, insideProject, '/srv/hermes', '/usr/bin', '/bin'].join(path.delimiter),
+    pathValue: [nodeBin, insideProject, '/home/dev', '/usr/bin', '/bin'].join(path.delimiter),
     exists: () => true,
     realpath: (p) => p,
     requiredTools: ['sh'],
   });
   assert.ok(probe.roots.includes(nodeBin), 'a SIBLING toolchain directory is mirrored');
-  assert.ok(!probe.roots.includes('/srv/hermes'), 'the parent of the workspace tree must not be mirrored');
+  assert.ok(!probe.roots.includes('/home/dev'), 'the parent of the workspace tree must not be mirrored');
   assert.ok(
     probe.dropped.some((d) => d.path === insideProject),
     'a PATH entry inside the project (pnpm puts node_modules/.bin there) is dropped',
@@ -359,7 +359,7 @@ test('platformReadOnly: the project root is mirrored READ-ONLY, so the platform 
 
 test('platformReadOnly: a STRICT ANCESTOR of the project is still refused (siblings would leak)', () => {
   assert.throws(
-    () => deliveryPolicy({ platformReadOnly: true, ro: ['/srv/hermes', ...CLEAN_TOOLCHAIN.roots] }),
+    () => deliveryPolicy({ platformReadOnly: true, ro: ['/home/dev', ...CLEAN_TOOLCHAIN.roots] }),
     (e: unknown) =>
       e instanceof SandboxPolicyError && e.guard === 'G1' && /contains the project root/.test(e.message),
   );
