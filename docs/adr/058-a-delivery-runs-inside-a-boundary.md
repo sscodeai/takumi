@@ -69,7 +69,7 @@ mirror paths, so those files are visible and writable to no one.
 
 `packages/core/src/sandbox-policy.ts` builds the policy from the run's facts and runs four pure
 guards before any mount exists: **G1** no read-only root may contain the project (node lives in a
-*sibling* of `workspaces`, so mirroring toolchain siblings is safe but mirroring `/srv/hermes` would
+*sibling* of `workspaces`, so mirroring toolchain siblings is safe but mirroring the home directory would
 re-expose the platform); **G2** a read-write root must be the worktree or this run's judge tree; **G3**
 only staged files may appear under the project root; **G4** a run that stages files may not be rooted
 under a path the boundary masks with tmpfs. The boundary **self-tests** at every run from the inside
