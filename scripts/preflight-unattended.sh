@@ -59,11 +59,37 @@ if [ -n "$REPO" ]; then
   # positive would have passed the very case this check exists for. A dry-run push exercises the
   # credential and the transport the `publish` step actually uses, and it writes NOTHING on the host.
   # No credential appears on the command line: the helper is the same one the chain pushes with.
+  #
+  # TWO DIFFERENT FAILURES WEAR THE SAME FACE (ledger #89). This check used to report EVERY failed dry
+  # run as "the token does not select this repository", which is one of two causes and was measured to
+  # be the WRONG one on this machine. A push can be refused because
+  #   (a) the HOST rejected the credential — `remote: Invalid username or token. Password
+  #       authentication is not supported for Git operations.` / `fatal: Authentication failed`. The
+  #       credential in `~/.git-credentials` is not usable for HTTP git at all, and NO repository is
+  #       reachable this way: measured 2026-10-18 by a controlled triple — the same token pushed with
+  #       `http.extraheader` to BOTH the fresh target and the working target (exit 0, exit 0) while the
+  #       credential-helper path failed for BOTH (exit 128). Two successes and one failure isolated the
+  #       credential, not the repository.
+  #   (b) the credential is VALID and this repository was not granted to it —
+  #       `remote: Permission to <repo>.git denied to <user>`, which is ledger #81's case.
+  # Reporting (a) as (b) sends the operator to the GitHub UI to add a repository that is already
+  # selected, while the real fault is the credential transport. The messages below therefore NAME the
+  # cause and the fix for the one they saw.
   probe_ref=refs/heads/takumi-preflight-probe
   if push_output=$(git -c credential.helper=store push --dry-run --quiet "https://github.com/$REPO.git" "HEAD:$probe_ref" 2>&1); then
     printf 'PREFLIGHT ok: a push to the delivery target %s is accepted by the host (dry run)\n' "$REPO"
   else
-    fail "a push to $REPO was REFUSED by the host: ${push_output##*$'\n'}. A fine-grained token only reaches the repositories SELECTED for it, and this one is not in that list — add it, or point delivery.repo at a repository this credential already covers. Refused BEFORE an implementation is paid for (ledger #81)"
+    last="${push_output##*$'\n'}"
+    case "$push_output" in
+      *"Invalid username or token"* | *"Authentication failed"* | *"could not read Username"* | *"terminal prompts disabled"*)
+        # (a) The host refused the CREDENTIAL. No repository is reachable on this transport, so this
+        # says nothing about $REPO — do NOT send the operator to the token's repository list.
+        fail "the credential in ~/.git-credentials was REJECTED by the host, so this run could not push to ANY repository (not a statement about $REPO): $last. The chain's publish step pushes with plain 'git push', so an unusable credential stops a delivery AFTER its implementation has been paid for (ledger #89). Fix the transport: a credential of the form https://x-access-token:TOKEN@github.com works — measured on this machine, where the stored credential does not. Verify with: git -c credential.helper=store push --dry-run https://github.com/$REPO.git HEAD:$probe_ref"
+        ;;
+      *)
+        fail "a push to $REPO was REFUSED by the host: $last. The credential AUTHENTICATED and this repository was not granted to it: a fine-grained token only reaches the repositories SELECTED for it, and this one is not in that list — add it, or point delivery.repo at a repository this credential already covers. Refused BEFORE an implementation is paid for (ledger #81)"
+        ;;
+    esac
   fi
   BASE=$(delivery_branch); BASE=${BASE:-main}
   GH_TOKEN="${GITHUB_TOKEN:-}" gh api "repos/$REPO/branches/$BASE" --jq '.name' >/dev/null 2>&1 \
