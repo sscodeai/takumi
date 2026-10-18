@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -114,14 +114,83 @@ test('the preflight refuses a delivery target this credential cannot push to (le
   // never reached the check it is named after: it passed locally, where dist exists, and on CI it
   // failed with 'the pi runtime dist is missing' — a test whose outcome depends on machine state is
   // not a test of the target check. (Same family as #69-#73: local green, CI red.)
+  //
+  // AND IT MUST NOT DEPEND ON THE MACHINE'S OWN CREDENTIAL EITHER (ledger #89): on 2026-10-18 this
+  // machine's stored credential was rejected for EVERY repository, so a real dry run to
+  // torvalds/linux fails at AUTHENTICATION and this test — which is about an UNGRANTED repository —
+  // never reached the case it is named after. That is the same defect the paragraph above was written
+  // about, one layer down. The host's answers are therefore driven by a stub `git` that reports the
+  // UNGRANTED word for granted credentials, so the case is exercised on any machine.
   const dir = mkdtempSync(join(tmpdir(), 'pf-target-'));
   const runtime = join(dir, 'index.js');
   writeFileSync(runtime, 'export const PiRuntimeAdapter = class {};\n');
+  const stub = join(dir, 'git');
+  writeFileSync(
+    stub,
+    '#!/usr/bin/env bash\ncase "$*" in\n  *push*) echo "remote: Permission to torvalds/linux.git denied to sscodeai." >&2; echo "fatal: unable to access \'https://github.com/torvalds/linux.git/\': The requested URL returned error: 403" >&2; exit 128;;\nesac\nexit 0\n',
+  );
+  chmodSync(stub, 0o755);
   try {
-    const r = preflight({ TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'torvalds/linux' });
+    const r = spawnSync('bash', [SCRIPT], {
+      encoding: 'utf8',
+      env: { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'torvalds/linux', PATH: `${dir}:${process.env.PATH}` },
+    });
     assert.equal(r.status, 3, `${r.stdout}${r.stderr}`);
     assert.match(`${r.stdout}${r.stderr}`, /REFUSED by the host/);
     assert.match(`${r.stdout}${r.stderr}`, /SELECTED for it/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Ledger #89: TWO failures wore the SAME message. A push refused because the host rejected the
+// CREDENTIAL (`Invalid username or token` / `Authentication failed`) was reported as "this token does
+// not select this repository" — which sent the operator to the GitHub UI to add a repository that was
+// already selected. Measured 2026-10-18: on this machine the stored credential fails for EVERY
+// repository (the working target included), while the same token pushed with http.extraheader
+// succeeds for both, so the fault is the credential transport and NOT the target's selection.
+//
+// This test drives the classification directly, with a stub `git` on PATH that fails the way the host
+// does, because the real credential is the machine's, not the test's: a test that could only pass on a
+// machine with the right broken credential would be worthless on CI. The two cases assert the two
+// MESSAGES — the whole point of #89 is that the operator can tell them apart.
+test('the preflight tells a REJECTED CREDENTIAL apart from an UNGRANTED REPOSITORY (ledger #89)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pf-auth-'));
+  const runtime = join(dir, 'index.js');
+  writeFileSync(runtime, 'export const PiRuntimeAdapter = class {};\n');
+  const stub = join(dir, 'git');
+  try {
+    // (a) The host rejects the credential. `git push` here always fails this way.
+    writeFileSync(
+      stub,
+      '#!/usr/bin/env bash\ncase "$*" in\n  *push*) echo "remote: Invalid username or token. Password authentication is not supported for Git operations." >&2; echo "fatal: Authentication failed for \'https://github.com/x/y.git/\'" >&2; exit 128;;\nesac\nexit 0\n',
+    );
+    chmodSync(stub, 0o755);
+    const rejected = spawnSync('bash', [SCRIPT], {
+      encoding: 'utf8',
+      env: { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'sscodeai/some-repo', PATH: `${dir}:${process.env.PATH}` },
+    });
+    const rejectText = `${rejected.stdout}${rejected.stderr}`;
+    assert.equal(rejected.status, 3, rejectText);
+    assert.match(rejectText, /credential .*REJECTED by the host/, 'the credential cause is NAMED');
+    assert.match(rejectText, /could not push to ANY repository/, 'and it says this is NOT about the target');
+    assert.doesNotMatch(rejectText, /SELECTED for it/, 'the token-repository-list advice must NOT be given here — it is the wrong fix (ledger #89)');
+
+    // (b) The credential authenticates and the repository is simply not granted to it.
+    writeFileSync(
+      stub,
+      '#!/usr/bin/env bash\ncase "$*" in\n  *push*) echo "remote: Permission to sscodeai/some-repo.git denied to sscodeai." >&2; echo "fatal: unable to access \'https://github.com/sscodeai/some-repo.git/\': The requested URL returned error: 403" >&2; exit 128;;\nesac\nexit 0\n',
+    );
+    chmodSync(stub, 0o755);
+    const ungranted = spawnSync('bash', [SCRIPT], {
+      encoding: 'utf8',
+      env: { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'sscodeai/some-repo', PATH: `${dir}:${process.env.PATH}` },
+    });
+    const ungrantedText = `${ungranted.stdout}${ungranted.stderr}`;
+    assert.equal(ungranted.status, 3, ungrantedText);
+    assert.match(ungrantedText, /REFUSED by the host/);
+    assert.match(ungrantedText, /SELECTED for it/, 'the ledger #81 advice is given for the case it was written for');
+    assert.doesNotMatch(ungrantedText, /REJECTED by the host/, 'a granted-but-missing repository is not a credential fault');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
