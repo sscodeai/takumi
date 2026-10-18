@@ -11,9 +11,9 @@
  *
  *   G1  no read-only root may be, or contain, the project root. The toolchain
  *       lives in directories that are SIBLINGS of the project (`node` is at
- *       /srv/hermes/.local/bin, the project at /srv/hermes/workspaces/takumi),
+ *       <home>/.local/bin, the project at <home>/workspaces/takumi),
  *       so mirroring those siblings is safe — but mirroring a parent such as
- *       /srv/hermes would re-expose the platform repository by accident.
+ *       the home directory would re-expose the platform repository by accident.
  *   G2  a read-write root must be the delivery worktree or this run's own judge
  *       directory. The project root itself and `.takumi` wholesale are refused:
  *       an implementer that can write the platform repository is not contained.
@@ -92,8 +92,8 @@ export interface SandboxToolchainProbeOptions {
  * every PATH entry, and the real location of each required tool.
  *
  * A required tool is added through the REAL path it resolves to as well as
- * through PATH: `node` is a symlink to `/srv/hermes/.hermes/node/bin/node`, and
- * a boundary that only mirrors `/srv/hermes/.local/bin` would expose a dangling
+ * through PATH: `node` may be a symlink into a toolchain directory, and
+ * a boundary that only mirrors `<home>/.local/bin` would expose a dangling
  * symlink. A PATH entry that would contain the project (G1) is dropped here
  * rather than mirrored, and the dropped entry is reported.
  */
