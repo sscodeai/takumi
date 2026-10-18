@@ -347,7 +347,7 @@ repository the chain does not own, and it is named here rather than quietly clea
 ## Reproducing a round
 
 ```bash
-source /srv/hermes/.env            # OPENCODE_GO_API_KEY (injected, never printed)
+source <your-env-file>              # provider key (injected, never printed)
 export TAKUMI_PI_RUNTIME=/abs/path/to/runtimes/pi/dist/index.js
 pnpm -r build                      # the chain runs apps/cli/dist
 bash scripts/preflight-unattended.sh   # refuses to measure an unhealthy machine (ledger #76)
