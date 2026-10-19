@@ -214,6 +214,38 @@ test('a delivery may not CREATE an authorization, and that is the AGENT\'s work,
   assert.equal(hasBlockingFinding(modified), false, 'a modification stays a human\'s decision, never a revert order');
 });
 
+// Ledger #90: `added` IS NOT "THIS DELIVERY CREATED IT". The delivery review runs with `baseRef: root`, so
+// `git diff root..HEAD` calls every file the TARGET repository ever added "added" — including grants that
+// were on its main before the run began. Measured 2026-10-19: `takumi-delivery-demo` had carried copies
+// since its own `90c18a8` and EVERY delivery to it was refused (2 of 2) for paths it never touched, while
+// the same sentence against a fresh repository delivered and merged. A standing copy is real trouble and
+// still deserves a finding — but a HUMAN's, because no attempt to remove it belongs in the delivery's
+// change set. `baseContent` is what tells the two apart.
+test('a standing authorization AT THE BASE is a human finding, not a block on this delivery (ledger #90)', () => {
+  // The file was already at the base: the delivery did not author it.
+  const standing = runReviewRules(
+    input(change('docs/authorizations/SA-002.yaml', 'id: SA-002\nsignedBy: "SS"\n', 'id: SA-002\nsignedBy: "SS"\n', 'added')),
+  );
+  const standingFinding = standing.find((f) => f.rule === 'never-delivered-path');
+  assert.ok(standingFinding, 'a standing copy is still REPORTED — it is a leak that has to be removed');
+  assert.equal(standingFinding.severity, 'human', 'but by a human, from the TARGET: the delivery cannot fix it and must not try');
+  assert.equal(hasBlockingFinding(standing), false, 'a delivery that created nothing must not be stopped for it');
+  assert.match(standingFinding.detail, /ALREADY at this review's base/);
+  assert.match(standingFinding.detail, /HUMAN must remove it from the TARGET/);
+
+  // The case the rule was written for is unchanged: the path was NOT at the base.
+  const created = runReviewRules(input(change('docs/authorizations/SA-002.yaml', null, 'id: SA-002\n', 'added')));
+  const createdFinding = created.find((f) => f.rule === 'never-delivered-path');
+  assert.ok(createdFinding, 'a CREATED authorization is still the agent\'s own work to undo');
+  assert.equal(createdFinding.severity, 'block');
+  assert.match(createdFinding.detail, /may never create this path/);
+
+  // An EMPTY base content is not evidence of a standing file: a path absent at the base has no content,
+  // and reading `''` as "it was there" would turn the block into a no-op for a zero-byte file.
+  const emptyButNew = runReviewRules(input(change('docs/authorizations/SA-003.yaml', null, '', 'added')));
+  assert.equal(hasBlockingFinding(emptyButNew), true, 'a zero-byte creation is still a creation');
+});
+
 test('protected paths and test patterns are configurable', () => {
   const custom = runReviewRules(input(change('infra/terraform.tf', 'a', 'b')), {
     protectedPaths: ['(^|/)infra/'],

@@ -361,15 +361,31 @@ export function runReviewRules(input: ReviewInput, rules: ReviewRules = {}): Rev
   // its severity is `block` because the fix is mechanical — take it out of your delivery — and because no
   // delivery is legitimately about a grant. A MODIFICATION of one stays a human's call (ADR-045): a person
   // may legitimately update a grant, and the agent must never be told to revert that.
+  //
+  // `status === 'added'` IS NOT THE SAME AS "THIS DELIVERY CREATED IT" (ledger #90). The delivery review
+  // runs with `baseRef: root` — the ROOT commit of the repository under review — so `git diff root..HEAD`
+  // calls EVERY file the target repository ever added "added", including files that were already on its
+  // main before this run started. Measured 2026-10-19: `takumi-delivery-demo` had carried copies of these
+  // grants since its own `90c18a8`, and every subsequent delivery was refused for paths it never touched
+  // (2 of 2 attempts, `verify-boundary-chain.sh`). A rule that reports a STANDING file as this delivery's
+  // creation can never stop firing on that target, which is a guard whose scope does not survive the repo
+  // it runs on (the same defect as ledger #27, one layer up).
+  //
+  // The check is `baseContent`: the file's content AT THE BASE the review compares against. When it is
+  // present the path already existed at that base, so this delivery did not create it — and the finding is
+  // NOT dropped, it is downgraded to the `human` severity a standing copy deserves. The `block` is kept for
+  // the case the rule was written for: a path that did not exist at the base and appears in the change set.
   for (const change of input.changes) {
     if (change.status !== 'added') continue;
     if (!matchesAny(change.path, compile(NEVER_DELIVERED_PATTERNS))) continue;
+    const stoodAtBase = (change.baseContent ?? '') !== '';
     findings.push({
       rule: 'never-delivered-path',
-      severity: 'block',
+      severity: stoodAtBase ? 'human' : 'block',
       path: change.path,
-      detail:
-        'a delivery may never create this path: it is the PLATFORM\'s own artefact, and a copy of it in a target repository leaks the platform\'s internals and the operator\'s identity into a repository this run does not own — remove it from the change set',
+      detail: stoodAtBase
+        ? `a copy of the PLATFORM's own artefact was ALREADY at this review's base: this delivery did not create it, and no attempt to remove it belongs in its change set — a copy of a grant in a repository this run does not own leaks the platform's internals and the operator's identity, so a HUMAN must remove it from the TARGET (ledger #90). Until it is removed, every delivery to this repository reports this finding`
+        : 'a delivery may never create this path: it is the PLATFORM\'s own artefact, and a copy of it in a target repository leaks the platform\'s internals and the operator\'s identity into a repository this run does not own — remove it from the change set',
     });
   }
 
