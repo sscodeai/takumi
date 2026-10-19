@@ -84,7 +84,15 @@ if [ -n "$REPO" ]; then
       *"Invalid username or token"* | *"Authentication failed"* | *"could not read Username"* | *"terminal prompts disabled"*)
         # (a) The host refused the CREDENTIAL. No repository is reachable on this transport, so this
         # says nothing about $REPO — do NOT send the operator to the token's repository list.
-        fail "the credential in ~/.git-credentials was REJECTED by the host, so this run could not push to ANY repository (not a statement about $REPO): $last. The chain's publish step pushes with plain 'git push', so an unusable credential stops a delivery AFTER its implementation has been paid for (ledger #89). Fix the transport: a credential of the form https://x-access-token:TOKEN@github.com works — measured on this machine, where the stored credential does not. Verify with: git -c credential.helper=store push --dry-run https://github.com/$REPO.git HEAD:$probe_ref"
+        #
+        # WHERE THE CREDENTIAL COMES FROM is not this script's business to assert: measured
+        # 2026-10-18, `~/.git-credentials` held a VALID token while a URL-scoped helper
+        # (`[credential "https://github.com"] helper = !gh auth git-credential` in ~/.gitconfig)
+        # replaced `store` for github.com, so git sent a DIFFERENT, EXPIRED token from
+        # `~/.config/gh/hosts.yml` on every push. The file this message used to name was innocent.
+        # It therefore names the FETCH, not the file: `git config --show-origin --get-all
+        # credential.helper` is what reveals an override like that one.
+        fail "the host REJECTED the credential this repository hands to git, so this run could not push to ANY repository (not a statement about $REPO): $last. The chain's publish step pushes with plain 'git push', so an unusable credential stops a delivery AFTER its implementation has been paid for (ledger #89). WHICH credential that is, is a config question, not a file question: run 'git config --show-origin --get-all credential.helper' — a URL-scoped 'credential.https://github.com.helper' REPLACES the global store, so ~/.git-credentials (and the valid token inside it) is never read (measured 2026-10-18: that override pointed git at an expired token in ~/.config/gh/hosts.yml). Verify the fix with: git -c credential.helper=store push --dry-run https://github.com/$REPO.git HEAD:$probe_ref"
         ;;
       *)
         fail "a push to $REPO was REFUSED by the host: $last. The credential AUTHENTICATED and this repository was not granted to it: a fine-grained token only reaches the repositories SELECTED for it, and this one is not in that list — add it, or point delivery.repo at a repository this credential already covers. Refused BEFORE an implementation is paid for (ledger #81)"

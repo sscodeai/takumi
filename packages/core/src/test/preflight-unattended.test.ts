@@ -172,9 +172,17 @@ test('the preflight tells a REJECTED CREDENTIAL apart from an UNGRANTED REPOSITO
     });
     const rejectText = `${rejected.stdout}${rejected.stderr}`;
     assert.equal(rejected.status, 3, rejectText);
-    assert.match(rejectText, /credential .*REJECTED by the host/, 'the credential cause is NAMED');
+    assert.match(rejectText, /REJECTED the credential/, 'the credential cause is NAMED');
     assert.match(rejectText, /could not push to ANY repository/, 'and it says this is NOT about the target');
+    assert.match(rejectText, /credential\.helper/, 'and it sends the operator to the CONFIG question, not to a file it cannot know is the right one');
     assert.doesNotMatch(rejectText, /SELECTED for it/, 'the token-repository-list advice must NOT be given here — it is the wrong fix (ledger #89)');
+    // Measured 2026-10-18: naming a FILE as the culprit here was wrong. ~/.git-credentials held a
+    // VALID token while a URL-scoped helper replaced `store` for github.com and git sent an expired
+    // token from ~/.config/gh/hosts.yml. The message may MENTION that file (it is the one an operator
+    // checks first, and saying it is BYPASSED is the useful fact) but must never assert that the file
+    // itself was rejected — that sentence is what sent the last operator to the wrong place.
+    assert.doesNotMatch(rejectText, /~\/\.git-credentials\s+(was|is)\s+(held\s+)?[^.]*REJECTED/i, 'the message must not blame ~/.git-credentials for the rejection (ledger #89)');
+    assert.match(rejectText, /show-origin|credential\.helper/, 'it names the CONFIG command that reveals an override');
 
     // (b) The credential authenticates and the repository is simply not granted to it.
     writeFileSync(
