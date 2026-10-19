@@ -133,7 +133,7 @@ test('the preflight refuses a delivery target this credential cannot push to (le
   try {
     const r = spawnSync('bash', [SCRIPT], {
       encoding: 'utf8',
-      env: { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'torvalds/linux', PATH: `${dir}:${process.env.PATH}` },
+      env: { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'torvalds/linux', PATH: `${dir}:${process.env.PATH}`, GITHUB_TOKEN: 'stub-token-the-git-stub-ignores' },
     });
     assert.equal(r.status, 3, `${r.stdout}${r.stderr}`);
     assert.match(`${r.stdout}${r.stderr}`, /REFUSED by the host/);
@@ -168,7 +168,7 @@ test('the preflight tells a REJECTED CREDENTIAL apart from an UNGRANTED REPOSITO
     chmodSync(stub, 0o755);
     const rejected = spawnSync('bash', [SCRIPT], {
       encoding: 'utf8',
-      env: { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'sscodeai/some-repo', PATH: `${dir}:${process.env.PATH}` },
+      env: { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'sscodeai/some-repo', PATH: `${dir}:${process.env.PATH}`, GITHUB_TOKEN: 'stub-token-the-git-stub-ignores' },
     });
     const rejectText = `${rejected.stdout}${rejected.stderr}`;
     assert.equal(rejected.status, 3, rejectText);
@@ -192,13 +192,59 @@ test('the preflight tells a REJECTED CREDENTIAL apart from an UNGRANTED REPOSITO
     chmodSync(stub, 0o755);
     const ungranted = spawnSync('bash', [SCRIPT], {
       encoding: 'utf8',
-      env: { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'sscodeai/some-repo', PATH: `${dir}:${process.env.PATH}` },
+      env: { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: 'sscodeai/some-repo', PATH: `${dir}:${process.env.PATH}`, GITHUB_TOKEN: 'stub-token-the-git-stub-ignores' },
     });
     const ungrantedText = `${ungranted.stdout}${ungranted.stderr}`;
     assert.equal(ungranted.status, 3, ungrantedText);
     assert.match(ungrantedText, /REFUSED by the host/);
     assert.match(ungrantedText, /SELECTED for it/, 'the ledger #81 advice is given for the case it was written for');
     assert.doesNotMatch(ungrantedText, /REJECTED by the host/, 'a granted-but-missing repository is not a credential fault');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Ledger #91: THE TWO CREDENTIALS ARE DIFFERENT. The push probe exercises GIT's credential
+// (~/.git-credentials via the helper chain), which is what `publish` uses to put the branch on the
+// host. The chain's own API calls -- opening the pull request, reading the pipeline's checks, merging
+// -- resolve a token from the ENVIRONMENT. Measured 2026-10-19: autopilot.sh neither set nor checked
+// GITHUB_TOKEN, this preflight did not look at it, and a full run passed intake AND confirmation and
+// was refused at `publish` AFTER the implementation, the delivered tests and the judge had all run.
+// A green preflight and an unusable chain is the defect family #76/#78/#81/#89 exist to remove, in
+// the one direction none of them covered: they all verify what CAN reach the host, never that the RUN
+// will present a credential to it.
+test('the preflight refuses when the chain itself has no token to present (ledger #91)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pf-notoken-'));
+  const runtime = join(dir, 'index.js');
+  writeFileSync(runtime, 'export const PiRuntimeAdapter = class {};\n');
+  // A git stub that succeeds, so the PUSH probe would pass — which is exactly the trap. The refusal
+  // must come from the missing ENV VAR, not from anything git says.
+  const stub = join(dir, 'git');
+  writeFileSync(stub, '#!/usr/bin/env bash\nexit 0\n');
+  chmodSync(stub, 0o755);
+  try {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      TAKUMI_PI_RUNTIME: runtime,
+      TAKUMI_DELIVERY_REPO: 'sscodeai/some-repo',
+      PATH: `${dir}:${process.env.PATH}`,
+    };
+    delete env.GITHUB_TOKEN;
+    const r = spawnSync('bash', [SCRIPT], { encoding: 'utf8', env });
+    const text = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 3, text);
+    assert.match(text, /no GITHUB_TOKEN is set/, 'the missing environment variable is NAMED');
+    assert.match(text, /DIFFERENT credential store/, 'and the two credentials are distinguished, not conflated');
+    assert.match(text, /Refused BEFORE an implementation is paid for/, 'and it says why refusing here matters');
+    // The push probe must NOT have been reached: a passing git stub is not evidence about the env.
+    assert.doesNotMatch(text, /PREFLIGHT ok: a push to/, 'the push probe is not what failed here');
+
+    // With the token present the same environment passes the env check and reaches the push probe.
+    const ok = spawnSync('bash', [SCRIPT], {
+      encoding: 'utf8',
+      env: { ...env, GITHUB_TOKEN: 'stub-token-the-git-stub-ignores' },
+    });
+    assert.doesNotMatch(`${ok.stdout}${ok.stderr}`, /no GITHUB_TOKEN is set/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

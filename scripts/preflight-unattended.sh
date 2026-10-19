@@ -53,6 +53,26 @@ delivery_branch() {
 }
 REPO=$(delivery_repo)
 if [ -n "$REPO" ]; then
+  # THE TWO CREDENTIALS ARE DIFFERENT, AND ONLY ONE WAS BEING CHECKED (ledger #91).
+  #
+  # The push probe below exercises GIT's credential — `~/.git-credentials` via the helper chain — which is
+  # what the `publish` step uses to put the branch on the host. The CHAIN'S OWN API CALLS (opening the pull
+  # request, reading the pipeline's checks, merging) resolve a token from the ENVIRONMENT, by the name the
+  # provider declares (`GITHUB_TOKEN` for github). Those are two different sources: a machine can push and
+  # still have no token in the environment at all.
+  #
+  # Measured 2026-10-19: `scripts/autopilot.sh` neither sets nor checks `GITHUB_TOKEN`, this preflight does
+  # not look at it, and a full run passed intake and confirmation and was then refused at `publish` with
+  # "no token is configured — set the environment variable GITHUB_TOKEN" AFTER the implementation, the
+  # delivered tests and the judge had all run. Green preflight, unusable chain — exactly the defect family
+  # #76/#78/#81/#89 exist to remove, in the one direction none of them covered (they all verify what CAN
+  # reach the host; none verified that the RUN will PRESENT it).
+  #
+  # The chain itself is right to fail closed here — an unauthenticated request is never sent — so the fix
+  # is to move the discovery to the cheapest possible moment, which is this file.
+  if [ -z "${GITHUB_TOKEN:-}" ]; then
+    fail "no GITHUB_TOKEN is set in this environment, so the chain could not open a pull request, read the pipeline's checks or merge — the push probe below would still pass, because git reads a DIFFERENT credential store (~/.git-credentials via the helper chain). Set it before a run: set -a; source /srv/hermes/.env; set +a; export GITHUB_TOKEN=\$(git credential fill <<< \$'protocol=https\\nhost=github.com') … or export it from wherever the operator keeps it. Refused BEFORE an implementation is paid for (ledger #91)"
+  fi
   # A DRY-RUN PUSH, because the cheap API answer LIES here. `gh api repos/<r> --jq .permissions.push`
   # returned `true` for a repository this credential cannot push to — that field describes the USER's
   # permission, not what a fine-grained token was SELECTED for. Measured 2026-10-13: that false
