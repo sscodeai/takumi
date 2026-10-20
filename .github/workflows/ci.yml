@@ -29,6 +29,27 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+  # HAS `main` BEEN LEFT BEHIND? (ledger #94)
+  #
+  # On 2026-10-20 `main` was 131 commits — fourteen days, five ledgers of fixes — behind `dev`, and
+  # nothing was broken, which is why nobody noticed. The cost is paid at release time, when "merge dev
+  # into main" is a 10,000-line review nobody reads.
+  #
+  # `fetch-depth: 0` is required: the default shallow clone has no history to count commits over, and a
+  # check that cannot see the history must FAIL rather than report zero (the script exits 2 for that).
+  # `continue-on-error` is deliberately NOT set: this is advisory in WHAT it measures (a distance, not a
+  # verdict on the commits) but it is still a fact the branch should not be allowed to hide.
+  main-lag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Has main been left behind by dev?
+        run: |
+          git fetch --quiet origin main dev
+          bash scripts/check-main-lag.sh --max 40
+
   # The Pi runtime smoke test (scripts/pi-smoke.mjs) is intentionally NOT a CI job:
   #
   #   * runtimes/pi is not a pnpm workspace member (it depends on the unpublished
