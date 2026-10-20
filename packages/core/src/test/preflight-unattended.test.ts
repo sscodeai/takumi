@@ -55,7 +55,9 @@ test('the preflight refuses a runtime dist OLDER than its source, naming the cau
     // The source is NEWER than the artifact: exactly the 2026-10-13 shape.
     const older = new Date(Date.now() - 60_000);
     utimesSync(join(dist, 'index.js'), older, older);
-    const r = preflight({ TAKUMI_PI_RUNTIME: join(dist, 'index.js'), TAKUMI_DELIVERY_REPO: '' });
+    // The model key is part of the environment the preflight now checks (#93): a test that asserts a PASS
+    // must supply it, or it exercises the env check instead of the staleness/greater-than case it names.
+    const r = preflight({ TAKUMI_PI_RUNTIME: join(dist, 'index.js'), TAKUMI_DELIVERY_REPO: '', OPENCODE_GO_API_KEY: 'stub-model-key' });
     assert.equal(r.status, 3, `${r.stdout}${r.stderr}`);
     assert.match(`${r.stdout}${r.stderr}`, /PREFLIGHT FAIL: .*OLDER than its source/);
     assert.match(`${r.stdout}${r.stderr}`, /confinement\.ts/, 'the refusal NAMES the file that is newer');
@@ -76,7 +78,7 @@ test('the preflight passes a runtime dist that is NEWER than its source', () => 
     writeFileSync(join(dist, 'index.js'), 'export const PiRuntimeAdapter = class {};\n');
     const older = new Date(Date.now() - 60_000);
     utimesSync(join(src, 'confinement.ts'), older, older);
-    const r = preflight({ TAKUMI_PI_RUNTIME: join(dist, 'index.js'), TAKUMI_DELIVERY_REPO: '' });
+    const r = preflight({ TAKUMI_PI_RUNTIME: join(dist, 'index.js'), TAKUMI_DELIVERY_REPO: '', OPENCODE_GO_API_KEY: 'stub-model-key' }); // #93: a test asserting a PASS must supply the model key
     assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
     assert.match(r.stdout, /PREFLIGHT ok: pi runtime loads and exports PiRuntimeAdapter/);
   } finally {
@@ -92,7 +94,7 @@ test('the preflight passes on this machine when the runtime is really built', (t
     t.skip('runtimes/pi/dist is not built on this machine');
     return;
   }
-  const r = preflight({ TAKUMI_PI_RUNTIME: real, TAKUMI_DELIVERY_REPO: '' });
+  const r = preflight({ TAKUMI_PI_RUNTIME: real, TAKUMI_DELIVERY_REPO: '', OPENCODE_GO_API_KEY: 'stub-model-key' });
   assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
   assert.match(r.stdout, /PREFLIGHT ok: pi runtime loads and exports PiRuntimeAdapter/);
 });
@@ -245,6 +247,34 @@ test('the preflight refuses when the chain itself has no token to present (ledge
       env: { ...env, GITHUB_TOKEN: 'stub-token-the-git-stub-ignores' },
     });
     assert.doesNotMatch(`${ok.stdout}${ok.stderr}`, /no GITHUB_TOKEN is set/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Ledger #93: the THIRD missing variable, and the one that costs the most. With OPENCODE_GO_API_KEY unset
+// every agent step failed INSTANTLY (`PiRuntimeAdapter: missing env OPENCODE_GO_API_KEY`) and the intake
+// burned BOTH repair rounds on a failure no repair can reach — two agent turns spent on a variable that
+// was missing before the run started. The preflight now NAMES it and refuses. It deliberately does not
+// read .env: a script that loads a secret implicitly is a script whose credential handling nobody can
+// reason about.
+test('the preflight refuses when the model key the agent needs is missing (ledger #93)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pf-nokey-'));
+  const runtime = join(dir, 'index.js');
+  writeFileSync(runtime, 'export const PiRuntimeAdapter = class {};\n');
+  try {
+    const env: NodeJS.ProcessEnv = { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: '' };
+    delete env.OPENCODE_GO_API_KEY;
+    const r = spawnSync('bash', [SCRIPT], { encoding: 'utf8', env });
+    const text = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 3, text);
+    assert.match(text, /OPENCODE_GO_API_KEY is not set/, 'the variable is NAMED');
+    assert.match(text, /burn both repair rounds/, 'and it says what the omission costs if it goes unnoticed');
+    assert.match(text, /Refused BEFORE any step is spent/, 'and that this refusal is the cheap outcome');
+
+    // The key being present clears this check (the runtime fixture is otherwise identical).
+    const ok = spawnSync('bash', [SCRIPT], { encoding: 'utf8', env: { ...env, OPENCODE_GO_API_KEY: 'stub-model-key' } });
+    assert.doesNotMatch(`${ok.stdout}${ok.stderr}`, /OPENCODE_GO_API_KEY is not set/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
