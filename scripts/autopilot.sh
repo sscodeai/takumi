@@ -60,6 +60,45 @@ fi
 
 step() { printf '\n== %s\n' "$*"; }
 
+# ---- 0a. THE RUN'S ENVIRONMENT, RESOLVED ONCE (ledger #91, #93) -----------------------------------
+# TWICE NOW a green preflight has sat in front of a chain that could not run, because the preflight
+# VERIFIED a thing and the chain then needed a different thing:
+#
+#   (a) the token. `publish` pushes with `git push` (git's own credential), but every API call — opening
+#       the pull request, reading the pipeline's checks, merging — reads `GITHUB_TOKEN` from the
+#       ENVIRONMENT. Two stores. A full run passed the intake and the confirmation and was refused at
+#       `publish` after the implementation, the tests and the judge had all run (measured 2026-10-19).
+#   (b) the runtime. The preflight checks `[ -f "${TAKUMI_PI_RUNTIME:-<root>/runtimes/pi/dist/index.js}" ]`
+#       — it falls back to a PATH. The CLI does NOT: it needs the variable EXPORTED, and with it unset it
+#       dies at the first step with "pi is not available (BLOCKED_BY_EXTERNAL_DEPENDENCY)". Measured
+#       2026-10-20: this script passed its own preflight, spent an intake attempt and then failed on a
+#       package it could have found by name.
+#
+# Both are resolved HERE, from what is already on the machine, and only when the operator has not
+# supplied them. An operator who exports a value is untouched: these blocks are no-ops then.
+if [ "${DRY_RUN}" -eq 0 ]; then
+  if [ -z "${GITHUB_TOKEN:-}" ]; then
+    if GITHUB_TOKEN=$(printf 'protocol=https\nhost=github.com\n\n' | git -c credential.helper=store credential fill 2>/dev/null | sed -n 's/^password=//p') \
+      && [ -n "${GITHUB_TOKEN}" ]; then
+      export GITHUB_TOKEN
+      echo "token: read from git's credential store (GITHUB_TOKEN was not set)" >&2
+    else
+      unset GITHUB_TOKEN
+      echo "refusing: no GITHUB_TOKEN in the environment, and git's credential store yielded none." >&2
+      echo "The publish step pushes with git, but the chain's API calls (pull request, checks, merge)" >&2
+      echo "read GITHUB_TOKEN. Export it, or fix the credential store the preflight's dry-run push" >&2
+      echo "exercises (ledger #91). Nothing has been spent." >&2
+      exit 1
+    fi
+  fi
+  # The preflight checks the SAME default this sets, so a green preflight now means the CLI can load it.
+  if [ -z "${TAKUMI_PI_RUNTIME:-}" ] && [ -f "$ROOT/runtimes/pi/dist/index.js" ]; then
+    TAKUMI_PI_RUNTIME="$ROOT/runtimes/pi/dist/index.js"
+    export TAKUMI_PI_RUNTIME
+    echo "runtime: TAKUMI_PI_RUNTIME=$TAKUMI_PI_RUNTIME (was not set)" >&2
+  fi
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
   step "dry run — nothing is executed, these are the three commands"
   echo "1/3 intake      : ${CLI[*]} run '<request>' --workflow request-intake --runtime $RUNTIME"

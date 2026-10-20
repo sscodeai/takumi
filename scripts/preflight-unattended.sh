@@ -149,4 +149,24 @@ case "$keys" in
 esac
 
 [ -f docs/authorizations/SA-002.yaml ] || printf 'PREFLIGHT note: no standing authorization at docs/authorizations/SA-002.yaml — the chain will refuse at step 2 (a person signs that grant; ledger #76 is about the ENVIRONMENT, this is about the licence)\n'
+
+# THE MODEL KEY IS PART OF THE ENVIRONMENT TOO (ledger #93).
+#
+# Three times in three days a green preflight has preceded a chain that could not run: the token (#91),
+# the runtime path (#93), and this — the credential the AGENT itself needs. Measured 2026-10-20: with
+# `OPENCODE_GO_API_KEY` unset every agent step failed instantly (`PiRuntimeAdapter: missing env
+# OPENCODE_GO_API_KEY`), the intake burned BOTH repair rounds on a failure no repair could reach, and the
+# run ended having spent two agent turns on a variable that was missing before it started.
+#
+# The name is the RUNTIME's to declare (`apiKeyEnv`, defaulting to this one), and the runtime is a
+# pluggable port — so this checks the pi runtime's documented default rather than inventing a rule: a
+# different runtime's key is that runtime's own business, and its adapter already refuses by name.
+#
+# NOTE what this does NOT do: read `.env`. A key is a secret, and a script that loads one implicitly is a
+# script whose credential handling nobody can reason about. It NAMES the variable and the file it is
+# usually kept in, and refuses.
+if [ "${TAKUMI_RUNTIME:-pi}" = "pi" ] && [ -z "${OPENCODE_GO_API_KEY:-}" ]; then
+  fail "OPENCODE_GO_API_KEY is not set, so every AGENT step would fail instantly (the pi adapter refuses by name) and the intake would burn both repair rounds on a failure no repair can reach. Load the operator's environment first: set -a; source /srv/hermes/.env; set +a — or export the key the runtime was configured with (apiKeyEnv). Refused BEFORE any step is spent (ledger #93)"
+fi
+
 exit 0
