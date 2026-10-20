@@ -244,7 +244,7 @@ test('a repair step that cannot be run is refused, and says why', async () => {
     assert.equal(res.status, 'failed');
     const attempt = res.steps.find((s) => s.stepId === 'delivery_attempt');
     assert.equal(attempt?.status, 'failed');
-    assert.match(attempt?.summary ?? '', /declares no acceptance step: a repair loop with nothing to judge it cannot know when to stop/);
+    assert.match(attempt?.summary ?? '', /declares neither an acceptance nor a quality gate step: a repair loop with nothing to judge it cannot know when to stop/);
     assert.equal(res.steps.find((s) => s.stepId === 'delivery')?.status, 'skipped');
   } finally {
     rmSync(artifacts, { recursive: true, force: true });

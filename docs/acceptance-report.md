@@ -82,7 +82,9 @@ where noted, its own ADR:
    platform does not yet *generate* an independent oracle for an arbitrary new requirement.
 3. **`takumi loop` is v1**: manager decisions are LLM-driven and non-deterministic.
 4. **Traceability uses ID naming conventions**, not structural foreign keys.
-5. **Tool plugins run with user privileges** unless a sandbox is explicitly selected.
+5. **Tool plugins run with user privileges** unless a sandbox is explicitly selected. A delivery run
+   (one with a worktree) is confined by default (ADR-058); `takumi pilot` and the non-Pi runtimes are
+   not yet confined, and ADR-058 limitations 8-9 say so.
 6. **Claiming is not atomic on any board** (`atomicClaim: false`): one runner per item is still
    the caller's job (a local slot lock is provided).
 7. **A merge conflict is never resolved by rewriting history** — it is aborted and handed to the

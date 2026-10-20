@@ -3,7 +3,7 @@
 **Status**: implemented, run end to end, and independently verified. The verification
 found defects that were NOT predicted by the design.
 
-- Repository: `/srv/hermes/workspaces/takumi`, branch `feat/blackbox-acceptance`
+- Repository: `<repo>`, branch `feat/blackbox-acceptance`
   (cut from `github/dev` at `e20620a`).
 - Design this implements: `docs/design/blackbox-acceptance-scout.md`, Section 3
   (Change 1 and Change 2) and Section 6 (PoC-1).
@@ -812,7 +812,7 @@ sha256:dc6bc78aa609006d72d81bc114c847527bdd6e83ae1f7ed4d0a6f31dbe7e7081`).
 ### 14.1 i5 — the run delivered the WRONG document (ledger #34)
 
 The implementer's own report states which document it followed: `Requirement:
-/srv/hermes/workspaces/takumi/docs/requirements/poc-blackbox-acceptance.yaml` and a
+<repo>/docs/requirements/poc-blackbox-acceptance.yaml` and a
 `csv-summary.mjs` for employee/department salaries, while the run was confirmed against a
 station-temperature `intake.yaml`. Then the review step failed on a change set that was right there:
 
@@ -835,7 +835,7 @@ This run got the requirement right and stopped before its judge:
 
 ```
   step implementation: completed — Implemented and committed in
-    `/srv/hermes/workspaces/takumi/.takumi/worktree-station2`.
+    `<repo>/.takumi/worktree-station2`.
   step quality_gate: completed — quality_gate PASSED: 0 failing over 67 tests, exit 0
   step rule_review: failed — rule_review FAILED: a human must decide this — a machine may not decide
     it, and the automation must not continue
@@ -856,7 +856,7 @@ created-manifest note, and then:
 
 ```
   workflow[rule_review]: rule review passed (1 note(s))
-  workflow[judge_forge]: judge forged: /srv/hermes/.../judge.sh sha256:9e7b78aff827
+  workflow[judge_forge]: judge forged: <repo>/.../judge.sh sha256:9e7b78aff827
   workflow[artifact_acceptance]: acceptance FAILED: acceptance FAILED: the harness reported a
     failing verdict
 ...
@@ -885,7 +885,7 @@ After the repair rounds landed (ADR-034, `9d0193c`), the same workflow on the sa
   workflow[delivery_attempt]: delivery attempt 1 of 2
   workflow[quality_gate]: quality gate PASSED (0 failing)
   workflow[rule_review]: rule review passed (1 note(s))
-  workflow[judge_forge]: judge forged: /srv/hermes/.../judge.sh sha256:d05b0affc8d9
+  workflow[judge_forge]: judge forged: <repo>/.../judge.sh sha256:d05b0affc8d9
   workflow[artifact_acceptance]: acceptance PASSED (10 check(s) ok) — ACCEPT-001 written
   workflow[delivery]: delivery manifest written (7 artifacts)
   step delivery_attempt: completed — delivery accepted on the first attempt

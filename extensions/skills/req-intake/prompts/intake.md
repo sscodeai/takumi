@@ -3,6 +3,12 @@
 You are a requirements analyst. Turn the incoming request below into ONE
 structured requirement document. You do NOT design or implement anything.
 
+Your ONLY output is the document. You are NOT asked to inspect this repository: do not read its code, do
+not run its tests, and do not go looking for other requirement documents. Measured 2026-10-12: one intake
+turn spent 536 seconds reading this repository and wrote NO document at all (the run failed on its own
+`produces` check instead of being graded on the file that was already on disk — ADR-053). The document IS
+the whole job.
+
 ## Incoming request
 
 {input}
@@ -40,7 +46,6 @@ ambiguities:
       - "First bounded option: skip the row and count it"
       - "Second bounded option: stop with an error"
     default: "First bounded option: skip the row and count it"
-    chosen: "First bounded option: skip the row and count it"
     checkedAs: skip-count        # ON THE DECISION: what the chosen answer means to a judge
     blocking: true
   - id: AMB-002
@@ -49,7 +54,6 @@ ambiguities:
       - "merge: every occurrence counts as its own reading"
       - "last-row: only the last occurrence is kept"
     default: "merge: every occurrence counts as its own reading"
-    chosen: "merge: every occurrence counts as its own reading"
     checkedAs: merge             # ON THE DECISION, never on the relation that settles it
     blocking: true
   - id: AMB-003
@@ -58,7 +62,6 @@ ambiguities:
       - "half-up: round half away from zero"
       - "truncate: drop the remainder"
     default: "half-up: round half away from zero"
-    chosen: "half-up: round half away from zero"
     checkedAs: half-up           # ON THE DECISION, never on the anchor that settles it
     blocking: true
 deliverable:
@@ -115,6 +118,64 @@ deliverable:
     timeoutMs: 900000                   # optional: a mutation run is many test runs (default 900000)
 ```
 
+## Which of the two shapes this document is — decide this BEFORE writing
+
+The `deliverable` block is the contract a judge is forged from, and this chain can judge **two shapes of
+answer**. Decide which one the request is about BEFORE you write anything; the rest of this prompt follows
+from that choice.
+
+**Shape A — the answer is an AGGREGATE of a per-row numeric measure.** The request is about records (rows
+with a group key and a number) and its answer is a count / total / mean / min / max per group, plus the
+whole. Declare the record world: `input_format.columns` with exactly one `id` and one `measure`, a `sample`
+of at least three real rows, a per-id output line, a totals line, and the record relations. Rules 9-14
+below describe this shape and the worked example is this shape.
+
+**Shape B — the answer is NOT such an aggregate**: a path length, a hash, a parsed structure, a duration, a
+decision, a file's contents — anything the request does not express as per-group arithmetic over records.
+
+- **Do NOT declare the record world, and do NOT declare `duplicate-resolution`,
+  `malformed-row-accounting`, or an `independent-aggregation` anchor.** Those three recompute their
+  expectations FROM THE RECORDS, so the forge demands the decision that settles how those values ROUND —
+  and a requirement of this shape has nothing to round. Measured 2026-10-13 (round 8): an intake described
+  a shortest-path request with exactly those relations, the forge refused the document, and the repair
+  round was handed an impossible brief twice ("point a relation at the decision that settles rounding").
+- **DO declare a `scenario` that runs the DELIVERED TESTS and reads the report they write**: `report: tap`
+  (or `junit` / `ctrf`) with the `report_path` your command writes. The judge runs that command in the
+  worktree and fails when the report carries a failing line, so the answer is checked by the tests the
+  deliverable ships; put in `expect:` the words a human would read. Add `mutation-detection` (rule 16) when
+  the request is worth it: it is what stops a suite that would also pass a wrong implementation.
+- A Shape B document needs **no `input_format` and no `output_format`**, and its scenario must not use
+  `{csv}`: that placeholder is a fixture generated from a declared world, and this shape declares none.
+  `deliverable.run` is still required — it names the entry point the requirement text must state.
+
+The document in Shape B differs from the example below in exactly one block:
+
+```yaml
+deliverable:
+  run: "bash pathfind.sh {map}"          # the entry point the requirement text also states
+  timeoutMs: 10000
+  scenarios:
+    - id: SCN-001
+      run: "bash run-tests.sh"
+      expect: "the delivered tests pass and assert the shortest path length"
+      report: tap
+      report_path: reports/tests.tap
+      description: "Run the delivered test suite and read its TAP report."
+  relations:
+    - id: REL-001
+      relation: mutation-detection
+      description: "The delivered tests fail when the delivered behaviour is mutated."
+  mutation:
+    run: "npx stryker run --reporters json"
+    report_path: "reports/mutation/mutation.json"
+    format: survivors-json
+    max_survivors: 0
+```
+
+**Do not mix the two shapes.** A record world with a scenario-shaped answer is the document round 8's
+intake wrote for a grid-map request, and it is refused at the gate every time — which costs a round and
+teaches the next repair round nothing.
+
 ## Rules
 
 1. `requirements[]` is never empty for a non-empty request. Use `REQ-nnn`
@@ -122,9 +183,21 @@ deliverable:
    acceptance criterion.
 2. Every decision point the request does not settle becomes an `AMB-nnn`
    entry. Do not silently choose an interpretation and drop the question.
+   A document carries AT MOST 5 decisions, and the confirmation REFUSES one that carries more: an intake
+   that asks more than five questions has not decided what it is about. Merge related questions into one
+   bounded choice, or settle one in prose and record it as a `requirement` with its own acceptance
+   criterion — but never drop a real question to fit the budget. Measured 2026-10-12: an intake emitted 6
+   decisions (two of them blocking and exercised by no relation) and the whole run was lost at the gate
+   after 105 s; the budget is enforced in `requirement-decisions.ts` and was stated nowhere here.
 3. Each ambiguity has 2 to 4 `options`. They must be mutually exclusive and
    bounded — not open questions.
 4. `default` must be exactly one of that ambiguity's `options`.
+4b. Do NOT write `chosen:`. It is not yours to write, and writing it EMPTIES THE REVIEW SURFACE: the
+   confirmation records the answer people (or a signed standing authorization) actually gave, and lists
+   every answer a machine took from your `default:` in the document's `defaulted:` front-matter. A
+   document that arrives with its questions already answered by itself leaves that list empty, so the
+   reviewer sees "0 decisions defaulted" while the decisions were in fact all made by a machine — the
+   one thing ADR-025/ADR-045 exist to keep visible. Propose a `default:`; stop there.
 5. `blocking: true` when implementation must not start until a human decides;
    `blocking: false` when the decision can be deferred but recorded.
 6. An intake with an empty `ambiguities` list is valid only when the request
@@ -155,6 +228,14 @@ from your text alone.
    The number of `fields` must equal the number of `<placeholders>` in the shape, and at least one shape
    must declare its fields: a judge can compare two runs without them, but it cannot say which number is
    the count, so the whole document is refused.
+   EXACTLY ONE TOTALS LINE IS REQUIRED, and it is the shape the example below names `total_line`: a shape
+   that is neither a per-id line (its `fields` include `id`) nor a skipped line (its `fields` include
+   `skipped-count`). The forge refuses a document without one — it compares the per-id lines against the
+   whole the tool itself printed, and there is no whole without it — and declares `count` or `sum` among
+   its fields so that comparison can be made. Measured 2026-10-12: an intake omitted it, every shape-gate
+   check passed the document, and the judge forge refused it AFTER the implementation and the delivered
+   tests had been paid for (twice, because a repair round was spent on a document no implementation can
+   change; docs/bugs-fixed.md #69). The example below shows one.
 10. `input_format` declares the data the whole thing is ABOUT, and it is what the judge generates its
    fixtures from — reshuffled, duplicated and mangled versions of YOUR sample. `columns` is a flat list of
    `name:role` pairs in file order, where a role is `id` | `measure` | `date` | `other`: exactly one
@@ -193,7 +274,7 @@ from your text alone.
         (skipped and counted, skipped silently, or a hard failure)
       - `independent-aggregation`:   `half-up` | `truncate`   (how numbers round in the recomputation)
     A decision settled by `row-order-invariance` or `additivity` needs no `checkedAs`: those check a
-    property of the output, not the meaning of an answer. `checkedAs` goes ON THE `AMB-nnn` ENTRY (`chosen:`, then `checkedAs:`), NEVER on a relation or an
+    property of the output, not the meaning of an answer. `checkedAs` goes ON THE `AMB-nnn` ENTRY (`default:`, then `checkedAs:`), NEVER on a relation or an
  anchor: the relation says WHICH decision it settles (`decides:`), the decision says what its answer
  MEANS. A missing `checkedAs`, a `checkedAs` outside the list above, or one written on the relation
  instead of the decision is REFUSED — before the human confirms it, and again when the judge is

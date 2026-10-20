@@ -45,10 +45,13 @@ export {
   resolveStepPrompt,
   parseAcceptVerdict,
   parseReviewVerdict,
+  runStepCommand,
 } from './workflow-engine.js';
 export type {
   AcceptVerdict,
   ParsedAcceptVerdict,
+  StepCommandError,
+  StepCommandRequest,
   WorkflowExecutionContext,
   WorkflowRunResult,
   WorkflowStepResult,
@@ -60,7 +63,8 @@ export { detectHardFailure, parseTestReport, judgeGate } from './quality-gate.js
 export type { TestReport, TestShape } from './quality-gate.js';
 
 export { ArtifactStore } from './artifact-store.js';
-export { buildTraceability, renderTraceabilityMatrix } from './traceability.js';
+export { buildTraceability, renderTraceabilityMatrix, traceabilityCoverage } from './traceability.js';
+export type { TraceabilityCoverage } from './traceability.js';
 export type { TraceabilityNode, TraceLink } from './traceability.js';
 export { runRuntimeContractSuite } from './contract.js';
 export {
@@ -89,6 +93,7 @@ export {
   JUDGE_MUTATION_FORMATS,
   JUDGE_SCENARIO_REPORTS,
   JUDGE_RELATION_VOCABULARY,
+  JUDGE_RELATIONS_THAT_NEED_THE_WORLD,
   MIN_MUTATION_TIMEOUT_MS,
   MIN_RUN_TIMEOUT_MS,
   DEFAULT_RUN_TIMEOUT_MS,
@@ -182,9 +187,69 @@ export {
 } from './review-rules.js';
 export { collectReviewInput, createRuleReviewer, verdictFromFindings } from './review.js';
 export type { CollectReviewInputOptions, RuleReviewerOptions } from './review.js';
-export type { Sandbox, SandboxOptions, SandboxResult } from './sandbox.js';
+export type {
+  Sandbox,
+  SandboxLimits,
+  SandboxMountMode,
+  SandboxOptions,
+  SandboxPolicy,
+  SandboxResult,
+  SandboxRoots,
+  SandboxStagedFile,
+  StepSandbox,
+  StepSandboxRequest,
+} from './sandbox.js';
 export { DockerSandbox, NoopSandbox, dockerAvailable } from './sandbox-docker.js';
-export { UnshareSandbox } from './sandbox-unshare.js';
+export {
+  SANDBOX_REFUSED_CODE,
+  SANDBOX_REFUSED_PREFIX,
+  UnshareSandbox,
+  clearSandboxSelfTestCache,
+  sandboxCapability,
+  sandboxSelfTest,
+  unshareAvailable,
+} from './sandbox-unshare.js';
+export type { SandboxCapability, SandboxSelfTestCheck, SandboxSelfTestResult } from './sandbox-unshare.js';
+export {
+  DEFAULT_SANDBOX_LIMITS,
+  SANDBOX_BASE_ROOTS,
+  SANDBOX_DEV_NODES,
+  SANDBOX_MASKED_PREFIXES,
+  SANDBOX_REQUIRED_TOOLS,
+  SandboxPolicyError,
+  assertMirroredRootUnmasked,
+  assertReadOnlyRootsSafe,
+  assertSandboxPolicy,
+  assertStagedFilesSafe,
+  assertWriteRootsSafe,
+  boundaryDirs,
+  buildSandboxPolicy,
+  isInside,
+  maskedPrefixOf,
+  probeToolchain,
+  renderBoundaryScript,
+  renderInnerCommand,
+  shQuote,
+} from './sandbox-policy.js';
+export type {
+  SandboxGuard,
+  SandboxPolicyInput,
+  SandboxToolProbe,
+  SandboxToolchainProbe,
+  SandboxToolchainProbeOptions,
+} from './sandbox-policy.js';
+export {
+  SandboxFsError,
+  accessWithin,
+  existsWithin,
+  globWithin,
+  mkdirWithin,
+  readFileWithin,
+  readdirWithin,
+  resolveWithinRoots,
+  statWithin,
+  writeFileWithin,
+} from './sandbox-fs-ops.js';
 export { runManagerLoop } from './manager-loop.js';
 export type { LoopRecord, TaskState, LoopDecision, LoopContract, AuditResult, LoopHost } from './manager-loop.js';
 
@@ -286,6 +351,7 @@ export type {
   RunAggregate,
   RunCostAggregate,
   RunRecord,
+  RunRecordBoundaries,
   RunRecordCost,
   RunRecordPublished,
   RunRecordStep,

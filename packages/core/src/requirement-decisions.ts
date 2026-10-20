@@ -24,6 +24,28 @@ export const JUDGE_RELATION_VOCABULARY = [
   'mutation-detection',
 ] as const;
 
+/**
+ * The relation kinds whose expectations are RECOMPUTED FROM THE DECLARED RECORDS (ADR-033): a document
+ * that declares one of them must declare its world, because the judge builds its fixtures AND its
+ * expectations in it. The other two need no world at all — a scenario (ADR-035) runs a command the
+ * document names and reads the report that command writes, and mutation-detection (ADR-039) runs the
+ * document's mutation tool.
+ *
+ * Demanding a world from a document whose checks need none refused documents this chain can implement, at
+ * the FRONT DOOR, before the forge ever saw them: measured 2026-10-13 (round 10), three runs of a
+ * shortest-path requirement were refused with "the deliverable block declares no input_format" and the
+ * later rounds of the same defect (#83, #84) had already been fixed inside the forge. The forge keeps the
+ * same list in its own WORLD_NEEDED case, and judge-vocabulary.test.ts compares the two, because a drift
+ * here is a document that passes one door and is refused at the other.
+ */
+export const JUDGE_RELATIONS_THAT_NEED_THE_WORLD = [
+  'row-order-invariance',
+  'additivity',
+  'duplicate-resolution',
+  'malformed-row-accounting',
+  'independent-aggregation',
+] as const;
+
 /** The report formats a `browser-scenario` may name as its evidence, beyond the command's exit code. */
 export const JUDGE_SCENARIO_REPORTS = ['ctrf', 'junit', 'tap'] as const;
 
@@ -609,12 +631,21 @@ export function validateRequirementDocument(text: string): string[] {
     // judged with the judge's employee fixtures (every relation failed for the wrong reason), one relation
     // passing because both sides were empty, and the fixture rows living inside the forge, where no
     // document could reach them.
+    // ... AND ONLY A DOCUMENT WHOSE CHECKS USE THAT WORLD HAS TO DECLARE ONE (ledger #85). The three
+    // relations that recompute their expectations from the records need it; a scenario and a
+    // mutation-detection run do not. Measured 2026-10-13: three runs of a shortest-path requirement — the
+    // intake having written exactly the shape the prompt asks for, one scenario and no world — were
+    // refused HERE, at the front door, in 2.5 minutes each, after #83 and #84 had already fixed the same
+    // demand inside the forge. The list is shared with the forge and compared by a test.
     const input = block.input;
-    if (input === undefined) {
+    const needsWorld = bindings.some((binding) =>
+      (JUDGE_RELATIONS_THAT_NEED_THE_WORLD as readonly string[]).includes(binding.relation),
+    );
+    if (input === undefined && needsWorld) {
       issues.push(
         'the deliverable block declares no input_format: a judge with no declared world builds its own fixtures and judges a scenario nobody asked for (add `input_format` with typed `columns` and a `sample` of at least three rows)',
       );
-    } else {
+    } else if (input !== undefined) {
       for (const column of input.columns) {
         if (!(JUDGE_COLUMN_ROLES as readonly string[]).includes(column.role)) {
           issues.push(

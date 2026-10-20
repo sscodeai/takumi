@@ -33,8 +33,13 @@ steps:
     # that said plainly — the run never reports a green pipeline it did not actually read. The wait is
     # bounded (declared seconds, default 300, ceiling 1800); the head is derived from the delivery worktree
     # when no explicit `ref` is declared.
+    #
+    # MEASURED 2026-10-12 (ledger #80): the demo repository's own pipeline took 307s end to end
+    # (queue + run) and this step gave up at 303s — four seconds early — refusing to merge a pipeline
+    # that then went green. The bound has to fit what it waits for; fail-closed is unchanged: a
+    # pipeline still pending here still never lands.
     type: await_checks
-    waitSeconds: 300
+    waitSeconds: 900
     dependsOn: [publish]
   - id: merge
     # The LAST MILE (ADR-040): land the delivery, but ONLY the head the acceptance judged. The pull request

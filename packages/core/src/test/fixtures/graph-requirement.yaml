@@ -1,0 +1,137 @@
+# A requirement document from a DIFFERENT family than the one this forge implements: a shortest path
+# over a grid map. It is the REAL document the intake wrote on 2026-10-13 (round 8, ledger #82) against
+# that request, with each `default:` also written as `chosen:` — which is exactly the document the
+# confirmation leaves behind, and therefore the document the judge is forged from in the chain.
+#
+# It is kept as evidence for one property: the judge in this chain checks a deliverable's ANSWER with
+# exactly one relation, `independent-aggregation`, implemented as an independent recomputation of an
+# aggregate of a per-row numeric measure — so it needs the decision that settles how those values are
+# rounded. This document declares that anchor (DIFF-001, "an independent breadth-first recomputation
+# ... matches the tool's result line"), which is the RIGHT intent for a path length, and there is no
+# rounding decision for it to point at: a shortest path is not rounded. No repair to this document can
+# close that, and the refusal must say so instead of sending the repair round to add a decision the
+# requirement cannot have.
+requirements:
+  - id: REQ-001
+    title: "Provide the pathfind.sh entry point"
+    description: "The deliverable provides a script pathfind.sh at the repository root, invoked as 'bash pathfind.sh <map-file>', which reads the map file passed as the first argument, writes exactly one result line to stdout, and exits 0 on a well-formed map."
+    acceptance_criteria:
+      - "Running 'bash pathfind.sh <map-file>' on a well-formed map exits 0."
+      - "stdout contains exactly one line and nothing else."
+      - "The command completes within the declared deliverable timeout on maps up to 200x200 cells."
+    priority: High
+    source: "Incoming request: a small command-line tool that reads a grid map from a text file."
+
+  - id: REQ-002
+    title: "Read the record-based map format"
+    description: "The input file has one record per line in the form y,cells,row_length: y is a non-negative integer row index, cells is a string over '#' (wall), '.' (free), exactly one 'S' (start) and exactly one 'E' (exit), and row_length is the numeric character length of cells. Records are interpreted in ascending y order, so the result does not depend on the order of the lines."
+    acceptance_criteria:
+      - "A well-formed file whose records have y values 0..n with matching row_length is interpreted as an (n+1)-row rectangular grid."
+      - "Reordering the records without changing y, cells or row_length leaves the printed result unchanged."
+    priority: High
+    source: "Incoming request (grid map with '#', '.', 'S', 'E'), encoded as records so fixtures can be generated and reordered."
+
+  - id: REQ-003
+    title: "Use 4-neighbour orthogonal movement"
+    description: "A step is a move between two orthogonally adjacent (up, down, left, right) non-wall cells; 'S' and 'E' are non-wall. Diagonal adjacency is not a step. This is the movement convention recorded as AMB-001; no relation settles a non-default convention."
+    acceptance_criteria:
+      - "Two cells that touch only at a corner are not adjacent."
+      - "The independent differential recomputes the same step count under 4-neighbour movement."
+    priority: High
+    source: "The request leaves the movement model open; recorded as AMB-001."
+
+  - id: REQ-004
+    title: "Count moves, not cells, as the path length"
+    description: "The printed length is the number of moves along the shortest path from 'S' to 'E', not the number of cells visited, and the start cell is not counted. This is the counting convention recorded as AMB-002; no relation settles a non-default convention."
+    acceptance_criteria:
+      - "A shortest path of one move prints 1."
+      - "A shortest path that covers k cells prints k-1."
+    priority: High
+    source: "Incoming request: the length of the shortest path from S to E in steps."
+
+  - id: REQ-005
+    title: "Print unreachable when no path exists"
+    description: "When 'E' cannot be reached from 'S', the tool prints the single token 'unreachable' to stdout and exits 0."
+    acceptance_criteria:
+      - "On a map whose walls separate 'S' from 'E', stdout is exactly 'unreachable'."
+      - "The exit status in that case is 0."
+    priority: High
+    source: "Incoming request: the tool prints 'unreachable' when the exit cannot be reached from the start."
+
+  - id: REQ-006
+    title: "Apply the malformed-input policy"
+    description: "A record is malformed when it has the wrong number of fields, a non-numeric y or row_length, a row_length that does not equal the length of its cells string, or a y that repeats an earlier record. The tool applies the policy recorded as AMB-003."
+    acceptance_criteria:
+      - "A file containing exactly one malformed record is handled exactly as AMB-003 decided."
+      - "Under the default stop-error policy the process exits non-zero and prints no result line."
+    priority: Medium
+    source: "The request does not say what to do with invalid input; recorded as AMB-003."
+
+  - id: REQ-007
+    title: "Emit the declared output shapes"
+    description: "On success stdout is exactly one result line whose only token is the integer step count or the literal 'unreachable'. Under the skip-count malformed policy the tool additionally prints one skipped line counting the skipped records."
+    acceptance_criteria:
+      - "A reachable map prints one result line whose token is a non-negative integer."
+      - "An unreachable map prints one result line equal to 'unreachable'."
+    priority: Medium
+    source: "Output contract the judge parses."
+
+ambiguities:
+  - id: AMB-001
+    question: "Which moves count as one step: orthogonal only, or diagonals too, and may a diagonal move pass between two walls?"
+    options:
+      - "4-neighbour: only up, down, left and right moves are allowed"
+      - "8-neighbour with corner cutting: diagonal moves are allowed even when the two orthogonal cells they pass between are walls"
+      - "8-neighbour without corner cutting: diagonal moves are allowed only when both orthogonal cells they pass between are free"
+    default: "4-neighbour: only up, down, left and right moves are allowed"
+    chosen: "4-neighbour: only up, down, left and right moves are allowed"
+    blocking: false
+
+  - id: AMB-002
+    question: "Does the printed length count moves (edges) or visited cells (including 'S')?"
+    options:
+      - "moves: the number of cell-to-cell moves from 'S' to 'E'"
+      - "cells: the number of cells on the path, including 'S' and 'E'"
+    default: "moves: the number of cell-to-cell moves from 'S' to 'E'"
+    chosen: "moves: the number of cell-to-cell moves from 'S' to 'E'"
+    blocking: false
+
+  - id: AMB-003
+    question: "How does the tool handle a malformed input record?"
+    options:
+      - "stop-error: print no result line to stdout and exit non-zero with a message on stderr"
+      - "skip-count: ignore the bad record, continue, and print a skipped line counting it"
+      - "skip-silent: ignore the bad record silently and continue"
+    default: "stop-error: print no result line to stdout and exit non-zero with a message on stderr"
+    chosen: "stop-error: print no result line to stdout and exit non-zero with a message on stderr"
+    checkedAs: stop-error
+    blocking: true
+
+deliverable:
+  run: "bash pathfind.sh {csv}"
+  timeoutMs: 10000
+  input_format:
+    columns: "y:id,cells:other,row_length:measure"
+    sample: |
+      0,#S..#,5
+      1,..#..,5
+      2,....E,5
+  output_format:
+    result_line:
+      shape: "<steps-or-unreachable>"
+      fields: [count]
+    skipped_line:
+      shape: "skipped <skipped>"
+      fields: [skipped-count]
+  relations:
+    - id: REL-001
+      relation: malformed-row-accounting
+      decides: AMB-003
+      description: "A malformed input record is handled the way AMB-003 decided; under the default stop-error policy the run exits non-zero and prints no result line."
+    - id: REL-002
+      relation: row-order-invariance
+      description: "Reordering the input records leaves the result line unchanged, because records carry an explicit y and are interpreted in ascending y order."
+  differential:
+    - id: DIFF-001
+      anchor: independent-aggregation
+      description: "An independent breadth-first recomputation of the shortest 4-neighbour path, under the AMB-001 and AMB-002 defaults, matches the tool's result line (integer step count or 'unreachable') on the same fixture."

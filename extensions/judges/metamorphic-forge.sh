@@ -17,7 +17,11 @@
 #   * a `decides:` naming a decision the document does not contain is a REFUSAL;
 #   * a `chosen` value this forge cannot mechanise is a REFUSAL, with the mechanisable values named;
 #   * a decision that would need a rounding rule the document never decides is a REFUSAL, because the
-#     alternative is a judge silently inventing one.
+#     alternative is a judge silently inventing one — and the rule is required ONLY by the checks whose
+#     expectations are recomputed from the records (#83);
+#   * a document that declares no check able to say whether the ANSWER is right is a REFUSAL, and the
+#     refusal names the declarations that would fix it: a scenario, mutation-detection, or an
+#     independent recomputation with its rounding decision.
 #
 # ADR-033 changed WHERE the fixtures come from. Before it, this forge carried the fixture rows and the
 # row-validity predicates inside itself, in one hard-coded employee/department world; a requirement about
@@ -170,8 +174,11 @@ DECIDES=$(awk '
   inb && /^[[:space:]]*decides:[[:space:]]*/ { t = $0; sub(/^[[:space:]]*decides:[[:space:]]*/, "", t); print id, t }
 ' "$DOC")
 
-if [ -z "$RELATIONS" ]; then
-  refuse "the requirement document declares no deliverable.relations: a judge with nothing to check is not a judge"
+# A scenario IS a check, and it joins RELATIONS below — so this cannot be the only guard: a document
+# whose only check is a scenario would be refused as "nothing to check" (ledger #84). The real guard is
+# after the scenarios are folded in.
+if [ -z "$RELATIONS" ] && ! grep -qE '^[[:space:]]*scenarios:[[:space:]]*$' "$DOC"; then
+  refuse "the requirement document declares no deliverable.relations and no scenarios: a judge with nothing to check is not a judge"
 fi
 
 # --- the declared scenarios (ADR-035) -----------------------------------------------------------
@@ -227,6 +234,12 @@ SCENARIOS=$(awk '
 ' "$DOC")
 
 SCENARIO_IDS=" $(printf '%s\n' "$SCENARIOS" | awk -F'\t' 'NF { printf "%s ", $1 }')"
+
+# Both halves matter: a document may declare relations and no scenarios, scenarios and no relations, or
+# both. Only a document with NEITHER has nothing for a judge to check.
+if [ -z "$RELATIONS" ] && [ -z "$SCENARIO_IDS" ]; then
+  refuse "the requirement document declares no check at all: no deliverable.relations and no readable scenarios — a judge with nothing to check is not a judge"
+fi
 scenario_field() { # $1 id, $2 field number
   # awk, and not `while IFS=$'\t' read -r f1 … f9`: TAB is an IFS WHITESPACE character, so `read` folds a
   # run of tabs into one separator and every field after an EMPTY one shifts left — a scenario with no
@@ -508,8 +521,81 @@ EOF
 
 # The judge computes its expectations from the fixture, so it needs to know how values are rounded.
 # Assuming one would be the judge inventing a requirement: refuse instead.
-if [ -z "$ROUNDING_MODE" ]; then
-  refuse "no declared relation or anchor exercises a rounding decision, so the judge would have to assume how salaries are rounded: point a relation or anchor at the decision that settles it (\"decides: AMB-nnn\")"
+#
+# WHAT THIS REFUSAL IS — and whose boundary it names (ledger #82). Exactly ONE relation in this forge can
+# check a deliverable's ANSWER: `independent-aggregation`, which it implements as an independent
+# recomputation of an AGGREGATE of a per-row numeric measure, and which therefore needs the decision that
+# settles how those values are rounded. `row-order-invariance` and `additivity` are properties of a
+# REPORT and `duplicate-resolution` / `malformed-row-accounting` are properties of the INPUT: none of them
+# can say whether a number is right. So a document whose answer is NOT such an aggregate has no answer
+# this chain can check.
+#
+# The old message told its reader the opposite: "...how salaries are rounded: point a relation or anchor
+# at the decision that settles it". Measured 2026-10-13 (round 8): a shortest-path requirement produced
+# six identical refusals across three runs (~7 minutes each, before any implementation was paid for),
+# every one of them sending the repair round to add a rounding decision that requirement cannot have —
+# and the run came back reporting the INTAKE as the fault. Fail-closed is right; "fixable by editing the
+# document" is a claim about a DIFFERENT situation, and the two must not share one sentence.
+# WHAT THE ROUNDING RULE IS FOR, and when the judge may go without one (ledger #83).
+#
+# Three relation types have their EXPECTATIONS recomputed from the records — `independent-aggregation`,
+# `duplicate-resolution` and `malformed-row-accounting` all recompute through `check_report`/`aggregate`
+# — and that recomputation needs the rounding rule. The others do not: `row-order-invariance` and
+# `additivity` are properties of a REPORT, and a scenario (ADR-035) runs a command and reads the report
+# or the HTTP surface the document declares.
+#
+# This check used to demand a rounding rule from EVERY document, and so refused documents this forge can
+# implement completely: measured 2026-10-13, a document declaring a report property and a CLI scenario —
+# neither of which touches the rounding parameter — was refused with a message about aggregates and no
+# judge was written (ledger #83). A check that asks "did you declare an aggregate?" where the question is
+# "can I parameterise what I am about to emit?" produces exactly that: a refusal for a reason that does
+# not apply, whose brief sends the repair round after a decision the requirement cannot have (#82).
+REL_TYPES=" $(printf '%s\n' "$RELATIONS" | awk 'NF { printf "%s ", $2 }') "
+AGG_MACHINERY=0; ANSWER_CHECK=0
+case "$REL_TYPES" in
+  *" independent-aggregation "*|*" duplicate-resolution "*|*" malformed-row-accounting "*) AGG_MACHINERY=1 ;;
+esac
+case "$REL_TYPES" in
+  *" browser-scenario "*|*" mutation-detection "*) ANSWER_CHECK=1 ;;
+esac
+
+# WHAT NEEDS THE DECLARED WORLD, and what may go without one (ledger #84).
+#
+# Five of the seven relation types are built on the world: `row-order-invariance` reshuffles the sample,
+# `additivity` compares the parsed report against itself, and `duplicate-resolution` /
+# `malformed-row-accounting` / `independent-aggregation` recompute from the records. A scenario and a
+# mutation run need none of it. The assembly below (columns, sample, a per-id line, a totals line, and the
+# fixtures it generates) was demanded of EVERY document, so a document whose checks are a scenario and a
+# mutation run was refused with "declares no input_format.columns" — the same defect as #83 one layer up:
+# a demand made on behalf of one family, of a document outside it. Measured 2026-10-13 (round 8).
+WORLD_NEEDED=0
+case "$REL_TYPES" in
+  *" row-order-invariance "*|*" additivity "*|*" duplicate-resolution "*|*" malformed-row-accounting "*|*" independent-aggregation "*) WORLD_NEEDED=1 ;;
+esac
+
+# Empty defaults for everything the assembly fills, so a document that needs no world leaves them DEFINED
+# (this generator runs under `set -u`) instead of dying on the first reference.
+INPUT_COLUMNS=""; SAMPLE=""; OUTPUT_LINES=""; COLS_TABLE=""; DEC_SCALE=""; SAMPLE_ROWS=""; FIRST_ROW=""
+GROUP_COUNT=0; SC_COUNT=0; TOTAL_COUNT=0; GROUP_LINE=""; TOTAL_LINE=""; SKIP_LINE=""; GROUP_SHAPE=""
+GROUP_FIELDS=""; TOTAL_SHAPE=""; TOTAL_FIELDS=""; SKIP_SHAPE=""; SKIP_FIELDS=""; WORDS_ONLY=""; ADD_ROLES=""
+GROUP_RE=""; TOTAL_RE=""; SKIP_RE=""; NEW_MEASURE=""; DUP_BASE=""; DUP_ROW_LATE=""; DUP_ROW_EARLY=""
+MALFIELD_COUNT=""; MALFORMED_COUNT=0; MAL_CONTENT=""; PROJ_SAMPLE=""; SAMPLE_HAS_DUP="no"; ROW_ORDER_NOTE=""
+BASE_SAMPLE=""; ORDER_SAMPLE=""; HEADER_ROW=""; BASE_CONTENT=""; ORD_CONTENT=""; ORD_REV_CONTENT=""
+DUP_LATE_CONTENT=""; DUP_EARLY_CONTENT=""; FULL_MAL_CONTENT=""; COL_ID=""; COL_MEASURE=""; COL_DATE=""; NCOLS=""
+
+# A scenario's `{csv}` is resolved to a fixture GENERATED FROM THE DECLARED WORLD. With no world there is
+# no such fixture, and resolving it to an empty path would run the command against nothing and read the
+# failure as a delivery defect — so it is refused here, naming what to do instead.
+if [ "$WORLD_NEEDED" = 0 ]; then
+  case " $(printf '%s\n' "$SCENARIOS" | cut -f2,4 | tr '\n' ' ') " in
+    *"{csv}"*) refuse "a scenario uses {csv}, which the judge resolves to a fixture generated from the DELIVERED WORLD — and this document declares none, because none of its checks needs one. Build the input inside the command the scenario runs, or declare the world the fixture should come from (ledger #84)" ;;
+  esac
+fi
+if [ -z "$ROUNDING_MODE" ] && [ "$AGG_MACHINERY" = 1 ]; then
+  refuse "the document declares a record-aggregate check (independent-aggregation / duplicate-resolution / malformed-row-accounting) whose expectations are recomputed from the records, so the judge must know how those values are rounded — and no decision in this document settles it. TWO WAYS OUT. Point the check at the decision that settles its rounding (\"decides: AMB-nnn\") — an option nobody chose cannot be invented, because that would be a decision the judge made for you. And if this deliverable is NOT an aggregate of a per-row measure, so that nothing in it is ever rounded, then those relations are the wrong vocabulary for it: drop them and declare what actually checks this answer — a scenario (run a command and declare the report it writes, or an HTTP surface with expect_status/expect_body) or mutation-detection (ledger #83)"
+fi
+if [ -z "$ROUNDING_MODE" ] && [ "$ANSWER_CHECK" = 0 ]; then
+  refuse "nothing this document declares can say whether its ANSWER is right: row-order-invariance and additivity are properties of a REPORT, and duplicate-resolution / malformed-row-accounting are properties of the INPUT. Declare a check of the answer — a scenario (run a command and declare the report it writes, or an HTTP surface with expect_status/expect_body) or mutation-detection (which proves the delivered tests can fail), or an independent recomputation of an aggregate of a per-row measure together with the decision that settles its rounding — or the judge would pass any number it was handed (ledger #83)"
 fi
 
 blocking_note() { [ "$(amb_blocking "$1")" = "true" ] && printf ' (BLOCKING — the forge should have refused)' || printf ' (non-blocking decision)'; }
@@ -541,6 +627,7 @@ EOF
 
 # --- the declared world (ADR-033): the columns, the sample, and the output shapes ---------------
 
+if [ "$WORLD_NEEDED" = 1 ]; then
 INPUT_COLUMNS=$(awk '
   /^[[:space:]]*columns:[[:space:]]*/ {
     t = $0; sub(/^[[:space:]]*columns:[[:space:]]*/, "", t); gsub(/^"|"$/, "", t); print t; exit
@@ -837,6 +924,7 @@ ORD_REV_CONTENT=$(printf '%s\n%s' "$HEADER_ROW" "$(printf '%s\n' "$ORDER_SAMPLE"
 DUP_LATE_CONTENT=$(printf '%s\n%s' "$BASE_CONTENT" "$DUP_ROW_LATE")
 DUP_EARLY_CONTENT=$(printf '%s\n%s' "$BASE_CONTENT" "$DUP_ROW_EARLY")
 FULL_MAL_CONTENT=$(printf '%s\n%s' "$BASE_CONTENT" "$MAL_CONTENT")
+fi   # end of the world assembly: emitted, parsed and refused over only when a declared check uses it (#84)
 
 # --- emit the judge -----------------------------------------------------------------------------
 
@@ -901,6 +989,13 @@ alloc_port() {
   return 1
 }
 
+HEADER
+  # `subst` and `alloc_port` above stay OUTSIDE this gate: the scenario branch resolves {csv}/{port}/{url}
+  # with them too, and a shared helper that only half the judge gets is a judge that breaks in one shape
+  # only (measured: gating from the section comment above left the scenario branch calling a function that
+  # was never emitted).
+  if [ "$WORLD_NEEDED" = 1 ]; then
+  cat <<'HEADERWORLD'
 # The report for ONE fixture, however the document says the deliverable produces it. A SCRIPT: `run`
 # prints the report and the bound catches a run that never returns. A SERVICE (`read` declared): `run`
 # STARTS the thing on this fixture, the declared url is health-gated, `read` FETCHES the report under the
@@ -953,6 +1048,9 @@ run_tool() { # $1 = absolute csv path; leaves the report in RUN_OUT, its status 
   kill_scenario_surfaces
 }
 
+HEADERWORLD
+  fi
+  cat <<'HEADERSCEN'
 # --- declared scenarios (ADR-035) ---------------------------------------------------------------
 # The judge runs the document's OWN commands: it starts what the document says to start, waits for the
 # surface the document names, ASSERTS what the document declares about the response, runs the scenario
@@ -1147,7 +1245,7 @@ mutation_report_failures() { # $1 format, $2 path, $3 max_survivors -> a reason,
     *) printf 'the judge does not implement the mutation report format "%s"' "$fmt" ;;
   esac
 }
-HEADER
+HEADERSCEN
 
   printf '\nRUN_TEMPLATE=%s\n' "'$(sq "$RUN_TEMPLATE")'"
   # ADR-047: how a judge READS the report of one fixture. Empty for a SCRIPT (stdout is the report); a
@@ -1159,6 +1257,9 @@ HEADER
   printf 'RUN_TIMEOUT_MS=%s\n' "$RUN_TIMEOUT_MS"
   printf 'RUN_TIMEOUT_S=%s\n' "$RUN_TIMEOUT_S"
   printf 'REQUIREMENT_REF=%s\n' "'$(sq "$TAKUMI_REQUIREMENT")'"
+  # The world's own parameters, emitted only for a judge that reads a world: a document whose checks need
+  # none must not carry empty declarations of one (ledger #84).
+  if [ "$WORLD_NEEDED" = 1 ]; then
   printf 'DUPLICATE_MODE=%s\n' "'$(sq "$DUPLICATE_MODE")'"
   printf 'MALFORMED_MODE=%s\n' "'$(sq "$MALFORMED_MODE")'"
   printf 'ROUNDING_MODE=%s\n' "'$(sq "$ROUNDING_MODE")'"
@@ -1176,6 +1277,7 @@ HEADER
   printf 'TOTAL_RE=%s\n' "'$(sq "$TOTAL_RE")'"
   printf 'SKIP_RE=%s\n' "'$(sq "$SKIP_RE")'"
   printf 'ROW_ORDER_NOTE=%s\n' "'$(sq "$ROW_ORDER_NOTE")'"
+  fi
   # The scenarios, as records the judge reads back (unit-separated, so a command with spaces survives).
   printf '\nSCENARIOS=%s\n' "'$(sq "$SCENARIOS")'"
   # The reader is emitted as ONE printf with a quoted TAB in the field separator. `read -r` in a pipeline
@@ -1199,6 +1301,7 @@ HEADER
     printf 'cat > "$FIX/%s" <<%sTAKUMI_FIXTURE%s\n%s\nTAKUMI_FIXTURE\n' "$1" "'" "'" "$2"
   }
 
+  if [ "$WORLD_NEEDED" = 1 ]; then
   printf '\n# --- fixtures, generated from the document'\''s declared world, never copied from the implementation ---\n'
   emit_fixture base.csv "$BASE_CONTENT"
   emit_fixture ord-base.csv "$ORD_CONTENT"
@@ -1206,7 +1309,9 @@ HEADER
   emit_fixture dup-late-date.csv "$DUP_LATE_CONTENT"
   emit_fixture dup-early-date.csv "$DUP_EARLY_CONTENT"
   emit_fixture malformed.csv "$FULL_MAL_CONTENT"
+  fi
 
+  if [ "$WORLD_NEEDED" = 1 ]; then
   cat <<'BODY'
 
 case "$DUPLICATE_MODE" in
@@ -1409,6 +1514,7 @@ check_report() { # $1 fixture, $2 output, $3 dup rule
   printf '%s' "${msg#; }"
 }
 BODY
+  fi
 
   cat <<'RUNS'
 
@@ -1416,6 +1522,9 @@ BODY
 # server would make the NEXT run's scenario pass for the wrong reason (the surface from this run still
 # answering), which is the kind of rot that never announces itself.
 trap 'kill_scenario_surfaces' EXIT INT TERM
+RUNS
+  if [ "$WORLD_NEEDED" = 1 ]; then
+  cat <<'RUNSW'
 
 # --- the relations (one check per id the document declared) --------------------------------------
 # `{csv}` in a scenario's start/run resolves to the same base fixture the relations run against, so the
@@ -1453,7 +1562,8 @@ guard_fail() { # $1 relation id, $2 text
     relation not_ok "$1" "$2" "the judge did not exercise the deliverable: nothing in its output (exit ${base_status}) matched a declared output shape, so this relation is unproven"
   fi
 }
-RUNS
+RUNSW
+  fi
 
   while read -r rid rkind; do
     [ -z "${rkind:-}" ] && continue

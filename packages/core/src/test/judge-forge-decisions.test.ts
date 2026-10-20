@@ -16,6 +16,10 @@ import { fileURLToPath } from 'node:url';
 // flip cases below, and they are the reason this file exists.
 
 const FORGE = join(dirname(fileURLToPath(import.meta.url)), '../../../../extensions/judges/metamorphic-forge.sh');
+const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+/** A requirement document from the fixtures directory. Read from SOURCE: tsc does not copy YAML into
+ *  dist, so a test that reads it next to the compiled JS passes locally and dies on CI. */
+const fixture = (name: string): string => readFileSync(join(REPO, 'packages/core/src/test/fixtures', name), 'utf8');
 
 /** The human wording of each mode, so a document reads like a document and a judge still knows the meaning. */
 const PROSE: Record<string, string> = {
@@ -266,7 +270,7 @@ test('decisions: a checkedAs the forge cannot act on is refused, with the modes 
 });
 
 test('decisions: the judge refuses to guess a rounding rule the document never decides', () => {
-  // AMB-004 stays non-blocking and nothing exercises it, so no relation can say how salaries round.
+  // AMB-004 stays non-blocking and nothing exercises it, so no relation can say how the values round.
   // The forge must refuse rather than invent one: an invented rounding rule is an invented requirement.
   const doc = requirement({ dropDecides: 'AMB-004' }).replace(
     ['    checkedAs: half-up', '    blocking: true'].join('\n'),
@@ -275,7 +279,105 @@ test('decisions: the judge refuses to guess a rounding rule the document never d
   const f = forge(doc);
   try {
     assert.notEqual(f.forge.status, 0, 'the forge must refuse');
-    assert.match(f.forge.out, /would have to assume how salaries are rounded/);
+    assert.match(f.forge.out, /no decision in this document settles it/);
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('decisions: a document that declares the record-aggregate checks is told what would fit instead', () => {
+  // Measured 2026-10-13 (round 8, ledger #82). Three unattended runs died at intake with one refusal,
+  // twice per run:
+  //
+  //   no declared relation or anchor exercises a rounding decision, so the judge would have to assume
+  //   how salaries are rounded: point a relation or anchor at the decision that settles it
+  //
+  // The requirement was a shortest path over a grid map — a family that is NOT a record aggregate — and
+  // the intake had described it with relations from the record family (a malformed-row relation, an
+  // aggregate anchor). Those relations' expectations are recomputed from the records, so the judge does
+  // need a rounding rule for them; a path length is never rounded, so the second half of the old
+  // sentence sent the repair round after a decision this requirement cannot have. What the brief must
+  // say instead is the OTHER way out, and it exists: declare a scenario instead (ledger #83).
+  const f = forge(fixture('graph-requirement.yaml'));
+  try {
+    assert.notEqual(f.forge.status, 0, 'the forge must refuse: it cannot parameterise this answer');
+    assert.match(f.forge.out, /independent-aggregation|malformed-row-accounting/, 'it names the check that needs the rule');
+    assert.match(f.forge.out, /scenario/, 'and names the declaration that would fit this deliverable instead');
+    assert.match(f.forge.out, /mutation-detection/);
+    assert.doesNotMatch(f.forge.out, /salaries/);
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('decisions: a document that checks its answer with a scenario IS forgeable — no rounding rule needed', () => {
+  // The decisive case (ledger #83). This document declares `row-order-invariance` (a property of the
+  // REPORT) and a CLI scenario (run the delivered tests, read the TAP report they write). Neither uses
+  // the aggregate recomputation, so neither needs a rounding rule — and the old unconditional check
+  // refused it anyway, with a message about aggregates and rounding. A document this forge can fully
+  // implement must produce a judge, and that is what this pins.
+  const f = forge(fixture('graph-requirement-with-scenario.yaml'));
+  try {
+    assert.equal(f.forge.status, 0, `the forge must write a judge: ${f.forge.out}`);
+    assert.ok(existsSync(join(f.judgeDir, 'judge.sh')), 'a judge was written');
+    assert.match(readFileSync(join(f.judgeDir, 'judge.sh'), 'utf8'), /SCN-001/, 'the declared scenario is in it');
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('decisions: a document where NOTHING can say whether the answer is right is refused, naming the two ways', () => {
+  const f = forge(fixture('graph-requirement-no-answer-check.yaml'));
+  try {
+    assert.notEqual(f.forge.status, 0, 'a judge that cannot check the answer is decoration');
+    assert.match(f.forge.out, /scenario/, 'name the mechanism that would check it');
+    assert.match(f.forge.out, /mutation-detection/);
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('decisions: a document whose only check is a scenario gets a judge that RUNS, with no world declared', () => {
+  // Ledger #84, FIXED. This document declares one scenario and NO world at all — no columns, no sample,
+  // no output shapes — because a scenario needs none: it runs the command the document names and reads
+  // the report that command writes. The world assembly used to be demanded of every document, so this
+  // one was refused with "declares no input_format.columns" even though nothing it declares uses a world.
+  //
+  // The test RUNS the forged judge in both directions, because a judge nobody ran is a judge nobody has
+  // seen work — and it is what caught the first version of this fix, which gated a shared helper out of
+  // the scenario branch (the judge then reported "the forged judge has no run for this scenario" and
+  // every argument for it was wrong: the world machinery had been cut in the wrong place).
+  const f = forge(fixture('graph-requirement-with-scenario-no-world.yaml'));
+  try {
+    assert.equal(f.forge.status, 0, `a judge must be written: ${f.forge.out}`);
+    assert.ok(existsSync(join(f.judgeDir, 'judge.sh')), 'a judge was written');
+    // The delivered tests, exactly as the scenario declares them: `bash run-tests.sh`, TAP at
+    // reports/tests.tap. A wrong answer shows up as a failing line in that report.
+    const delivered = (verdict: 'ok' | 'not ok'): void => {
+      writeFileSync(
+        join(f.worktree, 'run-tests.sh'),
+        [
+          '#!/usr/bin/env bash',
+          'mkdir -p reports',
+          "cat > reports/tests.tap <<'TAP'",
+          `${verdict} 1 - the shortest path on the fixture map is three moves`,
+          '# tests 1',
+          `# pass ${verdict === 'ok' ? 1 : 0}`,
+          `# fail ${verdict === 'ok' ? 0 : 1}`,
+          'TAP',
+          'exit 0',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+    };
+    delivered('not ok');
+    const failing = judge(f);
+    assert.match(failing.out, /ACCEPT_VERDICT: fail/, `a failing delivered report must FAIL the judge: ${failing.out}`);
+    assert.match(failing.out, /SCN-001/);
+    delivered('ok');
+    const passing = judge(f);
+    assert.match(passing.out, /ACCEPT_VERDICT: pass/, `a passing delivered report must pass: ${passing.out}`);
   } finally {
     cleanup(f);
   }

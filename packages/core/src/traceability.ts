@@ -42,6 +42,35 @@ export interface TraceLink {
 }
 
 /**
+ * The coverage of the requirements, as DATA rather than as a sentence in a report.
+ *
+ * `uncovered` is the THIRD STATE: not a pass (nothing checks it) and not a failure (nothing
+ * contradicted it) — a named gap. A pass/fail report renders "a requirement nothing exercises"
+ * and "a requirement that passes" identically; this is what tells them apart, and it is why the
+ * matrix's warning line is now a rendering of this value instead of the only place the fact lives.
+ */
+export interface TraceabilityCoverage {
+  /** Every REQ id any artifact names. */
+  required: string[];
+  /** REQ ids a DOWNSTREAM artifact links (the requirements document itself does not count). */
+  covered: string[];
+  /** REQ ids no downstream artifact links. */
+  uncovered: string[];
+}
+
+export function traceabilityCoverage(artifacts: Artifact[]): TraceabilityCoverage {
+  const allTraceIds = new Set<string>();
+  for (const a of artifacts) for (const t of a.trace) allTraceIds.add(t);
+  const required = [...allTraceIds].filter((id) => id.startsWith('REQ')).sort();
+  const covered = new Set<string>();
+  for (const a of artifacts) {
+    if (a.kind === 'requirements') continue;
+    for (const t of a.trace) if (t.startsWith('REQ')) covered.add(t);
+  }
+  return { required, covered: required.filter((id) => covered.has(id)), uncovered: required.filter((id) => !covered.has(id)) };
+}
+
+/**
  * Render a Markdown traceability matrix: rows = artifacts, columns = their
  * trace targets. Verifies every requirement is covered (missing linkage).
  */
@@ -61,16 +90,9 @@ export function renderTraceabilityMatrix(artifacts: Artifact[]): string {
     rows.push(`| ${a.id} (${a.kind}) | ${marks.join(' | ')} |`);
   }
 
-  // Coverage: each REQ should be linked by at least one DOWNSTREAM artifact
-  // (design/test/evidence/...). The requirements source doc itself carrying
-  // its own REQ ids does not count as coverage.
-  const reqIds = [...allTraceIds].filter((id) => id.startsWith('REQ'));
-  const covered = new Set<string>();
-  for (const a of artifacts) {
-    if (a.kind === 'requirements') continue;
-    for (const t of a.trace) if (t.startsWith('REQ')) covered.add(t);
-  }
-  const uncovered = reqIds.filter((id) => !covered.has(id));
+  // The matrix renders what `traceabilityCoverage` computes; the fact lives there as data, so a
+  // caller can act on it without parsing the Markdown this function produces.
+  const { uncovered } = traceabilityCoverage(artifacts);
 
   let out = rows.join('\n');
   if (uncovered.length > 0) {

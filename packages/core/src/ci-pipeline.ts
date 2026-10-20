@@ -515,7 +515,29 @@ export async function executeAwaitChecksStep(input: AwaitChecksStepContext): Pro
       return fail(`the host reported checks for ${label} in a shape that is not a list, so the pipeline result cannot be read`, [], waitedSeconds);
     }
     if (checks.length === 0) {
-      return fail(`the host reported NO checks for ${label}: there is no pipeline result to wait for, and "no checks" is not a pass`, [], waitedSeconds);
+      // NO CHECKS **YET** IS NOT THE SAME AS NO CHECKS. Measured 2026-10-12 (run wf-8edeac75): the first
+      // fully unattended chain published a PR whose pipeline PASSED (`tests`, `deliverable`, Actions run
+      // 38199816412 success) and this step failed after TWO SECONDS because the host had not registered
+      // the workflow run yet — the checks appeared ~10-20s later, green. A delivery refused for a timing
+      // reason is the failure-for-the-wrong-reason that ADR-035 named: a host that never reports checks
+      // and a host that has not reported them YET are told apart by the DEADLINE, not by the first empty
+      // answer. So the wait runs to the end of the bound, and only then says "no checks" — still
+      // fail-closed, and still bounded by waitSeconds.
+      const remainingMs = deadline - now();
+      if (remainingMs <= 0) {
+        return fail(
+          `the host reported NO checks for ${label} after ${waitSeconds}s: there is no pipeline result to wait for, and "no checks" is not a pass`,
+          [],
+          waitedSeconds,
+        );
+      }
+      const sleepMs = Math.min(pollSeconds * 1000, remainingMs);
+      input.onEvent?.(
+        `no check registered yet on ${label} — waiting up to ${waitSeconds}s for the host to report one`,
+      );
+      await sleep(sleepMs);
+      waitedSeconds += Math.ceil(sleepMs / 1000);
+      continue;
     }
 
     const failed = checks.filter((c) => c.conclusion === 'failure');

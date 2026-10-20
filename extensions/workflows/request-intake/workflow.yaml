@@ -9,23 +9,16 @@ runtime: pi
 requiredSkills:
   - req-intake
 steps:
-  - id: req_intake
-    type: agent
-    skill: req-intake
-    # First prompt key in extensions/skills/req-intake/manifest.yaml is `intake`.
-    prompt: "{input}"
-    # A real runtime is given room to write the document; the fake one returns immediately.
-    timeoutMs: 900000
-  - id: intake_shape
-    # The intake's contract, machine-checked BEFORE a human is asked to confirm anything: the document
-    # exists where the loop expects it, it parses, its ids line up, every decision carries 2-4 bounded
-    # options and every requirement at least one criterion. `confirm --dry-run` is read-only and refuses
-    # an undecided blocking decision, so this step fails closed on an intake nobody could confirm.
-    type: quality_gate
-    prompt: |
-      bash extensions/workflows/request-intake/checks/intake-shape-tap.sh
-    dependsOn: [req_intake]
-    timeoutMs: 120000
+  - id: intake_attempt
+    # A `repair` step, exactly as the delivery wraps its own attempts (ADR-034/ADR-057): the sub-workflow
+    # runs once per attempt and the gate's failing checks are passed to the next attempt as
+    # `{repairFailures}`. Before this, `retry` was declared on the AGENT step while the gate was a
+    # SEPARATE step, so a bad SAMPLE failed the gate and there was nothing left to retry: the run was lost
+    # after ~2 minutes with a document nobody could confirm (docs/bugs-fixed.md #70). An intake whose
+    # document does not hold together now gets one attempt to fix it, told what the contract refused.
+    type: repair
+    repairRef: intake-attempt
+    maxRounds: 2
   - id: ambiguity_confirmation
     type: approval
     prompt: |
@@ -44,4 +37,4 @@ steps:
 
       LIMITATION, stated rather than worked around: this workflow stops here. Nothing is implemented
       until a run is made against the confirmed document, which is the point of splitting the flow.
-    dependsOn: [intake_shape]
+    dependsOn: [intake_attempt]

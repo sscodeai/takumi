@@ -63,6 +63,11 @@ steps:
       entry. When done, summarise the files you created or changed, the stack you chose and why, and how
       each acceptance criterion is met.
     dependsOn: [ci_config]
+    # A BOUND ON THE IMPLEMENTER (docs/bugs-fixed.md #68). Measured 2026-10-12: this step ran 33 minutes
+    # and was still going when the run was killed, because it had left the delivery worktree and started
+    # editing the platform that was judging it. Nothing bounded it, so nothing could stop it. 30 minutes is
+    # ~2.4x the slowest observed attempt (748 s) and still finite.
+    timeoutMs: 1800000
   - id: unit_and_integration_tests
     type: agent
     prompt: |
@@ -75,6 +80,8 @@ steps:
       failure. A suite nothing can invoke is a suite that does not count. Commit your work: the host runs
       what you commit.
     dependsOn: [implementation]
+    # Bounded for the same reason as the implementer above: the slowest observed test round was 294 s.
+    timeoutMs: 900000
   - id: quality_gate
     type: quality_gate
     # The project's own test command, run in the implementation. It is a SMOKE gate, not the evidence: a
@@ -118,5 +125,10 @@ steps:
     type: acceptance
     requirementRef: "{requirement}"
     acceptanceRef: "{judgePath}"
+    # The judge RUNS THE DELIVERED PROJECT, so its cost is the DELIVERY's cost, not ours:
+    # a delivery that ships a mutation harness (14 mutants observed) legitimately exceeds the
+    # 120 s this step used to declare — and a 120 s bound killed a judge that had already
+    # passed 4 checks and was about to accept (ledger #77). 15 minutes, and the engine now
+    # NAMES the bound when it is hit instead of reporting the judge as silent.
+    timeoutMs: 900000
     dependsOn: [judge_forge]
-    timeoutMs: 120000

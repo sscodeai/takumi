@@ -32,11 +32,13 @@ import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { requirementDigest, shortDigest } from './review-digest.js';
 import { appendFeedback, parseFeedback } from './requirement-feedback.js';
-import { writeRunRecord, type RunRecord, type RunRecordStep, type RunStepStatus } from './run-record.js';
+import { writeRunRecord, type RunRecord, type RunRecordBoundaries, type RunRecordStep, type RunStepStatus } from './run-record.js';
 import { readRequirementConfirmation, type RequirementConfirmation } from './standing-authorization.js';
 import type { Usage } from './types.js';
+import type { StepSandbox } from './sandbox.js';
+import type { SandboxRoots } from './sandbox.js';
 import { parse as parseYamlText } from 'yaml';
-import { readFileSync as readTextFileSync } from 'node:fs';
+import { readFileSync as readTextFileSync, statSync as statFileSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
 const execAsync = promisify(exec);
 /** Runs a harness FILE without a shell, so a path in a manifest is never a shell string. */
@@ -86,6 +88,116 @@ function renderNotGreenChecks(checks: readonly CheckSummary[]): string[] {
     .map((c) => `- ${c.name}: ${c.conclusion}${c.url !== undefined && c.url.length > 0 ? ` (${c.url})` : ''}`);
 }
 
+/**
+ * One shell/argv command a step wants to run, and where. The engine routes every
+ * step command through `runStepCommand`, which is the single place a step can
+ * reach a boundary. `shell` and `argv` are mutually exclusive: a harness file is
+ * run as argv (`bash <file>`) so a path in a manifest is never shell syntax.
+ */
+export interface StepCommandRequest {
+  /** Shell command, run as `<sh> -c <shell>`. */
+  shell?: string;
+  /** argv form; `argv[0]` is the program, the rest are its arguments. */
+  argv?: string[];
+  /** Host-side working directory. Mirrored at the same absolute path inside a boundary. */
+  cwd: string;
+  /** Extra environment for the command, merged over the host environment. */
+  env?: Record<string, string>;
+  /** Wall-clock timeout in ms (default 120_000). */
+  timeoutMs?: number;
+  /**
+   * Ask for the PLATFORM-FLAVOURED boundary: the platform repository mirrored READ-ONLY (never
+   * writable), so a platform tool can run from where it lives while whatever IT runs stays
+   * contained. Used by the acceptance step, whose harness is the platform's but whose SUBJECT is
+   * the delivered project — model-authored code.
+   *
+   * Only a step that says so gets it, and only when the run has such a boundary configured
+   * (`ctx.sandboxPlatform`). A run with no boundary at all runs open, which is consistent with
+   * what its own record already says (`sandbox: none`).
+   */
+  boundary?: 'platformReadOnly';
+}
+
+/** The shape `runStepCommand` throws for a non-zero/timed-out command. */
+export type StepCommandError = Error & {
+  stdout?: string;
+  stderr?: string;
+  code?: number;
+  timedOut?: boolean;
+};
+
+/**
+ * Run a step command — a command that comes from the WORKFLOW DEFINITION, i.e. the PLATFORM'S OWN
+ * TOOLING (`run:` scripts in this repository, the judge forge, the acceptance harness). This is
+ * the only path such a command takes.
+ *
+ * It is deliberately NOT the path the MODEL's commands take, and that distinction is ledger #79.
+ * #38 applied the boundary HERE as well, which made the platform repository invisible to the
+ * platform's own tools: the chain died at `judge_forge` with `No such file or directory` while
+ * the boundary's tests stayed green (ledger #75). The model's hands are contained in the runtime
+ * seam (`ctx.runtime` with `sandbox` + `sandboxRoots`), which is where an agent step goes.
+ *
+ * Non-zero exit and timeout are reported by THROWING an error that carries `stdout`/`stderr`/
+ * `code`, which is the contract the call sites already used with `exec`/`execFile`.
+ */
+export async function runStepCommand(
+  ctx: WorkflowExecutionContext,
+  req: StepCommandRequest,
+): Promise<{ stdout: string; stderr: string }> {
+  const timeoutMs = req.timeoutMs ?? 120000;
+  if ((req.shell === undefined) === (req.argv === undefined)) {
+    throw new Error('runStepCommand: exactly one of shell/argv is required');
+  }
+  // A step that ASKS for the platform-flavoured boundary gets it (ledger #79's open item: the
+  // acceptance step runs the DELIVERED project, so the subject of the check must be contained even
+  // though the check itself is the platform's). Routed before the open path below, and only when
+  // the run really has one.
+  if (req.boundary === 'platformReadOnly' && ctx.sandboxPlatform !== undefined) {
+    const res = await ctx.sandboxPlatform.runStep({
+      ...(req.shell === undefined ? {} : { shell: req.shell }),
+      ...(req.argv === undefined ? {} : { argv: req.argv }),
+      cwd: req.cwd,
+      ...(req.env === undefined ? {} : { env: req.env }),
+      timeoutMs,
+    });
+    if (res.code !== 0) {
+      const err = new Error(
+        res.timedOut ? `command timed out after ${timeoutMs}ms` : `command exited with code ${res.code}`,
+      ) as StepCommandError;
+      err.stdout = res.stdout;
+      err.stderr = res.stderr;
+      err.code = res.code;
+      err.timedOut = res.timedOut;
+      throw err;
+    }
+    return { stdout: res.stdout, stderr: res.stderr };
+  }
+  // NO BOUNDARY ON THIS SEAM FOR EVERYTHING ELSE, deliberately — see the doc comment above and
+  // ledger #79.
+  //
+  // Every caller here is a workflow-defined command: the platform's own tooling, which lives
+  // INSIDE the repository a boundary makes invisible. Confining it confined the platform's
+  // ability to see itself.
+  //
+  // The model's hands are contained in the RUNTIME seam instead, and that is not weakened by
+  // this: an agent step's task carries `sandbox` + `sandboxRoots` into `ctx.runtime`, which
+  // builds a confined session from them (runtimes/pi `confinementOf` → confined tools, and its
+  // bash through the kernel boundary). `ctx.sandbox` is still consumed there; a test below pins
+  // that, so this file cannot lose the boundary by dropping it here.
+  const options = {
+    cwd: req.cwd,
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+    ...(req.env === undefined ? {} : { env: { ...process.env, ...req.env } }),
+  };
+  if (req.argv !== undefined) {
+    const [file, ...args] = req.argv;
+    if (file === undefined) throw new Error('runStepCommand: argv must not be empty');
+    return await execFileAsync(file, args, options);
+  }
+  return await execAsync(req.shell as string, options);
+}
+
 export interface WorkflowExecutionContext {
   /** Project working directory (steps run here). */
   cwd: string;
@@ -123,6 +235,36 @@ export interface WorkflowExecutionContext {
    * separation is a path property a test can assert rather than a promise in a comment.
    */
   worktree?: string;
+  /**
+   * The run id to use. When absent the engine generates one. The CLI pre-generates it
+   * so a boundary can name this run's judge directory before the first step runs.
+   */
+  runId?: string;
+  /**
+   * How this run's commands were sandboxed, as a human-readable string recorded in the
+   * run record: 'unshare', 'none', or 'none (unsafe override)'. Absent records 'none'
+   * honestly rather than implying a boundary that was not there (ADR-058).
+   */
+  sandboxNote?: string;
+  /**
+   * The boundary every step command in this run is routed through (ADR-058).
+   * Absent means no boundary: non-delivery runs pass through, and a delivery run
+   * is refused by the CLI preflight before its first agent step rather than
+   * running its step commands unconfined.
+   */
+  sandbox?: StepSandbox;
+  /**
+   * The platform-flavoured boundary (project root mirrored read-only). Present for a delivery run;
+   * a step must ASK for it (`StepCommandRequest.boundary`).
+   */
+  sandboxPlatform?: StepSandbox;
+  /**
+   * The roots the in-process agent tool adapters may touch (ADR-058 S5). The
+   * kernel boundary confines a `bash` command; `read`/`write`/`edit`/`ls`/`find`
+   * run in-process and are contained by resolving real paths against these roots.
+   * Present exactly when `sandbox` is; absent leaves the runtime open (legacy).
+   */
+  sandboxRoots?: SandboxRoots;
   /** Max attempts per agent step before failing (default 1). */
   defaultMaxAttempts?: number;
   /**
@@ -138,6 +280,30 @@ export interface WorkflowExecutionContext {
    * definition. Absent means a `repair` step fails closed, saying so.
    */
   loadWorkflow?: (ref: string) => Promise<WorkflowDefinition>;
+  /**
+   * WHERE AN AGENT STEP REPORTS THE BOUNDARY IT RAN UNDER (ledger #92).
+   *
+   * The counters that become `boundaries.agentTools` used to live in `executeWorkflow`'s own scope, and a
+   * `repair` step runs its sub-workflow by CALLING `executeWorkflow` again. So the sub-run counted its
+   * agent steps in ITS scope while the parent — the run that actually writes `.takumi/runs/<id>.json` —
+   * stayed at zero and recorded `agentTools: 'none'` no matter what the boundary really was. Measured
+   * 2026-10-19: the delivery record read `none` while its attempt sub-record read `confined` for the same
+   * steps in the same process. A field that exists to stop `sandbox: unshare` being misread as "the
+   * model's hands were contained" (ledger #88) must not itself be blank on the one run type that
+   * delivers.
+   *
+   * The sink is INJECTED so the tally follows the run, not the call frame: a nested run reports into the
+   * same counter its parent reads. Absent means this run IS the outermost one and keeps its own.
+   */
+  noteAgentBoundary?: (taskId: string) => void;
+  /**
+   * The same hand-up, for the OTHER boundary fact: whether the ACCEPTANCE harness put its subject under
+   * the platform-read-only boundary (ledger #92). It is a separate signal because it is a separate
+   * question — the agent's tools and the delivered project are confined by different mechanisms — but it
+   * fails the same way when a `repair` sub-workflow owns the acceptance: the flag lands in the sub-run and
+   * the parent's record says `none` for a boundary that was really in force.
+   */
+  onAcceptanceSubjectConfined?: () => void;
   /**
    * The host this run may publish to (ADR-037): the delivery port, injected by the caller exactly like the
    * workflow loader. The engine never talks to a code host on its own — an unattended run that can push
@@ -412,6 +578,8 @@ async function runStepWithTimeout(
   if (!timeoutMs) {
     return runTaskAndCollect(runtime, task);
   }
+  /** The bound's timer, kept so the `finally` below can clear it (see docs/bugs-fixed.md #71). */
+  let handle: ReturnType<typeof setTimeout> | undefined;
   const runPromise = runTaskAndCollect(runtime, task);
   const timeoutResult: AgentResult = {
     taskId: task.id,
@@ -425,17 +593,24 @@ async function runStepWithTimeout(
     error: `timeout after ${timeoutMs}ms`,
   };
   const timer = new Promise<AgentResult>((resolve) => {
-    setTimeout(() => {
+    handle = setTimeout(() => {
       // Best-effort cancel; the in-flight run settles in the background. We
       // resolve FAILED immediately — never hang the workflow on a stuck runtime.
       void runtime.cancel(task.id);
       resolve(timeoutResult);
     }, timeoutMs);
+    // A step's bound must not outlive the step. Without this the handle keeps the event loop alive for the
+    // whole bound after the work is done (observed 2026-10-12: a test whose step declared a 600 s bound
+    // finished all its assertions and then sat there for ten minutes — docs/bugs-fixed.md #71), which is
+    // the one way a declared bound makes a process LESS well behaved than no bound at all.
+    handle.unref?.();
   });
   try {
     return await Promise.race([runPromise, timer]);
   } finally {
-    // no-op; timer already resolved
+    // Cleared, not a no-op: a timer that outlives its step is a leaked handle, and clearing it is what
+    // makes "the step was bounded" true of the process as well as of the workflow.
+    if (handle !== undefined) clearTimeout(handle);
   }
 }
 export async function executeWorkflow(
@@ -454,7 +629,7 @@ export async function executeWorkflow(
   }
 
   const order = topoSort(workflow.steps);
-  const runId = `wf-${randomUUID().slice(0, 8)}`;
+  const runId = ctx.runId ?? `wf-${randomUUID().slice(0, 8)}`;
   const run: WorkflowRun = {
     id: runId,
     workflow,
@@ -596,6 +771,23 @@ export async function executeWorkflow(
    */
   let pipelineIssueFiled = false;
 
+  // WHICH BOUNDARY WAS ACTUALLY IN FORCE (ledger #88). `sandbox: unshare` in the record must not be
+  // readable as "the model's hands were contained": the boundary the engine SUPPLIED is not the
+  // boundary the runtime USED. Confinement is therefore taken from the runtime's own report
+  // (`agentToolBoundary`), and the acceptance subject from whether the harness actually asked for
+  // the platform-read-only boundary — never asserted from configuration.
+  let agentStepsRan = 0;
+  let confinedAgentSteps = 0;
+  let acceptanceSubjectConfined = false;
+  const noteAgentBoundaryHere = (taskId: string): void => {
+    agentStepsRan++;
+    if (ctx.runtime.agentToolBoundary?.(taskId) === 'confined') confinedAgentSteps++;
+  };
+  // A NESTED RUN REPORTS INTO ITS PARENT'S TALLY (ledger #92). `ctx.noteAgentBoundary` is how an outer
+  // run hands its counters down: a `repair` step calls `executeWorkflow` again, so without this the
+  // sub-run's agent steps counted in a scope nobody reads, and the record that ships said `none`.
+  const noteAgentBoundary = ctx.noteAgentBoundary ?? noteAgentBoundaryHere;
+
   /**
    * Assemble and write the run's machine-readable record: `.takumi/runs/<run-id>.json`.
    *
@@ -668,6 +860,25 @@ export async function executeWorkflow(
       },
       boardRowId,
       cost,
+      sandbox: ctx.sandboxNote ?? 'none',
+      boundaries: {
+        stepCommands: 'none',
+        // `confined` ONLY when EVERY agent step that ran was confined. A run whose runtime confirmed
+        // one session and not another must not read as confined — that is the same
+        // one-word-for-two-facts mistake this block exists to remove, one layer down.
+        agentTools:
+          agentStepsRan === 0
+            ? 'none'
+            : confinedAgentSteps === 0
+              ? ctx.sandboxRoots === undefined
+                ? 'none'
+                : 'open'
+              : confinedAgentSteps === agentStepsRan
+                ? 'confined'
+                : 'mixed',
+        agentRuntime: run.runtimeId,
+        acceptanceSubject: acceptanceSubjectConfined ? 'platformReadOnly' : 'none',
+      },
     };
     const result = writeRunRecord(ctx.cwd, record);
     ctx.onEvent?.(
@@ -697,10 +908,15 @@ export async function executeWorkflow(
             cwd: ctx.worktree ?? ctx.cwd,
             trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
             context: { workflowStep: stepId, workflow: workflow.name, ...vars },
+            options: {
+              ...(ctx.sandbox === undefined ? {} : { sandbox: ctx.sandbox }),
+              ...(ctx.sandboxRoots === undefined ? {} : { sandboxRoots: ctx.sandboxRoots }),
+            },
           };
           try {
             const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
             collectUsage(res.usage);
+            noteAgentBoundary(task.id);
             if (res.status === 'completed') {
               const art = res.summary ? await ctx.artifacts.write({
                 taskId: task.id, kind: stepArtifactKind(step, stepId.split('_')[0] ?? 'output'),
@@ -815,7 +1031,7 @@ export async function executeWorkflow(
         const cmd = renderPrompt(step.prompt ?? '', vars);
         try {
           ctx.onEvent?.(stepId, `tool run: ${cmd}`);
-          const { stdout, stderr } = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 120000 });
+          const { stdout, stderr } = await runStepCommand(ctx, { shell: cmd, cwd: ctx.worktree ?? ctx.cwd, timeoutMs: step.timeoutMs ?? 120000 });
           const out = (stdout?.trim() || stderr?.trim() || '(no output)').slice(0, 4000);
           const kind = step.id.split('_')[0] ?? 'tool';
           const artifact = await ctx.artifacts.write({
@@ -852,7 +1068,7 @@ export async function executeWorkflow(
         let out = '';
         let exitOk = true;
         try {
-          const r = await execAsync(cmd, { cwd: ctx.worktree ?? ctx.cwd, timeout: step.timeoutMs ?? 300000 });
+          const r = await runStepCommand(ctx, { shell: cmd, cwd: ctx.worktree ?? ctx.cwd, timeoutMs: step.timeoutMs ?? 300000 });
           out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
         } catch (e) {
           exitOk = false;
@@ -933,9 +1149,15 @@ export async function executeWorkflow(
           done.add(stepId);
           continue;
         }
-        if (!sub.steps.some((s) => s.type === 'acceptance')) {
+        // WHAT JUDGES AN ATTEMPT IS NOT ALWAYS AN `acceptance`. An acceptance is BOUND to a confirmed
+        // requirement (ADR-025) and the intake's attempt runs BEFORE anything is confirmed, so requiring
+        // one there is unsatisfiable by construction: the first version of the intake repair round failed
+        // with "no confirmed requirement is on record for this run" without ever running its gate
+        // (docs/bugs-fixed.md #72). A `quality_gate` reports the same TAP failures and is the right verdict
+        // for an attempt whose subject is the document itself.
+        if (!sub.steps.some((s) => s.type === 'acceptance' || s.type === 'quality_gate')) {
           failStep(
-            `the repair sub-workflow "${repairRef}" declares no acceptance step: a repair loop with nothing to judge it cannot know when to stop`,
+            `the repair sub-workflow "${repairRef}" declares neither an acceptance nor a quality gate step: a repair loop with nothing to judge it cannot know when to stop`,
           );
           done.add(stepId);
           continue;
@@ -962,12 +1184,51 @@ export async function executeWorkflow(
           );
           let res: WorkflowRunResult;
           try {
-            res = await executeWorkflow(sub, { ...ctx, withholdAcceptanceFeedback: !lastRound }, vars);
+            res = await executeWorkflow(
+              sub,
+              {
+                ...ctx,
+                withholdAcceptanceFeedback: !lastRound,
+                // The tally MUST follow the run, not the call frame (ledger #92): this sub-workflow's
+                // agent steps and its acceptance are the ones the PARENT's record describes, and the
+                // parent is the file anybody reads afterwards.
+                noteAgentBoundary,
+                onAcceptanceSubjectConfined: () => {
+                  acceptanceSubjectConfined = true;
+                },
+              },
+              vars,
+            );
           } catch (e) {
             abort = `delivery ${label} could not be run (${e instanceof Error ? e.message : String(e)})`;
             break;
           }
-          const acceptance = res.steps.find((s) => sub.steps.find((d) => d.id === s.stepId)?.type === 'acceptance');
+          // The attempt's verdict: an `acceptance` OR a `quality_gate` (see the guard above). Both end in
+          // TAP and both name their failing checks, which is what a repair round needs and all it needs.
+          const verdictType = (id: string): string | undefined => sub.steps.find((d) => d.id === id)?.type;
+          // WHICH STEP IS THE ATTEMPT'S VERDICT, WHEN IT DECLARES BOTH (ledger #86). The delivery attempt
+          // has a `quality_gate` over the delivered project's OWN tests AND the forged `acceptance`, and the
+          // acceptance is the authority: it is the check the DOCUMENT declared, while in a scenario-judged
+          // delivery the gate passes by construction (the implementer wrote those tests). Taking the first
+          // match made the gate the verdict, so an attempt its JUDGE refused was briefed to the next round
+          // as "quality_gate PASSED: 0 failing over 592 tests" — nothing to repair. Measured 2026-10-13:
+          // the repair round then spent 30 minutes and timed out, and the run record showed the passing gate
+          // where the judge's verdict belonged, so the judge's reason was nowhere to be found afterwards.
+          // The intake's attempt declares NO acceptance (ADR-057), so its shape gate stays its verdict.
+          const pickVerdict = (kind: string) => res.steps.find((s) => verdictType(s.stepId) === kind);
+          const acceptance = pickVerdict('acceptance') ?? pickVerdict('quality_gate');
+          // THE BRIEF COMES FROM THE STEP THAT FAILED, when the acceptance never ran. The acceptance is
+          // SKIPPED while any step it depends on fails, so on the round after an upstream refusal its
+          // summary is empty and the next attempt would be handed "a judge which reported nothing has told
+          // you nothing" while the run log named the check that refused. Observed 2026-10-12 in the third
+          // unattended chain: a `judge_forge` refusal reached the next attempt as that sentence, and the
+          // implementer — told to repair a failure it could not touch — left the delivery worktree and
+          // edited this repository instead (docs/bugs-fixed.md #68).
+          const lastFailed = res.steps.filter((s) => s.status === 'failed').pop();
+          const brief =
+            acceptance?.status === 'completed'
+              ? (acceptance.summary ?? '')
+              : (lastFailed?.summary ?? acceptance?.summary ?? '');
           for (const s of res.steps) {
             subArtifacts.push(...s.artifacts);
             subTests.push(...s.tests);
@@ -985,7 +1246,20 @@ export async function executeWorkflow(
             if (res.vars['acceptedHead'] !== undefined) vars['acceptedHead'] = res.vars['acceptedHead'];
             break;
           }
-          failures = failureLinesOf(acceptance?.summary ?? '');
+          // A FAILURE NO IMPLEMENTATION CAN REPAIR ENDS THE LOOP. `judge_forge` derives the judge from
+          // the CONFIRMED DOCUMENT, not from the delivery, and a document does not change between
+          // attempts: another round can only spend. (Measured: the round after a `judge_forge` refusal
+          // re-paid 1 047 s to fail identically — docs/bugs-fixed.md #68.) The document is the operator's,
+          // so the run stops here and names the step and its reason rather than burning the last round.
+          const documentLevel = res.steps.find(
+            (s) => s.status === 'failed' && sub.steps.find((d) => d.id === s.stepId)?.type === 'judge_forge',
+          );
+          if (documentLevel !== undefined) {
+            abort = `the judge could not be forged from the confirmed document (${documentLevel.stepId}), and no implementation can change it: the remaining round(s) were not spent\n${documentLevel.summary ?? ''}`;
+            run.stepStatus[stepId] = 'failed';
+            break;
+          }
+          failures = failureLinesOf(brief);
         }
 
         const summary = [
@@ -1306,9 +1580,13 @@ export async function executeWorkflow(
           continue;
         }
         const reqDigest = requirementDigest(requirementText);
-        // The judge directory is run-scoped and recreated, so a judge from an earlier run can never be
-        // reused as this run's evidence.
-        const judgeDir = path.join(ctx.cwd, '.takumi', 'acceptance', stepId);
+        // The judge directory is RUN-scoped and recreated, so a judge from an earlier run can never be
+        // reused as this run's evidence — and two runs on one project can never overwrite each other's
+        // judge (ADR-052). `<project>/.takumi/acceptance/<runId>/<stepId>/` keeps the judge outside the
+        // implementation worktree (ADR-026) while giving every run its own copy of it: with a fixed
+        // `<stepId>` path, the second run's `rm -rf` destroyed the judge the first run was being judged
+        // by, which is why the run directory had to be cleaned by hand between runs.
+        const judgeDir = path.join(ctx.cwd, '.takumi', 'acceptance', runId, stepId);
         try {
           await fsPromises.rm(judgeDir, { recursive: true, force: true });
           await fsPromises.mkdir(judgeDir, { recursive: true });
@@ -1320,11 +1598,11 @@ export async function executeWorkflow(
         let out = '';
         let exitOk = true;
         try {
-          const r = await execFileAsync('bash', [path.resolve(ctx.cwd, forgeRef)], {
+          const r = await runStepCommand(ctx, {
+            argv: ['bash', path.resolve(ctx.cwd, forgeRef)],
             cwd: judgeDir,
-            timeout: step.timeoutMs ?? 300000,
+            timeoutMs: step.timeoutMs ?? 300000,
             env: {
-              ...process.env,
               TAKUMI_REQUIREMENT: requirementRef,
               TAKUMI_REQUIREMENT_DIGEST: `sha256:${reqDigest}`,
               TAKUMI_WORKTREE: worktreePath,
@@ -1474,12 +1752,31 @@ export async function executeWorkflow(
         const harnessCwd = forgedJudgePath === undefined ? ctx.cwd : (await import('node:path')).dirname(forgedJudgePath);
         let out = '';
         let exitOk = true;
+        // Set when OUR OWN bound killed the harness. A kill produces "no verdict", which is NOT
+        // the same fact as "the harness ran and printed nothing"; reporting them alike blames the
+        // judge for the workflow's clock (ledger #77).
+        let killedByBoundMs: number | undefined;
+        // The harness asked for the platform-read-only boundary; record that the DELIVERED project
+        // was actually put under it (the subject), as distinct from the agent's tools above.
+        //
+        // LEDGER #92: when an acceptance runs inside a `repair` sub-workflow this assignment lands in the
+        // SUB-run's scope, and the record written afterwards belongs to the PARENT — which then reported
+        // `acceptanceSubject: 'none'` for a boundary that was in force. So the fact is reported UP the
+        // same way the agent tally is, and only taken locally when this run is the outermost one.
+        if (ctx.sandboxPlatform !== undefined) {
+          if (ctx.onAcceptanceSubjectConfined !== undefined) ctx.onAcceptanceSubjectConfined();
+          else acceptanceSubjectConfined = true;
+        }
         try {
-          const r = await execFileAsync('bash', [acceptanceRef], {
+          const r = await runStepCommand(ctx, {
+            argv: ['bash', acceptanceRef],
             cwd: harnessCwd,
-            timeout: step.timeoutMs ?? 300000,
+            timeoutMs: step.timeoutMs ?? 300000,
+            // The harness is the PLATFORM'S, but its subject is the DELIVERED project: ask for the
+            // boundary that mirrors the platform read-only so the deliverable is contained too
+            // (ledger #79's open item; #68 is why the containing matters).
+            boundary: 'platformReadOnly',
             env: {
-              ...process.env,
               TAKUMI_WORKTREE: worktreePath,
               TAKUMI_PROJECT: ctx.cwd,
               ...(forgedJudgePath === undefined ? {} : { TAKUMI_JUDGE_DIR: harnessCwd }),
@@ -1488,7 +1785,10 @@ export async function executeWorkflow(
           out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
         } catch (e) {
           exitOk = false;
-          const shell = e as { stdout?: string; stderr?: string };
+          const shell = e as { stdout?: string; stderr?: string; killed?: boolean; timedOut?: boolean };
+          // Two shapes depending on which seam ran it: node's exec error reports `killed`/SIGTERM,
+          // the boundary form reports `timedOut`. Both mean the STEP's bound ended the harness.
+          if (shell.killed === true || shell.timedOut === true) killedByBoundMs = step.timeoutMs ?? 300000;
           out = `${shell.stdout ?? ''}${shell.stderr ?? ''}` || (e instanceof Error ? e.message : String(e));
         }
         const verdict = parseAcceptVerdict(out);
@@ -1496,6 +1796,13 @@ export async function executeWorkflow(
           result: m[1] === 'ok' ? 'pass' : 'fail',
           check: (m[2] ?? '').trim(),
         }));
+        // The bound is the WORKFLOW's choice, so the engine must not report its own kill as the
+        // judge's silence (ledger #77). The VERDICT is unchanged — a killed harness still fails,
+        // fail-closed — but the reason names the clock instead of implying a broken harness.
+        const failureReason =
+          killedByBoundMs === undefined
+            ? (verdict.error ?? 'the harness reported a failing verdict')
+            : `the acceptance harness was KILLED at its ${killedByBoundMs}ms bound after ${checks.length} check(s) had reported, so no verdict was ever reached — this is "we do not know", not "it failed": raise this step's timeoutMs, or have the judge run less inside one step`;
         // The verdict is about a COMMIT: the head of the repository the acceptance is about — the
         // delivery worktree when there is one, else the project. Resolving it in the project repo recorded
         // the wrong commit on a black-box run (the ACCEPT artifact named the project's HEAD, not the
@@ -1513,10 +1820,15 @@ export async function executeWorkflow(
         const id = acceptanceIds.get(stepId) ?? 'ACCEPT-001';
         const requirements = extractTraceIds(requirementText).filter((t) => t.startsWith('REQ-'));
         const summary = [
-          `acceptance ${accepted ? 'PASSED' : 'FAILED'}: ${accepted ? 'the confirmed requirement is satisfied' : (verdict.error ?? 'the harness reported a failing verdict')}`,
+          `acceptance ${accepted ? 'PASSED' : 'FAILED'}: ${accepted ? 'the confirmed requirement is satisfied' : failureReason}`,
           `harness: ${acceptanceRef}`,
           `judge: ${forgedJudgePath === undefined ? '(none forged; a literal harness)' : `${forgedJudgePath} sha256:${shortDigest(forgedJudgeDigest)}`}`,
           `harness cwd: ${harnessCwd}`,
+          `boundary: ${
+            ctx.sandboxPlatform === undefined
+              ? 'none (this run has no boundary)'
+              : `platform read-only (${ctx.sandboxPlatform.id}); the worktree and the judge dir stay read-write`
+          }`,
           `worktree: ${worktreePath}`,
           `accepted head: ${head ?? '(unknown — the judged repository had no resolvable HEAD)'}`,
           `requirement: ${requirementRef} sha256:${shortDigest(digest)}`,
@@ -2198,6 +2510,37 @@ export async function executeWorkflow(
       // agent / tool step
       const maxAttempts = step.retry?.maxAttempts ?? ctx.defaultMaxAttempts ?? 1;
       run.stepStatus[stepId] = 'running';
+      /**
+       * A step that DECLARES what it produces is held to it (ADR-053): each declared output is
+       * snapshotted BEFORE the step runs, so "written by this step" is decided by the file CHANGING,
+       * never by the file existing. A file that was already there is not this step's output — which is
+       * exactly how a run that produced nothing passed a gate that read a document from six hours
+       * earlier (wf-5beb034f). Only `agent` steps may declare outputs (refused by name otherwise), so
+       * this is the only place the check is needed.
+       */
+      const declaredOutputs = (step.produces ?? []).map((rel) => {
+        const abs = joinPath(ctx.worktree ?? ctx.cwd, rel);
+        let before: number | null = null;
+        try {
+          before = statFileSync(abs).mtimeMs;
+        } catch {
+          before = null; // absent before the step: anything at this path is this step's output
+        }
+        return { rel, abs, before };
+      });
+      const unwrittenOutputs = (): string[] =>
+        declaredOutputs
+          .filter((o) => {
+            let now: number | null = null;
+            try {
+              now = statFileSync(o.abs).mtimeMs;
+            } catch {
+              now = null;
+            }
+            if (now === null) return true; // nothing there at all: nothing was produced
+            return o.before !== null && now === o.before; // untouched since before the step
+          })
+          .map((o) => o.rel);
       let stepOutcome: WorkflowStepResult | undefined;
       let lastError = '';
       let attempt = 0;
@@ -2213,10 +2556,15 @@ export async function executeWorkflow(
           cwd: ctx.worktree ?? ctx.cwd,
           trace: vars['trace.ids'] ? vars['trace.ids'].split(',') : [],
           context: { workflowStep: stepId, workflow: workflow.name, ...vars },
+          options: {
+            ...(ctx.sandbox === undefined ? {} : { sandbox: ctx.sandbox }),
+            ...(ctx.sandboxRoots === undefined ? {} : { sandboxRoots: ctx.sandboxRoots }),
+          },
         };
         try {
           const res = await runStepWithTimeout(ctx.runtime, task, step.timeoutMs);
           collectUsage(res.usage);
+          noteAgentBoundary(task.id);
           // A cancelled task (user abort / hard timeout cancel) should NOT be
           // retried as a failure, and remaining work should stop: cancellation
           // is an explicit control signal, not a transient error (High fix).
@@ -2240,6 +2588,23 @@ export async function executeWorkflow(
             // backoff before retry
             const backoff = step.retry?.backoffSeconds ?? 1;
             await new Promise((r) => setTimeout(r, backoff * 1000 * attempt));
+            continue;
+          }
+          // The step reported success. If it declared outputs, that success is checked against the
+          // filesystem before it is believed: an agent turn that ends without writing its declared
+          // output is not a completed step, it is a step that produced nothing.
+          const missing = unwrittenOutputs();
+          if (missing.length > 0) {
+            lastError = `the step declares it produces ${missing.join(', ')} and that was not written during this step: a file that was already there is not this step's output, so the step produced nothing (a run that produces nothing must not be graded on what it found)`;
+            ctx.onEvent?.(stepId, `attempt ${attempt} produced nothing: ${missing.join(', ')}`);
+            if (attempt >= maxAttempts) {
+              run.stepStatus[stepId] = 'failed';
+              failedIds.add(stepId);
+              stepOutcome = { stepId, status: 'failed', summary: lastError, artifacts: [], tests: res.tests };
+              break;
+            }
+            const backoffMs = (step.retry?.backoffSeconds ?? 1) * 1000 * attempt;
+            await new Promise((r) => setTimeout(r, backoffMs));
             continue;
           }
           stepOutcome = {

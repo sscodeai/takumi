@@ -1,0 +1,80 @@
+# A standing authorization (ADR-045) — the ONE human act behind `scripts/autopilot.sh`.
+#
+# PROVENANCE, stated rather than implied: this grant was DRAFTED by the Hermes agent (the scope, the
+# decision classes and the failure closure were proposed by it) and WRITTEN under Moon's explicit
+# instruction ("用ss落笔", 2026-10-12). The name below is Moon's commit identity. The classes below are
+# the relation names this repository's own intake document declares; the operator reviewed the draft and
+# instructed that it be signed.
+#
+# WHAT SIGNING THIS MEANS: documents matching the scope below may be confirmed NON-INTERACTIVELY, from
+# the `default:` each document declares for itself, by a machine with nobody at the keyboard. The
+# confirmation still happens and its digest is still the token a delivery is bound to (ADR-025) — what
+# changes is WHO chose the words: this grant signs off the CLASSES, and each document's own defaults
+# supply the answers, every one of them listed in the document's `defaulted:` front-matter so a reviewer
+# can check them afterwards.
+#
+# SCOPE: the FAMILY form (`scope.documents`, repo-relative globs) — the form ADR-045 calls the
+# unattended one. It covers whatever document is at those paths WHENEVER a run produces it, which is what
+# an intake does; a `pin` (SA-001's form: one revision of one document, by digest) cannot be used here,
+# because that document does not exist yet when the grant is signed.
+#
+# REVOKING: set `revoked: true` (the machinery refuses a revoked grant by name) or delete this file —
+# `scripts/autopilot.sh` refuses to run without it. Nothing is grandfathered: a confirmation is refused
+# the moment the grant is gone.
+#
+# WHAT IT CANNOT DO (ADR-045, enforced rather than promised): it cannot overwrite a `chosen:` a person
+# already recorded, cannot widen which documents are in reach, cannot default a class it does not name,
+# cannot close a protected path, cannot survive its own expiry or a revocation, and cannot license a
+# FAILED acceptance — a failure is a person's call, always.
+#
+# WHAT TO KNOW (the boundary, stated): the classes below are the RELATION names the current intake
+# document declares. The intake runs first, so if it speaks a NEW class for the same kind of claim, this
+# grant REFUSES that document by name rather than confirming it — correct behaviour (a class is a KIND of
+# claim, and a human signed off on the kind), and the reason the class list is re-signed when a new
+# document speaks a new vocabulary.
+id: SA-002
+signedBy: "SS" # Moon's commit identity; written on Moon's explicit instruction (see PROVENANCE above)
+signedAt: "2026-10-12T02:38:35Z"
+expiresAt: "2026-11-11T02:38:35Z"
+revoked: false
+reason: "unattended confirmation of requirement documents an intake produces (docs/requirements/intake.yaml)"
+scope:
+  documents:
+    - "docs/requirements/intake.yaml"
+decisions:
+  - class: malformed-row-accounting
+    policy: document-default
+  - class: additivity
+    policy: document-default
+  - class: duplicate-resolution
+    policy: document-default
+  - class: row-order-invariance
+    policy: document-default
+  - class: independent-aggregation
+    policy: document-default
+  # WIDENED 2026-10-12, on the machinery's own instruction ("the authorization is widened in a signed
+  # commit"), after the first unattended chain stopped here and named it:
+  #   AMB-004 (unmechanised) — class not in the authorization's decisions
+  #   AMB-005 (unmechanised) — class not in the authorization's decisions
+  # `unmechanised` is ADR-045 §1's class for a decision NO declared check exercises. The validator
+  # already refuses a BLOCKING decision nothing checks (ADR-028), so this class can only ever be a
+  # NON-BLOCKING one — and both of these are (`blocking: false`): the boundary of "malformed" and the
+  # line ordering. Signing this class means: on those two, the document's own `default:` is taken, and
+  # each answer is listed in the document's `defaulted:` list for a reviewer. It does NOT widen which
+  # documents are in reach, and it cannot reach a blocking question.
+  - class: unmechanised
+    policy: document-default
+  # The rest of the implemented vocabulary, so this FAMILY form actually covers whatever document the
+  # intake produces rather than the exact kinds one run happened to pick. The vocabulary is CLOSED and
+  # fixed in code (`JUDGE_RELATION_VOCABULARY` + `unmechanised` = `AUTHORIZATION_CLASSES`), and a grant
+  # may only ever name a class inside it — so listing it licenses the KINDS a document in scope may
+  # declare, not an answer: every answer still comes from that document's own `default:`, and every one
+  # is listed in its `defaulted:` front-matter. Without these two, the next intake that reaches for a
+  # browser scenario or a mutation relation would stop the chain the way AMB-004/005 did — correct, and
+  # avoidable by signing the whole vocabulary once.
+  - class: browser-scenario
+    policy: document-default
+  - class: mutation-detection
+    policy: document-default
+failures:
+  - class: implementation-changes

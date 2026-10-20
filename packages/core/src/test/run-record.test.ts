@@ -1,6 +1,7 @@
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +14,8 @@ import {
   runRecordPath,
   summarizeRuns,
   type RunRecord,
+  type SandboxRoots,
+  type StepSandbox,
   type WorkflowDefinition,
 } from '../index.js';
 import { TestRuntime } from '../test-utils.js';
@@ -39,6 +42,18 @@ function readRecord(dir: string): { record: RunRecord; file: string } {
   assert.equal(files.length, 1, `exactly one run record was written (${files.join(', ')})`);
   const file = files[0]!;
   return { record: JSON.parse(readFileSync(join(runsDir, file), 'utf8')) as RunRecord, file };
+}
+
+/** The record for a named workflow: a `repair` sub-run writes its OWN record as well as the parent's. */
+function readRecordFor(dir: string, workflowName: string): { record: RunRecord; file: string } {
+  const runsDir = join(dir, RUN_RECORD_DIR);
+  const files = readdirSync(runsDir).filter((f) => f.endsWith('.json'));
+  const match = files.find((f) => {
+    const r = JSON.parse(readFileSync(join(runsDir, f), 'utf8')) as RunRecord;
+    return (r as unknown as { workflow?: string }).workflow === workflowName;
+  });
+  assert.ok(match, `a record for "${workflowName}" was written (found: ${files.join(', ')})`);
+  return { record: JSON.parse(readFileSync(join(runsDir, match), 'utf8')) as RunRecord, file: match };
 }
 
 test('run record: a completed run writes .takumi/runs/<run-id>.json with the expected fields', async () => {
@@ -354,6 +369,273 @@ test('run record: a document with no confirmation block reads as digest-only, no
     assert.equal(confirmation?.method, null);
     assert.equal(confirmation?.authorization, null);
     assert.deepEqual(confirmation?.defaulted, []);
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// WHICH BOUNDARY WAS IN FORCE (ledger #88)
+//
+// `sandbox: unshare` conflated three properties, and reading it as "the model's hands were
+// contained" is exactly the mistake the stale pi artifact recorded. The AGENT's-tools boundary is
+// DERIVED from what the runtime reports it did, never asserted from configuration — the engine
+// supplies `sandbox` + `sandboxRoots`, but only the runtime turns them into confined tools.
+// ---------------------------------------------------------------------------------------------
+
+/** A runtime that reports it built a confined session — the pi adapter's contract, without importing pi. */
+class ConfiningTestRuntime extends TestRuntime {
+  agentToolBoundary(): 'confined' | 'open' {
+    return 'confined';
+  }
+}
+
+const STUB_SANDBOX: StepSandbox = {
+  id: 'stub',
+  runStep: async () => ({ stdout: '', stderr: '', code: 0, timedOut: false }),
+  close: async () => {},
+};
+
+/**
+ * A sandbox that REALLY runs the command (ledger #92's test needs the acceptance harness's stdout).
+ * `STUB_SANDBOX` returns empty output, which is right for the agent-tool tests above — they only care
+ * that a boundary was supplied — but an acceptance reads its verdict out of the harness's output, so a
+ * silent stub makes the step fail before the assertion this test exists for.
+ */
+const RUNNING_SANDBOX: StepSandbox = {
+  id: 'running-stub',
+  runStep: async (req) => {
+    const argv = req.argv ?? ['sh', '-c', req.shell ?? 'true'];
+    const r = spawnSync(argv[0] ?? 'true', argv.slice(1), {
+      cwd: req.cwd,
+      encoding: 'utf8',
+      env: { ...process.env, ...(req.env ?? {}) },
+    });
+    return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? 1, timedOut: false };
+  },
+  close: async () => {},
+};
+const ROOTS = (dir: string): SandboxRoots => ({ rw: [dir], ro: [], cwd: dir });
+
+test('run record: a confined runtime names the agent-tools boundary, derived from what it reported', async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'boundary-confined',
+      version: '0.1.0',
+      description: 'one agent step',
+      steps: [{ id: 'impl', type: 'agent', prompt: 'implement it' }],
+    };
+    const res = await executeWorkflow(wf, {
+      ...c.exec,
+      runtime: new ConfiningTestRuntime(() => 'done', { capabilities: ['streaming'], maxParallelTasks: 4 }, 'pi'),
+      sandbox: STUB_SANDBOX,
+      sandboxRoots: ROOTS(c.dir),
+    });
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    assert.equal(record.boundaries?.agentTools, 'confined');
+    assert.equal(record.boundaries?.agentRuntime, 'pi', 'the runtime that ran the agent step is named');
+    assert.equal(record.boundaries?.stepCommands, 'none', "the platform's own commands are not confined (ledger #79)");
+    assert.equal(record.boundaries?.acceptanceSubject, 'none', 'no acceptance step ran, so no subject was contained');
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+test("run record: a runtime that cannot confine the agent's tools does NOT claim confinement", async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'boundary-open',
+      version: '0.1.0',
+      description: 'one agent step',
+      steps: [{ id: 'impl', type: 'agent', prompt: 'implement it' }],
+    };
+    // A boundary was SUPPLIED, but this runtime has no `agentToolBoundary`: it may not be recorded
+    // as confined. `open` is the honest answer (a boundary was asked for and not confirmed).
+    const res = await executeWorkflow(wf, {
+      ...c.exec,
+      sandbox: STUB_SANDBOX,
+      sandboxRoots: ROOTS(c.dir),
+    });
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    assert.equal(record.boundaries?.agentTools, 'open');
+    assert.notEqual(record.boundaries?.agentTools, 'confined');
+    assert.equal(record.boundaries?.agentRuntime, 'test');
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+/** A runtime that confined SOME of its sessions: the mixed case the record must not flatten. */
+class PartlyConfiningTestRuntime extends TestRuntime {
+  private asked = 0;
+  agentToolBoundary(): 'confined' | 'open' {
+    this.asked += 1;
+    return this.asked === 1 ? 'confined' : 'open';
+  }
+}
+
+test('run record: a PARTIALLY confined run is not recorded as confined (it is mixed)', async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'boundary-mixed',
+      version: '0.1.0',
+      description: 'two agent steps, only one of them confined',
+      steps: [
+        { id: 'impl_a', type: 'agent', prompt: 'first' },
+        { id: 'impl_b', type: 'agent', prompt: 'second' },
+      ],
+    };
+    const res = await executeWorkflow(wf, {
+      ...c.exec,
+      runtime: new PartlyConfiningTestRuntime(() => 'done', { capabilities: ['streaming'], maxParallelTasks: 4 }, 'pi'),
+      sandbox: STUB_SANDBOX,
+      sandboxRoots: ROOTS(c.dir),
+    });
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    // One confined step and one open step must NOT read as "confined": that is the same
+    // one-word-for-two-facts mistake the `boundaries` block exists to remove (ledger #88).
+    assert.equal(record.boundaries?.agentTools, 'mixed');
+    assert.notEqual(record.boundaries?.agentTools, 'confined');
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+test('run record: with no boundary supplied there is no agent-tools boundary to claim', async () => {
+  const c = ctx();
+  try {
+    const wf: WorkflowDefinition = {
+      name: 'boundary-none',
+      version: '0.1.0',
+      description: 'one tool step, sandbox: none',
+      steps: [{ id: 'probe', type: 'tool', prompt: 'echo hello' }],
+    };
+    const res = await executeWorkflow(wf, c.exec); // no sandbox/sandboxRoots/sandboxNote
+    assert.equal(res.status, 'completed');
+
+    const { record } = readRecord(c.dir);
+    assert.equal(record.sandbox, 'none', 'the compatibility string is unchanged');
+    assert.equal(record.boundaries?.agentTools, 'none');
+    assert.equal(record.boundaries?.acceptanceSubject, 'none');
+  } finally {
+    rmSync(c.dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// THE TALLY MUST FOLLOW THE RUN, NOT THE CALL FRAME (ledger #92)
+//
+// The counters behind `boundaries.agentTools` lived in `executeWorkflow`'s own scope, and a `repair`
+// step runs its sub-workflow by CALLING `executeWorkflow` again. So the sub-run counted its agent
+// steps in ITS scope while the parent -- the run that writes the record anybody reads -- stayed at
+// zero and recorded `none`, whatever the boundary really was. Measured 2026-10-19: the delivery
+// record read `none` and its attempt sub-record read `confined` for the same steps in the same
+// process. A field that exists to stop `sandbox: unshare` being misread as "the model's hands were
+// contained" (ledger #88) was blank on the one run type that delivers.
+//
+// This is the shape the real chain uses: `request-to-delivery` holds ONE `repair` step, and ALL of
+// the agent work happens inside `request-to-delivery-attempt`.
+// ---------------------------------------------------------------------------------------------
+
+test('run record: an agent step inside a repair sub-workflow is counted by the PARENT (ledger #92)', async () => {
+  const c = ctx();
+  try {
+    // An acceptance too, so BOTH facts are exercised: the agent's tools AND the delivered project's
+    // boundary are each assigned inside the sub-run's scope (ledger #92).
+    const docText = 'id: REQ-001\ntitle: the requirement\n';
+    writeFileSync(join(c.dir, 'req.yaml'), docText);
+    const harness = join(c.dir, 'judge.sh');
+    writeFileSync(
+      harness,
+      '#!/usr/bin/env bash\necho "ok 1 - REL-001 additivity: the totals add up"\necho "# tests 1"\necho "# pass 1"\necho "# fail 0"\necho "ACCEPT_VERDICT: pass"\nexit 0\n',
+    );
+    chmodSync(harness, 0o755);
+    const sub: WorkflowDefinition = {
+      name: 'the-attempt',
+      version: '0.1.0',
+      description: 'one agent step, a passing quality gate and an acceptance',
+      steps: [
+        { id: 'impl', type: 'agent', prompt: 'implement it' },
+        { id: 'gate', type: 'quality_gate', prompt: "printf 'ok 1 - a passing check\\n# tests 1\\n# pass 1\\n# fail 0\\n'", dependsOn: ['impl'] },
+        { id: 'artifact_acceptance', type: 'acceptance', requirementRef: 'req.yaml', acceptanceRef: harness, dependsOn: ['gate'] },
+      ],
+    };
+    const parent: WorkflowDefinition = {
+      name: 'request-to-delivery',
+      version: '0.1.0',
+      description: 'one repair step -- the shape the real delivery workflow has',
+      steps: [{ id: 'delivery_attempt', type: 'repair', repairRef: 'the-attempt', maxRounds: 1 }],
+    };
+    const res = await executeWorkflow(
+      parent,
+      {
+        ...c.exec,
+        runtime: new ConfiningTestRuntime(() => 'done', { capabilities: ['streaming'], maxParallelTasks: 4 }, 'pi'),
+        sandbox: STUB_SANDBOX,
+        sandboxRoots: ROOTS(c.dir),
+        sandboxPlatform: RUNNING_SANDBOX,
+        confirmedRequirement: { ref: 'req.yaml', digest: requirementDigest(docText) },
+        loadWorkflow: async () => sub,
+      },
+    );
+    assert.equal(res.status, 'completed', JSON.stringify(res.steps));
+
+    const { record } = readRecordFor(c.dir, 'request-to-delivery');
+    assert.equal(
+      record.boundaries?.agentTools,
+      'confined',
+      'the sub-workflow\'s agent step is confined, and the PARENT record must say so -- `none` here is a lie in the safe direction, which is still a lie',
+    );
+    assert.equal(record.boundaries?.agentRuntime, 'pi');
+    assert.equal(
+      record.boundaries?.acceptanceSubject,
+      'platformReadOnly',
+      'the acceptance ran inside the sub-workflow under the platform-read-only boundary, and the PARENT record must say so -- this is the second fact assigned in the wrong scope (ledger #92)',
+    );
+
+    // And the negative: the same nesting with a runtime that does NOT confine must not claim it.
+    const c2 = ctx();
+    try {
+      // Same fixture, different runtime: an OPEN one. Everything else must match or the attempt fails
+      // for a reason that has nothing to do with the boundary being measured.
+      writeFileSync(join(c2.dir, 'req.yaml'), docText);
+      const harness2 = join(c2.dir, 'judge.sh');
+      writeFileSync(
+        harness2,
+        '#!/usr/bin/env bash\necho "ok 1 - REL-001 additivity: the totals add up"\necho "# tests 1"\necho "# pass 1"\necho "# fail 0"\necho "ACCEPT_VERDICT: pass"\nexit 0\n',
+      );
+      chmodSync(harness2, 0o755);
+      const sub2: WorkflowDefinition = {
+        ...sub,
+        steps: (sub.steps ?? []).map((st) => (st.id === 'artifact_acceptance' ? { ...st, acceptanceRef: harness2 } : st)),
+      };
+      const res2 = await executeWorkflow(
+        parent,
+        {
+          ...c2.exec,
+          runtime: new TestRuntime(() => 'done', { capabilities: ['streaming'], maxParallelTasks: 4 }, 'pi'),
+          sandbox: STUB_SANDBOX,
+          sandboxRoots: ROOTS(c2.dir),
+          sandboxPlatform: RUNNING_SANDBOX,
+          confirmedRequirement: { ref: 'req.yaml', digest: requirementDigest(docText) },
+          loadWorkflow: async () => sub2,
+        },
+      );
+      assert.equal(res2.status, 'completed');
+      const { record: record2 } = readRecordFor(c2.dir, 'request-to-delivery');
+      assert.equal(record2.boundaries?.agentTools, 'open', 'a nested step that was NOT confined reads as open, never confined');
+    } finally {
+      rmSync(c2.dir, { recursive: true, force: true });
+    }
   } finally {
     rmSync(c.dir, { recursive: true, force: true });
   }

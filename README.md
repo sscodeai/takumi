@@ -75,6 +75,31 @@ Run the MEA loop:
 pnpm exec takumi loop "Fix the sumEven bug and add tests" --runtime deepseek --max-rounds 5
 ```
 
+## Delivery credentials
+
+A run that publishes needs a token for the host, and Takumi refuses **before the run starts** when a
+provider cannot work without one — a missing variable costs a sentence, not a whole chain:
+
+| provider | variable | when it is required |
+|---|---|---|
+| `github` | `GITHUB_TOKEN` | refused up front without one |
+| `gitlab` | `GITLAB_TOKEN` | refused up front without one |
+| `forgejo` | `FORGEJO_TOKEN` (or `GITEA_TOKEN`) | read lazily; an unauthenticated request may be legitimate on a host that allows it |
+
+Name a different variable with `delivery.tokenEnv` — it takes a **name**, never a value:
+
+```yaml
+delivery:
+  provider: github
+  repo: owner/name
+  tokenEnv: MY_GITHUB_TOKEN
+```
+
+The secret itself never belongs in configuration: a secret in a config file is one commit away from a
+secret in a repository. Without a token the publish step is refused **after** the implementation, the
+delivered tests, the quality gate, the rule review and the acceptance have all run — which is why the
+refusal was moved to the front (ADR-051).
+
 ## Why Takumi
 
 | Problem | Takumi approach |
@@ -170,6 +195,7 @@ takumi/
 | Durable resume from audit records | Done |
 | Parallel workflow step execution | Done |
 | Sandbox abstraction with unshare support | Done |
+| Unprivileged mount-policy boundary for step commands and constrained agent tools (fail-closed; named network exception for the delivery agent) | Done (ADR-058) |
 | Web console with live logs | Done |
 | Task-board providers: fake / GitHub / GitLab / Jira / Notion / Redmine, one shared contract suite | Done |
 | Read-only board view: `takumi board --provider <id>` | Done |
@@ -250,7 +276,12 @@ Takumi is currently a Developer Preview.
 - `takumi loop` is v1: manager decisions are still LLM-driven and non-deterministic.
 - Pi runtime is opt-in and depends on an external Pi SDK.
 - Traceability currently relies on ID naming conventions rather than structural foreign keys.
-- Tool plugins run with user privileges unless a sandbox is explicitly selected.
+- Tool plugins run with user privileges unless a sandbox is explicitly selected. A delivery run (one
+  with a worktree) is confined by default: its step commands run inside an unprivileged mount-policy
+  boundary (ADR-058), and with the Pi runtime the delivery agent's own tools are contained too. The
+  boundary is honest about its limits: the delivery agent keeps model-provider egress, the other
+  runtimes' agents and the `takumi pilot` path are not yet confined (ADR-058 limitations 8 and 9), and
+  there is a human-only, loud, recorded escape hatch (`TAKUMI_UNSAFE_NO_SANDBOX=1`).
 - Real-repo-scale evaluation is still on the roadmap.
 - The board layer (ADR-006) covers the work source; the delivery layer (ADR-007) covers branch, pull request, checks and merge. Boards differ in what they can express, on purpose: a Notion database has no pull requests and cannot EDIT a comment, and it records labels only when `labelsProperty` names the column — so each of those operations fails closed instead of quietly doing nothing.
 - Providers are exercised live where it matters most and offline everywhere else: the GitLab board, the GitLab delivery and the Notion mirror have run against real instances (a private project and a Notion database, including a live item delivered end to end and an 8-item projection), while GitHub, Jira and Redmine are covered by the offline suites only. Expect to adjust API details on first use — pagination beyond the first page of ITEMS (`listWork` still reads one page of 100), site-specific status/property names, self-hosted base URLs.

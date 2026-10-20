@@ -61,11 +61,15 @@ and without it the mode is only as honest as the harness.
 
 ## Honest limits
 
-- **The separation is structural, not a security boundary.** The engine proves the judge is written
-  after the implementation, is not in the implementer's prompt, and lives outside the named worktree.
-  It does NOT stop an agent with filesystem access from reading `<project>/.takumi/acceptance/…` by
-  guessing the path. Real isolation (a separate uid/container, an agent without filesystem reach) is
-  unmeasured and is not claimed; the run's `worktree` is a path property, not a permission.
+- **The separation is structural, not (by itself) a security boundary.** The engine proves the judge is
+  written after the implementation, is not in the implementer's prompt, and lives outside the named
+  worktree. For an UNCONFINED run it does NOT stop an agent with filesystem access from reading
+  `<project>/.takumi/acceptance/…` by guessing the path, and the run's `worktree` is a path property,
+  not a permission. As of **ADR-058** a confined run does have a boundary: a `judge_forge`/`acceptance`
+  step and a confined delivery agent's tools run inside an unprivileged mount-policy boundary, so
+  `<project>/.takumi/acceptance/<runId>` and the platform repository are not reachable from inside. The
+  exception is the delivery agent's model egress, which ADR-058 states as a named limitation rather
+  than claiming a closed boundary.
 - **The forge parses the requirement document line-wise.** That is honest for our own format and
   fails closed on what it cannot read, but a general forge needs a parser.
 - **The behavioural strength is the relation vocabulary.** Four relations and one anchor caught the
@@ -90,3 +94,76 @@ and without it the mode is only as honest as the harness.
 - The forge is a file in this repository, so a future slice can swap the vocabulary (or a
   cross-family model generating relations) without touching the engine: the seam is
   `forgeRef` + the `deliverable` contract.
+
+## What this judge can check, and the two demands made of every document
+
+Round 8 (2026-10-13) pointed the chain at a requirement from a DIFFERENT family — "the length of the
+shortest path from S to E on a grid map, or 'unreachable' when the exit cannot be reached" — and three
+unattended runs died at intake, about 7 minutes each, before any implementation was paid for. The
+refusal was
+
+```
+no declared relation or anchor exercises a rounding decision, so the judge would have to assume how
+salaries are rounded: point a relation or anchor at the decision that settles it ("decides: AMB-nnn")
+```
+
+and it cost two further findings, in this order.
+
+**One: the sentence was wrong (ledger #82).** It named a document defect where the situation was the
+judge's own capability, and it sent the repair round after a rounding decision that a path length can
+never have. The refusal was already fail-closed — the chain would not build a judge that passes any
+number it was handed — but a refusal that misdescribes its own cause wastes the loop that reads it.
+
+**Two: the demand was asked of a document that did not need it (ledger #83).** `independent-aggregation`,
+`duplicate-resolution` and `malformed-row-accounting` recompute their expectations FROM THE RECORDS and
+therefore need the rounding rule. `row-order-invariance` and `additivity` are properties of a report, and
+a declared SCENARIO (ADR-035) runs a command and reads the report or the HTTP surface the document names —
+none of those three touches the rounding parameter. The check asked "did you declare an aggregate?" where
+the question is "can I parameterise what I am about to emit?", so a document declaring a report property
+plus a CLI scenario was refused, with a message about aggregates, and **no judge was written for it at
+all** — measured 2026-10-13 with `packages/core/src/test/fixtures/graph-requirement-with-scenario.yaml`,
+which is now the test that pins the fix. The rounding rule is now required only by the checks that use it,
+and a document where NOTHING can say whether the answer is right is refused with both ways out named.
+
+**So the honest statement of what this judge can check is not "one family".** A judge can be built from:
+
+| Declaration | What it checks | Needs the declared world + rounding? |
+|---|---|---|
+| `independent-aggregation` (relation or differential anchor) | an independent recomputation of an aggregate of a per-row measure | **yes** |
+| `duplicate-resolution`, `malformed-row-accounting` | how the input was handled, against a recomputed expectation | **yes** |
+| `row-order-invariance`, `additivity` | properties of the report | the report shapes |
+| `SCN-nnn` scenario (ADR-035) | a command's exit status, an HTTP surface's status/body, or a declared report (TAP/JUnit/CTRF) | no |
+| `mutation-detection` (ADR-039) | that the delivered tests can fail | no |
+
+**What limited it, and was fixed the same day (ledger #84):** the WORLD ASSEMBLY —
+`input_format.columns`, `input_format.sample`, a per-id output line and a totals line — was demanded of
+every document, so a document whose only check is a scenario and which needs none of it was refused. That
+is the same defect as #83 one layer up, and it is now closed: the assembly, the fixtures it generates and
+the machinery that reads them are emitted only for the checks that consume them (the five world relations),
+while the scenario and mutation branches get a judge of their own. Measured:
+`packages/core/src/test/fixtures/graph-requirement-with-scenario-no-world.yaml` — one scenario, no world —
+produces a 364-line judge, and the test RUNS it both ways: a failing line in the delivered tests' TAP
+report fails the judge, a clean report passes it. The first attempt at that fix gated a shared helper
+(`subst`, `alloc_port`) into the world half and the scenario branch called a function that was never
+emitted — which is why that test runs the judge instead of asserting that a file exists.
+
+Three properties of this failure are worth keeping. It cost 7 minutes and **no model spend on an
+implementation**, because the gate asks the judge's own question before the confirmation (ADR-056). It was
+**fail-closed**. And its refusals now name the layer they come from.
+
+### The same demand lived at the FRONT DOOR (ledger #85)
+
+The world requirement exists in two languages: the TypeScript validator that refuses a document before a
+human confirms it (`validateRequirementDocument`, and therefore `takumi requirement confirm --dry-run`),
+and the shell forge that implements the checks. #83 and #84 taught the FORGE that a scenario needs no
+declared world; the front door went on demanding one from every document.
+
+Measured 2026-10-13, round 10: the intake — having finally been told which of the two shapes it is writing
+— produced exactly the shape the prompt asks for (one scenario, no world), and all three runs were refused
+at `intake_shape` check 2, in 2.5 minutes each, **before the forge ever saw the document**. The chain's two
+doors disagreed about what a document must declare.
+
+The fix is the one this repository already uses for the relation vocabulary (ADR-031): the list lives in
+ONE exported constant, the front door conditions its refusal on it, and a test compares it against the
+forge's own `WORLD_NEEDED` case, so a drift between the doors is a test failure rather than a document that
+passes one and dies at the other.
