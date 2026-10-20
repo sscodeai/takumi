@@ -281,6 +281,30 @@ export interface WorkflowExecutionContext {
    */
   loadWorkflow?: (ref: string) => Promise<WorkflowDefinition>;
   /**
+   * WHERE AN AGENT STEP REPORTS THE BOUNDARY IT RAN UNDER (ledger #92).
+   *
+   * The counters that become `boundaries.agentTools` used to live in `executeWorkflow`'s own scope, and a
+   * `repair` step runs its sub-workflow by CALLING `executeWorkflow` again. So the sub-run counted its
+   * agent steps in ITS scope while the parent — the run that actually writes `.takumi/runs/<id>.json` —
+   * stayed at zero and recorded `agentTools: 'none'` no matter what the boundary really was. Measured
+   * 2026-10-19: the delivery record read `none` while its attempt sub-record read `confined` for the same
+   * steps in the same process. A field that exists to stop `sandbox: unshare` being misread as "the
+   * model's hands were contained" (ledger #88) must not itself be blank on the one run type that
+   * delivers.
+   *
+   * The sink is INJECTED so the tally follows the run, not the call frame: a nested run reports into the
+   * same counter its parent reads. Absent means this run IS the outermost one and keeps its own.
+   */
+  noteAgentBoundary?: (taskId: string) => void;
+  /**
+   * The same hand-up, for the OTHER boundary fact: whether the ACCEPTANCE harness put its subject under
+   * the platform-read-only boundary (ledger #92). It is a separate signal because it is a separate
+   * question — the agent's tools and the delivered project are confined by different mechanisms — but it
+   * fails the same way when a `repair` sub-workflow owns the acceptance: the flag lands in the sub-run and
+   * the parent's record says `none` for a boundary that was really in force.
+   */
+  onAcceptanceSubjectConfined?: () => void;
+  /**
    * The host this run may publish to (ADR-037): the delivery port, injected by the caller exactly like the
    * workflow loader. The engine never talks to a code host on its own — an unattended run that can push
    * wherever it likes is a run nobody can reason about — so a `publish` step with no provider FAILS rather
@@ -755,10 +779,14 @@ export async function executeWorkflow(
   let agentStepsRan = 0;
   let confinedAgentSteps = 0;
   let acceptanceSubjectConfined = false;
-  const noteAgentBoundary = (taskId: string): void => {
+  const noteAgentBoundaryHere = (taskId: string): void => {
     agentStepsRan++;
     if (ctx.runtime.agentToolBoundary?.(taskId) === 'confined') confinedAgentSteps++;
   };
+  // A NESTED RUN REPORTS INTO ITS PARENT'S TALLY (ledger #92). `ctx.noteAgentBoundary` is how an outer
+  // run hands its counters down: a `repair` step calls `executeWorkflow` again, so without this the
+  // sub-run's agent steps counted in a scope nobody reads, and the record that ships said `none`.
+  const noteAgentBoundary = ctx.noteAgentBoundary ?? noteAgentBoundaryHere;
 
   /**
    * Assemble and write the run's machine-readable record: `.takumi/runs/<run-id>.json`.
@@ -1156,7 +1184,21 @@ export async function executeWorkflow(
           );
           let res: WorkflowRunResult;
           try {
-            res = await executeWorkflow(sub, { ...ctx, withholdAcceptanceFeedback: !lastRound }, vars);
+            res = await executeWorkflow(
+              sub,
+              {
+                ...ctx,
+                withholdAcceptanceFeedback: !lastRound,
+                // The tally MUST follow the run, not the call frame (ledger #92): this sub-workflow's
+                // agent steps and its acceptance are the ones the PARENT's record describes, and the
+                // parent is the file anybody reads afterwards.
+                noteAgentBoundary,
+                onAcceptanceSubjectConfined: () => {
+                  acceptanceSubjectConfined = true;
+                },
+              },
+              vars,
+            );
           } catch (e) {
             abort = `delivery ${label} could not be run (${e instanceof Error ? e.message : String(e)})`;
             break;
@@ -1716,7 +1758,15 @@ export async function executeWorkflow(
         let killedByBoundMs: number | undefined;
         // The harness asked for the platform-read-only boundary; record that the DELIVERED project
         // was actually put under it (the subject), as distinct from the agent's tools above.
-        if (ctx.sandboxPlatform !== undefined) acceptanceSubjectConfined = true;
+        //
+        // LEDGER #92: when an acceptance runs inside a `repair` sub-workflow this assignment lands in the
+        // SUB-run's scope, and the record written afterwards belongs to the PARENT — which then reported
+        // `acceptanceSubject: 'none'` for a boundary that was in force. So the fact is reported UP the
+        // same way the agent tally is, and only taken locally when this run is the outermost one.
+        if (ctx.sandboxPlatform !== undefined) {
+          if (ctx.onAcceptanceSubjectConfined !== undefined) ctx.onAcceptanceSubjectConfined();
+          else acceptanceSubjectConfined = true;
+        }
         try {
           const r = await runStepCommand(ctx, {
             argv: ['bash', acceptanceRef],
