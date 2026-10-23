@@ -45,6 +45,12 @@ export interface CollectReviewInputOptions {
    * nothing uses is how a reviewer becomes the slowest part of a tick.
    */
   contentFor?: (path: string) => boolean;
+  /**
+   * The AMB-nnn ids the confirmed requirement carries (ADR-060). Passing this asks for one more thing
+   * than the file list: every delivered file's CONTENT, because the rule that consumes it looks for an
+   * `AMB-nnn` marker wherever the delivery chose to put it. Absent leaves the narrowing above intact.
+   */
+  decisionIds?: readonly string[];
   /** Stop after this many changed files and fail closed instead (a runaway diff). */
   maxChangedFiles?: number;
 }
@@ -136,7 +142,10 @@ export async function collectReviewInput(
 
   const changes: ReviewFileChange[] = [];
   for (const entry of listed) {
-    const needsContent = contentFor(entry.path);
+    // A review that must find an `AMB-nnn` marker (ADR-060) has to read EVERY delivered file, not just
+    // the test-shaped ones: the anchor may legitimately sit in a source file, a script or a README, and
+    // a rule that could only see tests would be asking for something it cannot verify.
+    const needsContent = options.decisionIds !== undefined ? true : contentFor(entry.path);
     const absentAtBase = entry.status === 'added';
     const absentAtHead = entry.status === 'deleted';
     let baseContent: string | null = null;
@@ -157,7 +166,12 @@ export async function collectReviewInput(
       ...(entry.previousPath === undefined ? {} : { previousPath: entry.previousPath }),
     });
   }
-  return { baseSha, headSha, changes };
+  return {
+    baseSha,
+    headSha,
+    changes,
+    ...(options.decisionIds === undefined ? {} : { decisionIds: options.decisionIds }),
+  };
 }
 
 /** One file's content at one revision; a failure here is a failure, not an absence. */

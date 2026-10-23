@@ -372,3 +372,58 @@ test('review rules: an unprovable high-entropy string goes to a HUMAN, never to 
   assert.equal(hasBlockingFinding(findings), false);
   assert.equal(hasHumanFinding(findings), true);
 });
+
+// ADR-060 / ledger #96: A DELIVERY AN OVERNIGHT OPERATOR CAN REVIEW.
+//
+// An unattended delivery answers decisions nobody read — the standing authorization takes the
+// document's own `default:` (ADR-045) — and that record lives in the document's front matter, not in
+// the code. So the person who looks at the result in the morning holds a delivery whose behaviour was
+// partly chosen by a machine, with no way to find WHICH parts without reconstructing the run. That is
+// the difference between a delivery that is REVIEWABLE and one that is merely finished.
+//
+// The rule asks for the cheap thing that closes it: `docs/decisions.md` naming every AMB-nnn, and an
+// `AMB-nnn` marker in the delivered files so `grep -rn` lands on the code that enacts it.
+test('a delivery must make each machine-answered decision FINDABLE (ADR-060)', () => {
+  const ids = ['AMB-001', 'AMB-002'] as const;
+
+  // Neither the table nor a marker: two findings, both blocking, because the agent can fix both.
+  const bare = runReviewRules(
+    { ...input(change('src/summary.sh', null, 'echo hi\n', 'added')), decisionIds: ids },
+  );
+  const missing = bare.filter((f) => f.rule === 'decision-anchor');
+  assert.equal(missing.length, 2, 'one finding per decision nobody can find');
+  for (const f of missing) {
+    assert.equal(f.severity, 'block', 'the fix is mechanical and the AGENT\'s — a person must not have to do it');
+    assert.match(f.detail, /docs\/decisions\.md/, 'it names the file to create');
+    assert.match(f.detail, /grep -rn/, 'and the command a reviewer would run');
+  }
+  assert.equal(hasBlockingFinding(bare), true);
+  assert.equal(missing[0]?.path, 'docs/decisions.md', 'the missing table is the path the finding points at');
+
+  // A table AND a marker for each: no findings, the delivery is reviewable.
+  const documented = runReviewRules({
+    ...input(
+      change('docs/decisions.md', null, '| AMB-001 | skip-count | src/summary.sh:12 |\n| AMB-002 | merge | src/summary.sh:30 |\n', 'added'),
+      change('src/summary.sh', null, '# AMB-001 (skip-count): a malformed row is excluded and counted\necho hi\n# AMB-002 (merge): every row for a key is aggregated\necho bye\n', 'added'),
+    ),
+    decisionIds: ids,
+  });
+  assert.deepEqual(documented.filter((f) => f.rule === 'decision-anchor'), []);
+
+  // A TABLE ALONE IS NOT ENOUGH: a claim with no anchor in the code is exactly the "it says so, so it
+  // must be true" gate this repository keeps refusing (ledger #87's family). The marker is what makes
+  // the claim checkable with grep.
+  const tableOnly = runReviewRules({
+    ...input(
+      change('docs/decisions.md', null, '| AMB-001 | skip-count | somewhere |\n| AMB-002 | merge | somewhere |\n', 'added'),
+    ),
+    decisionIds: ids,
+  });
+  const unanchored = tableOnly.filter((f) => f.rule === 'decision-anchor');
+  assert.equal(unanchored.length, 2, 'both decisions are listed but neither is findable in the delivery');
+  assert.match(unanchored[0]?.detail ?? '', /no delivered file carries an `AMB-001` marker/);
+
+  // NO IDs means the caller is not reviewing a requirement document, so the rule stays silent.
+  const unrelated = runReviewRules(input(change('src/summary.sh', null, 'echo hi\n', 'added')));
+  assert.deepEqual(unrelated.filter((f) => f.rule === 'decision-anchor'), [], 'a review of something else is not asked for decisions it never had');
+});

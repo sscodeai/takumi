@@ -50,6 +50,27 @@ jobs:
           git fetch --quiet origin main dev
           bash scripts/check-main-lag.sh --max 40
 
+  # THE CHAIN'S OWN RELIABILITY, FROM ITS OWN RECORDS (ledger #97)
+  #
+  # `eval/` measures the coding AGENT on 23 held-out tasks. The unattended CHAIN's reliability was only
+  # ever measured BY HAND (thirteen rounds in docs/unattended-chain-measurements.md), which does not
+  # accumulate and does not notice a regression. Every run already writes `.takumi/runs/<id>.json` with
+  # the facts the four metrics need; `scripts/chain-eval.sh` aggregates them under the SAME four names
+  # eval/ defines, so the two number sets can be read against each other.
+  #
+  # It REPORTS and does not gate (`chain-eval.sh` always exits 0). A metric that reddened a build would
+  # be a metric people learn to work around — and the run records are not in the repository anyway
+  # (`.takumi/` is gitignored), so on CI this job demonstrates the report shape rather than measuring
+  # CI's own runs. The real numbers come from an operator's machine, on demand.
+  chain-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The chain reliability report runs, and stays quiet when there are no runs
+        run: |
+          # No records on a fresh checkout: the script must say so and exit 0, not fail the build.
+          bash scripts/chain-eval.sh --dir .takumi/runs || test $? -eq 2
+
   # The Pi runtime smoke test (scripts/pi-smoke.mjs) is intentionally NOT a CI job:
   #
   #   * runtimes/pi is not a pnpm workspace member (it depends on the unpublished
