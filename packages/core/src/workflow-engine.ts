@@ -1237,9 +1237,23 @@ export async function executeWorkflow(
             subTests.push(...s.tests);
           }
           const passed = res.status === 'completed' && acceptance?.status === 'completed';
-          roundSummaries.push(
-            `--- ${label}: ${passed ? 'accepted' : 'refused'} ---\n${acceptance?.summary ?? '(the acceptance step did not run)'}`,
-          );
+          // A SKIPPED VERDICT IS NOT A VERDICT, AND ITS SUMMARY IS NOT A REASON (ledger #98).
+          //
+          // This line used to read `acceptance?.summary ?? '(the acceptance step did not run)'`. `??` only
+          // falls back on null/undefined, and a SKIPPED step still HAS an object whose summary is the
+          // dependency note — "skipped (dependency skipped: judge_forge)". So the round's recorded reason
+          // became the fact that the acceptance was skipped, and the step that actually refused was named
+          // NOWHERE. Measured 2026-10-23: two runs kept "skipped (dependency skipped: judge_forge)" as the
+          // only account of why they failed, and the reason could not be recovered from any record — a
+          // refusal nobody can attribute is a refusal nobody can learn from.
+          //
+          // A verdict is a reason only when it RAN. Otherwise the reason is the last FAILED step's own
+          // summary, which is exactly what the brief above already prefers.
+          const verdictSummary =
+            acceptance !== undefined && (acceptance.status === 'completed' || acceptance.status === 'failed')
+              ? (acceptance.summary ?? '')
+              : (lastFailed?.summary ?? '(the acceptance step did not run, and no step reported a failure)');
+          roundSummaries.push(`--- ${label}: ${passed ? 'accepted' : 'refused'} ---\n${verdictSummary}`);
           if (passed) {
             accepted = true;
             // The head the sub-run's acceptance JUDGED is carried up into this run's vars (ADR-040): a
