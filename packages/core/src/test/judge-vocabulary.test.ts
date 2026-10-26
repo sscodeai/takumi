@@ -171,3 +171,30 @@ test('vocabulary: every committed requirement document says checkedAs where it i
     }
   }
 });
+
+// LEDGER #99: THE PROMPT MUST SAY THAT THE TWO FIELD MODELS ARE ALTERNATIVES, NOT A MENU.
+//
+// The judge checks EVERY relation a document declares. So a document that declares a record-aggregate
+// relation (`malformed-row-accounting`, `duplicate-resolution`) AND `derived-ratio` makes the judge demand
+// BOTH field vocabularies in the same output line — `count`/`sum` from the first, `numerator`/
+// `denominator`/`ratio` from the second.
+//
+// Measured 2026-10-23: a correct uptime report did exactly that, its line carried
+// `[id, denominator, sum, numerator, ratio]`, and the judge refused it for `sum=0.0 want 3.0` — a field a
+// ratio report has no reason to print. The availability arithmetic was right and the delivery was lost.
+//
+// The prompt is the only place the intake learns this, so the prompt has to say it. A sentence nobody
+// checks is a sentence that rots; this assertion is what keeps it in the file it has to be in.
+test('vocabulary: the intake prompt says the two field models are alternatives (ledger #99)', () => {
+  const prompt = read('extensions/skills/req-intake/prompts/intake.md');
+  assert.match(
+    prompt,
+    /DO NOT MIX THE TWO FIELD MODELS/,
+    'the prompt must warn against mixing the field models, not only the two shapes',
+  );
+  // Both vocabularies have to be NAMED in that warning, or a reader cannot tell which is which.
+  assert.match(prompt, /`count`, `sum`, `min`, `max`, `mean`/, 'the record-aggregate fields are listed');
+  assert.match(prompt, /`numerator`, `denominator`, `ratio`/, 'the derived-ratio fields are listed');
+  // And it must say the choice is exclusive.
+  assert.match(prompt, /declare only that one/i, 'it must say to pick ONE model');
+});

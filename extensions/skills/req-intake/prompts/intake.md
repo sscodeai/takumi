@@ -176,6 +176,24 @@ deliverable:
 intake wrote for a grid-map request, and it is refused at the gate every time — which costs a round and
 teaches the next repair round nothing.
 
+**AND DO NOT MIX THE TWO FIELD MODELS INSIDE ONE SHAPE (ledger #99).** Shape A has two vocabularies of
+output field, and the judge checks EVERY relation you declare, so declaring relations from both makes it
+demand both in the same line:
+
+- the **record-aggregate** fields — `count`, `sum`, `min`, `max`, `mean` — are for a report whose numbers
+  are aggregates of a per-row measure. `malformed-row-accounting`, `duplicate-resolution`,
+  `row-order-invariance`, `additivity` and an `independent-aggregation` anchor all assume them;
+- the **derived-ratio** fields — `numerator`, `denominator`, `ratio` — are for a report whose answer is a
+  QUOTIENT of two counts. `derived-ratio` assumes them.
+
+Measured 2026-10-23: a correct uptime report declared `malformed-row-accounting` +
+`duplicate-resolution` + `derived-ratio` together and its line carried
+`[id, denominator, sum, numerator, ratio]`. The judge then demanded `sum`, which a ratio report has no
+reason to print, and refused a delivery whose availability arithmetic was right. **Pick the model the
+ANSWER needs and declare only that one.** A ratio report that must also skip malformed rows may declare
+`malformed-row-accounting` ONLY if its line really does carry `count` — otherwise express the skipping in
+the `expect:` words of a scenario and use `mutation-detection` for the answer, which needs no fields at all.
+
 ## Rules
 
 1. `requirements[]` is never empty for a non-empty request. Use `REQ-nnn`
@@ -253,6 +271,13 @@ from your text alone.
       - `duplicate-resolution`   what happens when a key repeats (needs a decision)
       - `malformed-row-accounting`  what happens to a bad row (needs a decision)
       - `independent-aggregation`   recompute the answer independently and compare (differential)
+      - `derived-ratio`          the answer is a RATIO of two counts the report itself prints
+                                 (availability, hit rate, pass rate): declare `numerator`,
+                                 `denominator` and `ratio` among your line's `fields`, and the judge
+                                 checks each printed ratio equals its own two counts, rounded the way
+                                 your decision says (see rule 12). Use this whenever the answer is a
+                                 quotient — a `mean` of the raw measure is a DIFFERENT question and
+                                 the judge will recompute something nobody asked for
       - `browser-scenario`       run a declared end-to-end scenario of the surface and judge it by the
                                  command's exit code and the report it writes (see rule 13)
       - `mutation-detection`     the delivered TESTS fail when the delivered behaviour is mutated — the
