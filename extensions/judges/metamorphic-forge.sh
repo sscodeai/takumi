@@ -1498,8 +1498,15 @@ check_report() { # $1 fixture, $2 output, $3 dup rule
     fv=$(match_fields "$fline" "$GROUP_RE" "$GROUP_FIELDS")
     for role in $GROUP_FIELDS; do
       [ "$role" = id ] && continue
+      # A ROLE THIS RECOMPUTATION CANNOT DERIVE IS NOT A DISAGREEMENT (ledger #99). `role_token` answers
+      # `?` for a role it does not compute — `numerator`, `denominator` and `ratio` are exactly that,
+      # since they belong to `derived-ratio` and are checked there. Comparing `?` against the tool's
+      # number reported `numerator=2 want ?`, which is not a finding: it is this relation trying to grade
+      # a field it cannot see. Measured 2026-10-26 on a correct report whose availability arithmetic was
+      # right, refused by DIFF-001 for three fields it has no business checking.
       tok=$(fieldval "$fv" "$role")
       want=$(role_token "$role" "$cnt" "$ssum" "$smin" "$smax" "$tok" "${rsum[@]}")
+      [ "$want" = "?" ] && continue
       [ "$tok" = "$want" ] || msg="$msg; id $id $role=$tok want $want"
     done
   done < <(printf '%s\n' "$exp" | grep '^ID ')
@@ -1514,6 +1521,7 @@ check_report() { # $1 fixture, $2 output, $3 dup rule
     for role in $TOTAL_FIELDS; do
       tok=$(fieldval "$tfv" "$role")
       want=$(role_token "$role" "$tcnt" "$tsum" 0 0 "$tok" "${trsum[@]}")
+      [ "$want" = "?" ] && continue
       [ "$tok" = "$want" ] || msg="$msg; totals $role=$tok want $want"
     done
   fi

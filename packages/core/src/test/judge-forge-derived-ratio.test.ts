@@ -23,7 +23,7 @@ const FORGE = join(REPO, 'extensions/judges/metamorphic-forge.sh');
 const PROSE_HALF_UP = 'Half-up, no currency printed';
 
 /** A requirement whose answer is a ratio of two counts the report prints. */
-function requirement(opts: { rounding?: string } = {}): string {
+function requirement(opts: { rounding?: string; anchor?: boolean } = {}): string {
   const rounding = opts.rounding ?? 'half-up';
   return [
     'requirement:',
@@ -65,6 +65,15 @@ function requirement(opts: { rounding?: string } = {}): string {
     '      relation: derived-ratio',
     '      decides: AMB-001',
     '      description: Each printed availability equals its own failures/probes, rounded as AMB-001 decided.',
+    ...(opts.anchor
+      ? [
+          '  differential:',
+          '    - id: DIFF-001',
+          '      anchor: independent-aggregation',
+          '      decides: AMB-001',
+          '      description: An independent recomputation matches the report.',
+        ]
+      : []),
     '',
   ].join('\n');
 }
@@ -233,4 +242,32 @@ test('derived-ratio: the vocabulary test and the forge agree on the relation set
   assert.ok(line !== null);
   assert.ok((line[1] ?? '').includes('derived-ratio'), 'the forge declares derived-ratio as implemented');
   assert.match(forgeText, /^\s+derived-ratio\)/m, 'and has a case that actually runs it');
+});
+
+// LEDGER #99, FOUND ON A REAL RUN: `independent-aggregation` MUST NOT GRADE THE RATIO'S FIELDS.
+//
+// `role_token` answers `?` for a role it does not compute, and numerator/denominator/ratio are exactly
+// that — they belong to `derived-ratio`. The comparison `[ "$tok" = "$want" ]` then always failed and
+// reported `numerator=2 want ?`, which is not a finding: it is the relation grading a field it cannot
+// see. Measured 2026-10-26: a correct uptime report, availability arithmetic right, was refused by
+// DIFF-001 across three fields it has no business checking.
+//
+// A declared document may legitimately carry BOTH an independent-aggregation anchor and a derived-ratio
+// relation (the anchor checks the counts, the relation checks the arithmetic), so this has to work.
+test('independent-aggregation skips the derived-ratio fields instead of failing on them', () => {
+  const f = forge(requirement({ anchor: true }));
+  try {
+    assert.equal(f.forge.status, 0, f.forge.out);
+    const r = judge(f);
+    // The ratio relation passes...
+    assert.match(r.out, /ok \d+ - REL-001 derived-ratio: each of 2 printed ratio\(s\)/);
+    // ...and the aggregate anchor must NOT report `want ?` for a role it cannot compute.
+    assert.doesNotMatch(
+      r.out,
+      /want \?/,
+      `an uncomputable role must be skipped, not compared against "?"\n${r.out}`,
+    );
+  } finally {
+    cleanup(f);
+  }
 });

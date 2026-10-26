@@ -194,6 +194,33 @@ ANSWER needs and declare only that one.** A ratio report that must also skip mal
 `malformed-row-accounting` ONLY if its line really does carry `count` — otherwise express the skipping in
 the `expect:` words of a scenario and use `mutation-detection` for the answer, which needs no fields at all.
 
+**CHOOSE THE MODEL FROM THE ANSWER, NEVER FROM THE INPUT (ledger #99).** This is the distinction the
+sentence above still left ambiguous, and the next run made the wrong choice because of it. Measured
+2026-10-23: a request for an availability PERCENTAGE that also had to skip malformed rows was written as a
+record-aggregate document — `[id, count, min, max, mean]` plus `malformed-row-accounting` — because
+"skip malformed rows" is a record-shaped thing to say. The answer was still a quotient, `mean` still could
+not express it, and the judge still had nothing it could check.
+
+Ask what the printed NUMBER is, and let everything else follow:
+
+| the answer the request asks for | the field model |
+|---|---|
+| a count, total, min, max, **average of a per-row measure** | `count` / `sum` / `min` / `max` / `mean` |
+| a **percentage or a rate** — availability, hit rate, pass rate, conversion, error rate, success rate | `numerator` / `denominator` / `ratio` |
+
+"Skips malformed rows", "reports how many it skipped", "handles duplicates", "works on any order" are
+properties of the INPUT. They do not tell you which model to pick, and picking the record model because a
+request mentions malformed rows is the mistake this table exists to prevent. A ratio answer that must
+report its skips can do so in a `SKIPPED` line (which carries only `skipped-count` and belongs to NEITHER
+model), while its per-site line carries ONLY the ratio roles.
+
+**AND IN A RATIO DOCUMENT, DO NOT PUT `count` ON A TOTALS LINE (ledger #99).** `count` means ROWS or
+distinct ids to the judge — it is the aggregate model's word. A ratio report's total is usually a sum of
+probes, which is a DIFFERENT number: measured 2026-10-26, a totals line declared `TOTAL <probes>` with the
+`count` role, the tool printed 4 (four probes), the judge computed 2 (two sites), and the run was refused
+for `totals count=4 want 2`. If a ratio document needs a totals line at all, give it `sum` and say what is
+being summed, or leave the totals line out — `derived-ratio` does not read it.
+
 ## Rules
 
 1. `requirements[]` is never empty for a non-empty request. Use `REQ-nnn`

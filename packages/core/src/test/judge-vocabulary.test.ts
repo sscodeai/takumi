@@ -197,4 +197,10 @@ test('vocabulary: the intake prompt says the two field models are alternatives (
   assert.match(prompt, /`numerator`, `denominator`, `ratio`/, 'the derived-ratio fields are listed');
   // And it must say the choice is exclusive.
   assert.match(prompt, /declare only that one/i, 'it must say to pick ONE model');
+  // AND IT MUST SAY WHAT TO CHOOSE BY. A warning that says "pick one" without a criterion is what let
+  // the next run pick the record model because the request mentioned malformed rows — which is a
+  // property of the INPUT, not of the answer. The rule is: decide from the printed NUMBER.
+  assert.match(prompt, /CHOOSE THE MODEL FROM THE ANSWER, NEVER FROM THE INPUT/, 'the criterion is stated');
+  assert.match(prompt, /properties of the INPUT/, 'and the inputs that must NOT drive the choice are named');
+  assert.match(prompt, /percentage or a rate/i, 'the ratio-shaped answers are listed so the criterion is usable');
 });
