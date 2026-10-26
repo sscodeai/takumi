@@ -823,6 +823,30 @@ for role in $GROUP_FIELDS; do
     *) refuse "the per-id output line declares the field role \"$role\", which a judge cannot compute (implemented: id count sum min max mean numerator denominator ratio)" ;;
   esac
 done
+
+# THE TWO FIELD MODELS ARE ALTERNATIVES, AND THE FORGE IS WHERE THAT IS ENFORCED (ledger #99).
+#
+# Telling the intake so in prose was not enough: measured 2026-10-26, three consecutive runs wrote a
+# mixed line — `[id, denominator, sum, numerator, ratio]`, then `[id, denominator, count, numerator,
+# ratio]` — because a ratio answer that also skips malformed rows reads like a record report. The judge
+# then demands the aggregate fields from a report that has no reason to print them, and a CORRECT
+# delivery dies at acceptance after paying for an implementation.
+#
+# So the front door refuses the shape instead. The rule is exactly the judge's own semantics: an
+# aggregate field describes an aggregate of a per-row measure, a ratio field describes a quotient, and a
+# line cannot be both. The message names the two sets so the repair round has something to act on.
+if [ -n "$GROUP_FIELDS" ]; then
+  has_agg=0; has_ratio=0
+  for role in $GROUP_FIELDS; do
+    case "$role" in
+      count|sum|min|max|mean) has_agg=1 ;;
+      numerator|denominator|ratio) has_ratio=1 ;;
+    esac
+  done
+  if [ "$has_agg" = 1 ] && [ "$has_ratio" = 1 ]; then
+    refuse "the per-id output line mixes the two field models: it declares both an aggregate field (count/sum/min/max/mean) and a ratio field (numerator/denominator/ratio) in \"$GROUP_SHAPE\". They answer different questions — an aggregate field describes an aggregate of a per-row measure, a ratio field describes a quotient — and the judge would require both from one line, so a report that is correct in ONE of them is refused for the other. Choose the model from the ANSWER: an average or a total of a measure uses count/sum/min/max/mean; a percentage or a rate (availability, hit rate, pass rate) uses numerator/denominator/ratio. If the answer is a rate, the SKIPPED line (skipped-count) is where a skip count goes, and it belongs to neither model"
+  fi
+fi
 for role in $TOTAL_FIELDS; do
   case "$role" in
     count|sum) ;;

@@ -271,3 +271,44 @@ test('independent-aggregation skips the derived-ratio fields instead of failing 
     cleanup(f);
   }
 });
+
+// LEDGER #99: THE FRONT DOOR REFUSES A MIXED LINE.
+//
+// Prose in the intake prompt was not enough. Three consecutive runs (2026-10-26) wrote a line carrying
+// BOTH `count` and `numerator`/`denominator`/`ratio`, because a ratio answer that also skips malformed
+// rows reads like a record report. The judge then demands the aggregate fields from a report with no
+// reason to print them, and a CORRECT delivery dies at acceptance after paying for an implementation.
+//
+// The forge is the only place that can refuse it before any spend, so it refuses the SHAPE and names
+// both sets.
+test('the forge REFUSES an output line that mixes the aggregate and ratio field models', () => {
+  const mixed = requirement().replace(
+    '      fields: [id, numerator, denominator, ratio]',
+    '      fields: [id, denominator, count, numerator, ratio]',
+  );
+  // ...and the shape must have five placeholders to line up with five roles.
+  const doc = mixed.replace(
+    '      shape: "<site> <successes> <probes> <availability>"',
+    '      shape: "<site> <successes> <probes> <availability> <skipped>"',
+  );
+  const f = forge(doc);
+  try {
+    assert.notEqual(f.forge.status, 0, 'the forge must refuse a mixed line');
+    assert.match(f.forge.out, /mixes the two field models/);
+    // The message must name BOTH sets, or the repair round cannot tell what to drop.
+    assert.match(f.forge.out, /count\/sum\/min\/max\/mean/);
+    assert.match(f.forge.out, /numerator\/denominator\/ratio/);
+    assert.match(f.forge.out, /Choose the model from the ANSWER/i);
+  } finally {
+    cleanup(f);
+  }
+});
+
+test('the forge still ACCEPTS a pure ratio line (the refusal is not a blanket ban)', () => {
+  const f = forge(requirement());
+  try {
+    assert.equal(f.forge.status, 0, `a pure ratio document must still build:\n${f.forge.out}`);
+  } finally {
+    cleanup(f);
+  }
+});
