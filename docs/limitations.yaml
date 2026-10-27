@@ -46,3 +46,29 @@ limitations:
       contains: "repaired"
     closes_when: >-
       the first attempt produces a confirmable document at a measured rate the operator accepts.
+
+  - id: intake-mispicks-the-field-model
+    what: >-
+      Given a request whose answer is a RATIO (a percentage or a rate), the intake reliably writes it as
+      a RECORD-AGGREGATE document — declaring row-order-invariance / duplicate-resolution alongside ratio
+      fields — even when the prompt says not to and even when the forge's refusal, naming the offending
+      relation, is handed to its repair round. The document is then refused at the gate, so nothing is
+      spent on an implementation, but the run does not produce a deliverable either.
+    where:
+      file: docs/bugs-fixed.md
+      contains: "AND A REFUSAL ALONE DID NOT FIX IT"
+    closes_when: >-
+      a measured sample of ratio-shaped requests produces a confirmable pure-ratio document on the first
+      intake attempt (the forge whitelist that refuses the mixed vocabulary then stops firing for them).
+
+  - id: derived-ratio-proves-arithmetic-not-meaning
+    what: >-
+      The `derived-ratio` check proves each printed ratio equals its OWN numerator and denominator. It
+      does not verify that the two counts mean what the document says they mean, so a document that
+      mislabels what it divides still passes.
+    where:
+      file: docs/adr/061-a-ratio-is-not-a-mean.md
+      contains: "It does not verify the denominator's meaning"
+    closes_when: >-
+      the relation is extended to derive the counts from the declared input world instead of reading both
+      sides of the division from the report.

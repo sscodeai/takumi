@@ -858,15 +858,25 @@ if [ -n "$GROUP_FIELDS" ]; then
   # "nothing in its output matched a declared output shape" — a correct delivery lost to a document that
   # declared two incompatible vocabularies at once.
   #
-  # So the front door binds the RELATION SET to the FIELD MODEL. A line whose fields are the ratio triple
-  # may only declare checks that read those fields (or none: `mutation-detection` and `browser-scenario`
-  # need no fields at all), and the message names the offending relation so the repair round can act.
+  # AND A REFUSAL ALONE DID NOT FIX IT. Told this in prose, and then told again by this very refusal in
+  # its repair round, the intake wrote the same two relations twice more (measured 2026-10-27, run
+  # `wf-...` attempt 1 and repair round 2, both refused). A rule the document can ignore is a suggestion.
+  #
+  # So this is now a WHITELIST, not a blacklist: when the per-id line is a ratio, ONLY the relations that
+  # read those fields (or need no fields at all) may be declared. Anything else is refused by name, and
+  # there is no formulation of the document that keeps both vocabularies.
   if [ "$has_ratio" = 1 ]; then
-    for rel in row-order-invariance additivity duplicate-resolution malformed-row-accounting independent-aggregation; do
-      if [ "$(has_rel "$rel")" = yes ]; then
-        refuse "the document declares the relation \"$rel\" on a report whose per-id line is a RATIO (fields: $GROUP_FIELDS). \"$rel\" is a property of a RECORD-AGGREGATE report: the judge recomputes counts and sums from the fixture and requires them in the line, and a ratio line carries none — so a CORRECT ratio report is refused with \"nothing matched a declared output shape\". Pick ONE model for the answer. If the answer is a rate, check it with derived-ratio (which reads numerator/denominator/ratio), and use mutation-detection or a scenario for the delivered tests and any end-to-end behaviour; those need no aggregate fields. If the answer really is an aggregate, drop derived-ratio and carry count/sum/min/max/mean on the line instead"
-      fi
-    done
+    while read -r rel_id rel_kind; do
+      [ -z "${rel_kind:-}" ] && continue
+      case "$rel_kind" in
+        derived-ratio|mutation-detection|browser-scenario) ;;
+        *)
+          refuse "the document declares the relation \"$rel_kind\" ($rel_id) on a report whose per-id line is a RATIO (fields: $GROUP_FIELDS). \"$rel_kind\" is a property of a RECORD-AGGREGATE report: the judge recomputes counts and sums from the fixture and requires them in the line, and a ratio line carries none — so a CORRECT ratio report is refused with \"nothing matched a declared output shape\". On a ratio document the ONLY checkable relations are: derived-ratio (reads numerator/denominator/ratio), mutation-detection (proves the delivered tests can fail), and a browser-scenario (runs the surface end to end). Drop \"$rel_kind\"; if the answer really is an aggregate, drop derived-ratio instead and carry count/sum/min/max/mean on the line"
+          ;;
+      esac
+    done <<EOF
+$RELATIONS
+EOF
   fi
 fi
 for role in $TOTAL_FIELDS; do

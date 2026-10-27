@@ -270,7 +270,8 @@ test('a ratio document may not declare an aggregate relation (ledger #101)', () 
     assert.notEqual(f.forge.status, 0, 'the forge must refuse the mixed vocabularies');
     assert.match(f.forge.out, /independent-aggregation/);
     assert.match(f.forge.out, /RATIO/);
-    assert.match(f.forge.out, /Pick ONE model for the answer/);
+    assert.match(f.forge.out, /ONLY checkable relations are/);
+    assert.match(f.forge.out, /derived-ratio.*mutation-detection.*browser-scenario/s);
   } finally {
     cleanup(f);
   }
