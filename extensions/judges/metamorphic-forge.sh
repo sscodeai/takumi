@@ -846,6 +846,28 @@ if [ -n "$GROUP_FIELDS" ]; then
   if [ "$has_agg" = 1 ] && [ "$has_ratio" = 1 ]; then
     refuse "the per-id output line mixes the two field models: it declares both an aggregate field (count/sum/min/max/mean) and a ratio field (numerator/denominator/ratio) in \"$GROUP_SHAPE\". They answer different questions — an aggregate field describes an aggregate of a per-row measure, a ratio field describes a quotient — and the judge would require both from one line, so a report that is correct in ONE of them is refused for the other. Choose the model from the ANSWER: an average or a total of a measure uses count/sum/min/max/mean; a percentage or a rate (availability, hit rate, pass rate) uses numerator/denominator/ratio. If the answer is a rate, the SKIPPED line (skipped-count) is where a skip count goes, and it belongs to neither model"
   fi
+
+  # A RATIO LINE MAY NOT DECLARE A RELATION THAT RECOMPUTES AN AGGREGATE (ledger #101).
+  #
+  # Measured 2026-10-27, on a real run: the intake wrote `fields: [id, numerator, denominator, ratio]`
+  # together with `row-order-invariance` and `duplicate-resolution`. The fields were the RIGHT model and
+  # the shape check above passed — the field-model check only looks at FIELDS, so it saw nothing wrong.
+  # But those two relations are properties of an aggregate REPORT: the judge recomputes counts and sums
+  # from the fixture and looks for them in the line, and a ratio line has no `count` to find. The
+  # delivered report was CORRECT (`checkout 8 10 80.0`, `search 3 4 75.0`) and the judge refused it with
+  # "nothing in its output matched a declared output shape" — a correct delivery lost to a document that
+  # declared two incompatible vocabularies at once.
+  #
+  # So the front door binds the RELATION SET to the FIELD MODEL. A line whose fields are the ratio triple
+  # may only declare checks that read those fields (or none: `mutation-detection` and `browser-scenario`
+  # need no fields at all), and the message names the offending relation so the repair round can act.
+  if [ "$has_ratio" = 1 ]; then
+    for rel in row-order-invariance additivity duplicate-resolution malformed-row-accounting independent-aggregation; do
+      if [ "$(has_rel "$rel")" = yes ]; then
+        refuse "the document declares the relation \"$rel\" on a report whose per-id line is a RATIO (fields: $GROUP_FIELDS). \"$rel\" is a property of a RECORD-AGGREGATE report: the judge recomputes counts and sums from the fixture and requires them in the line, and a ratio line carries none — so a CORRECT ratio report is refused with \"nothing matched a declared output shape\". Pick ONE model for the answer. If the answer is a rate, check it with derived-ratio (which reads numerator/denominator/ratio), and use mutation-detection or a scenario for the delivered tests and any end-to-end behaviour; those need no aggregate fields. If the answer really is an aggregate, drop derived-ratio and carry count/sum/min/max/mean on the line instead"
+      fi
+    done
+  fi
 fi
 for role in $TOTAL_FIELDS; do
   case "$role" in

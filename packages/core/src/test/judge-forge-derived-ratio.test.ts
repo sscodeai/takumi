@@ -254,19 +254,23 @@ test('derived-ratio: the vocabulary test and the forge agree on the relation set
 //
 // A declared document may legitimately carry BOTH an independent-aggregation anchor and a derived-ratio
 // relation (the anchor checks the counts, the relation checks the arithmetic), so this has to work.
-test('independent-aggregation skips the derived-ratio fields instead of failing on them', () => {
+// LEDGER #101: A RATIO DOCUMENT MAY NOT CARRY AN AGGREGATE RELATION.
+//
+// An earlier version of this file asserted that `independent-aggregation` alongside `derived-ratio` was
+// FINE, and made the aggregate anchor skip the fields it could not compute. A real run (2026-10-27)
+// proved the deeper problem: `row-order-invariance` and `duplicate-resolution` on a ratio document make
+// the judge look for counts in a line that has none, and a CORRECT report (`checkout 8 10 80.0`) was
+// refused with "nothing in its output matched a declared output shape".
+//
+// So the front door now refuses the combination instead of tolerating it, and this test pins the
+// refusal — including that the message names the offending relation.
+test('a ratio document may not declare an aggregate relation (ledger #101)', () => {
   const f = forge(requirement({ anchor: true }));
   try {
-    assert.equal(f.forge.status, 0, f.forge.out);
-    const r = judge(f);
-    // The ratio relation passes...
-    assert.match(r.out, /ok \d+ - REL-001 derived-ratio: each of 2 printed ratio\(s\)/);
-    // ...and the aggregate anchor must NOT report `want ?` for a role it cannot compute.
-    assert.doesNotMatch(
-      r.out,
-      /want \?/,
-      `an uncomputable role must be skipped, not compared against "?"\n${r.out}`,
-    );
+    assert.notEqual(f.forge.status, 0, 'the forge must refuse the mixed vocabularies');
+    assert.match(f.forge.out, /independent-aggregation/);
+    assert.match(f.forge.out, /RATIO/);
+    assert.match(f.forge.out, /Pick ONE model for the answer/);
   } finally {
     cleanup(f);
   }

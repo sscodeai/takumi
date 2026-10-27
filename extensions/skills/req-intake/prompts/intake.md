@@ -16,10 +16,22 @@ the whole job.
 ## Output contract
 
 Write the document to `docs/requirements/intake.yaml` (create the directory if it
-does not exist) AND emit it as your answer, exactly one YAML document and nothing
-else: no prose before it, no prose after it, no markdown fence. The file is what the
-loop reads -- a document that exists only in the conversation is a document the next
-step cannot confirm -- and the text of that file is what the confirmation hashes.
+does not exist). The FILE is the deliverable, and it is the only thing graded: the loop reads it, and the
+confirmation hashes its text.
+
+**WORK IN STEPS — DO NOT TRY TO EMIT THE WHOLE DOCUMENT IN ONE ANSWER (ledger #101).** Measured
+2026-10-27 on five consecutive runs: told to produce the entire document as a single answer, the agent
+spent its ENTIRE output budget reasoning before writing a character — `output: 32768, reasoning: 32768`,
+`stopReason: "length"`, ZERO bytes written — on a TRIVIAL request as well as a complex one. The same model
+on the same prompt SUCCEEDS when it is free to stop and act: its healthy turns reason ~18k, then
+`stopReason: "toolUse"`, then continue. The budget was never too small; a single "write it all now" answer
+is.
+
+So build the file incrementally with the tools you have — `write` the skeleton first, then `edit` in the
+blocks (requirements, then ambiguities, then deliverable), reading it back when you need to. Several calls
+are EXPECTED and are not a sign of failure. Then, as your final answer, state in ONE line that the
+document is written and how many requirements and ambiguities it records. **Do not paste the YAML into
+your answer** — it is already the file, and re-emitting it is what exhausts the budget.
 
 The document has three top-level keys: `requirements`, `ambiguities`, and `deliverable`.
 
