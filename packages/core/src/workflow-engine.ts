@@ -14,6 +14,7 @@ import {
 } from './index.js';
 import { groupByLevel } from './workflow.js';
 import { detectHardFailure, judgeGate, parseTestReport } from './quality-gate.js';
+import { summariseGateOutput } from './quality-gate-output.js';
 import { createGitRunner, type GitRunner } from './git-runner.js';
 import { ProviderError } from './provider-error.js';
 import type { CheckSummary, DeliveryMergeMethod, DeliveryProvider, MergeOutcome, PullRequestRef, PullRequestStatus } from './delivery.js';
@@ -1099,7 +1100,7 @@ export async function executeWorkflow(
           report.shape === 'unrecognised'
             ? `shape: unrecognised (no known test summary found in the output)\ncommand: ${cmd}`
             : `shape: ${report.shape}\ncommand: ${cmd}`;
-        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${shapeLine}\nreason: ${verdict.reason}\n${out.slice(0, 1200)}`;
+        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${shapeLine}\nreason: ${verdict.reason}\n${out.length <= 1200 ? out : summariseGateOutput(out)}`;
         if (gatePassed) {
           run.stepStatus[stepId] = 'completed';
           pushStep({ stepId, status: 'completed', summary, artifacts: [], tests: [] });
