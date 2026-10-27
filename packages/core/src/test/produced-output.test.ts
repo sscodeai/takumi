@@ -26,7 +26,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -172,8 +172,12 @@ test('the REAL intake manifests declare the document its agent step must produce
   ) as WorkflowDefinition;
   assert.deepEqual(validateWorkflowManifest(def), [], 'the attempt manifest passes its own validator');
 
-  const agent = (def.steps ?? []).find((s) => s.type === 'agent');
-  assert.ok(agent, 'the attempt has an agent step');
+  // The step that WRITES the document is the one this test is about, not simply the first agent: with
+  // the shape decision split out (ledger #102) the attempt has two agent steps, and only `req_intake`
+  // produces the file. Finding by type alone would assert against the decision step and demand a
+  // `produces` the decision has no business declaring.
+  const agent = (def.steps ?? []).find((s) => (s.produces ?? []).includes('docs/requirements/intake.yaml'));
+  assert.ok(agent, 'the attempt has an agent step that declares producing the document');
   assert.deepEqual(
     agent?.produces,
     ['docs/requirements/intake.yaml'],
@@ -184,6 +188,39 @@ test('the REAL intake manifests declare the document its agent step must produce
     String(agent?.prompt ?? ''),
     /\{repairFailures\}/,
     'the next attempt is handed the failing checks the gate reported — the whole point of the repair round',
+  );
+  // LEDGER #102: the shape decision is its OWN step, ahead of the document, and it is BINDING on it.
+  const shape = (def.steps ?? []).find((s) => s.id === 'shape_decision');
+  assert.ok(shape, 'the shape decision is a step of its own');
+  assert.equal(shape?.skillAction, 'shape', 'and it uses the SHORT prompt, not the 400-line document prompt');
+  // A `skillAction` THE SKILL'S MANIFEST DOES NOT MAP IS SILENTLY IGNORED — `skillPromptFor` falls back
+  // to the workflow's own prompt text, so the step ran the bare `{input}` template and the agent answered
+  // with its default behaviour (measured 2026-10-27: it offered open-source discovery instead of deciding
+  // the shape). The mapping is the load-bearing part, so it is asserted here rather than assumed.
+  const manifest = parseYaml(
+    readFileSync(new URL('../../../../extensions/skills/req-intake/manifest.yaml', import.meta.url), 'utf8'),
+  ) as { prompts?: Record<string, string> };
+  assert.equal(
+    manifest.prompts?.['shape'],
+    'prompts/shape.md',
+    'the skill manifest maps the `shape` action, or the step silently loses its prompt',
+  );
+  for (const action of ['intake', 'shape', 'confirm', 'revise']) {
+    const rel = manifest.prompts?.[action];
+    assert.ok(rel, `the manifest maps \`${action}\``);
+    assert.ok(
+      existsSync(new URL(`../../../../extensions/skills/req-intake/${rel}`, import.meta.url)),
+      `the file \`${rel}\` that \`${action}\` maps to exists`,
+    );
+  }
+  assert.ok(
+    (agent?.dependsOn ?? []).includes('shape_decision'),
+    'the document step waits for the decision',
+  );
+  assert.match(
+    String(agent?.prompt ?? ''),
+    /\{step\.shape_decision\}/,
+    'and the decision reaches that step through the engine\'s per-step vars, or the split decides nothing',
   );
 
   // The gate that reads the document must depend on the step that produces it, or the declaration

@@ -3,6 +3,16 @@ kind: skill
 version: 0.1.0
 description: "Requirement intake for black-box acceptance: turn a natural-language request into a structured requirement document with explicit, bounded open ambiguities."
 prompts:
+  # STEP 1 of the intake (ledger #102): what KIND of answer is this — an aggregate of a per-row measure,
+  # or a quotient of two counts. Split out because a model that must also write a 400-line-ruled document
+  # could not make this choice: measured 2026-10-27, three runs wrote an AGGREGATE document for a request
+  # asking for a pass PERCENTAGE. A short prompt asking only this question answers correctly.
+  #
+  # A prompt MISSING FROM THIS MAP IS SILENTLY IGNORED: `skillPromptFor` returns the workflow's fallback
+  # when `prompts[action]` is absent, so a `skillAction: shape` step ran the bare `{input}` template and
+  # the agent answered with ITS OWN default behaviour (measured: it offered open-source discovery). That
+  # is why this entry has to exist, and why produced-output.test.ts asserts the manifest maps it.
+  shape: prompts/shape.md
   intake: prompts/intake.md
   confirm: prompts/confirm.md
   # The re-pass (ADR-030): a document whose acceptance failed and came back with the failure written
