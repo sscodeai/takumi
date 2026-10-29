@@ -65,3 +65,24 @@ limitations:
     closes_when: >-
       the relation is extended to derive the counts from the declared input world instead of reading both
       sides of the division from the report.
+
+  - id: a-ratio-report-cannot-declare-order-invariance
+    what: >-
+      A ratio report CANNOT declare `row-order-invariance`, `additivity`, `duplicate-resolution` or
+      `malformed-row-accounting`, even when the property is genuinely true of it. Measured 2026-10-29
+      four times across separate runs: the intake wrote `derived-ratio` beside `row-order-invariance`
+      ("shuffling the input rows leaves the report byte-identical") on documents whose per-id line is
+      `[id, numerator, denominator, ratio]`, and the forge refused each one. The refusal is correct
+      about the JUDGE and wrong about the WORLD: those relations are implemented by recomputing counts
+      and sums from the records and requiring them on the line, and a ratio line carries no such
+      counts. So the check is unavailable, not the property untrue — a ratio report that is genuinely
+      order-invariant cannot say so, and cannot be checked for it.
+    where:
+      file: extensions/judges/metamorphic-forge.sh
+      contains: "is a property of a RECORD-AGGREGATE report"
+    closes_when: >-
+      the four record-relations are implemented for a ratio line as well — recomputing the ratio from
+      the shuffled or duplicated fixture and comparing the printed ratio, rather than looking for
+      count/sum roles the line does not have. Until then the intake prompt must keep telling the model
+      to drop them, and a human reading the document must know the omission is a judge limitation and
+      not a claim that the report is order-dependent.
