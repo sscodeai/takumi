@@ -84,3 +84,24 @@ limitations:
       line does not have. Until then the intake prompt must keep telling the model to drop them, and a
       human reading the document must know the omission is a judge limitation and not a claim that the
       report lacks the property.
+
+  - id: a-reused-delivery-repository-collides-across-requests
+    what: >-
+      Every unattended run bases its worktree on the delivery repository's `baseBranch` (by default
+      `main`), so when the SAME repository is used for successive DIFFERENT requests, each run inherits
+      every previous request's deliverables. Measured 2026-10-29 on `sscodeai/takumi-delivery-demo`:
+      `main` carried the merged results of eight prior runs (PR #56-#70), all writing the same
+      `docs/requirements/intake.yaml` and `summary.py`. A pass-Percentage request then produced an
+      implementation whose own docstring described `region,amount` — the PREVIOUS request's input — because
+      the implementer found that file already there and continued it. The delivery was refused by the
+      judge (the report matched no declared shape), so nothing incorrect landed, but the run was spent.
+      This is not an agent defect and not a judge defect: it is what "one demo repository, many
+      requests" means. A clean per-request repository does not have it.
+    where:
+      file: docs/measurements/intake-rate-2026-10-29.md
+      contains: "region,amount"
+    closes_when: >-
+      either each unattended run gets its own delivery repository (or a per-request subdirectory
+      declared in the document), or the implementation step is told to treat an inherited file that
+      belongs to a different requirement as something to replace rather than extend — and a real run
+      demonstrates a second request landing cleanly on a repository whose main already holds a first one.
