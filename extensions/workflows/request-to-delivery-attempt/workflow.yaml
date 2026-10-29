@@ -117,6 +117,32 @@ steps:
       else echo "no test command found in this project" >&2; exit 1; fi
     dependsOn: [unit_and_integration_tests]
     timeoutMs: 600000
+  - id: worktree_clean
+    # EVERY GATE CAN PASS AND PUBLISH STILL REFUSE (ledger #106).
+    #
+    # Measured 2026-10-29 (`wf-a46dd47e`, the `ratio` sample of the intake rate measurement): ci_config
+    # wrote `.github/workflows/ci.yml` into the worktree, implementation committed its own files and
+    # left that one UNCOMMITTED, and then quality_gate PASSED (it runs tests, it does not read git
+    # status), rule_review passed, judge_forge forged, artifact_acceptance PASSED 4/4 — and publish
+    # refused at the very end with "the worktree has uncommitted changes; the runner never commits
+    # them". A whole implementation, a forged judge and a full acceptance were spent proving a delivery
+    # that a `git status` would have caught in the first second.
+    #
+    # This is the same rule publish enforces, moved up to where it costs nothing: the agent's boundary
+    # IS the commit, so an uncommitted file means the agent did not finish. It names every leftover
+    # path rather than the first, so the repair round gets the whole list instead of one at a time.
+    type: tool
+    prompt: |
+      left=$(git status --porcelain)
+      if [ -n "$left" ]; then
+        echo "the implementation left uncommitted change(s) — the agent's boundary IS the commit, so these were never delivered:" >&2
+        printf '%s\n' "$left" | sed 's/^/  /' >&2
+        echo "commit them (ci_config's pipeline file is written BEFORE the implementer commits, so it belongs in that commit), or delete what you did not mean to create." >&2
+        exit 1
+      fi
+      echo "the worktree is clean: every file the attempt produced is inside a commit"
+    dependsOn: [quality_gate]
+    timeoutMs: 60000
   - id: rule_review
     type: rule_review
     # `root` = the root commit of the repository under review, so the review covers EVERYTHING the
