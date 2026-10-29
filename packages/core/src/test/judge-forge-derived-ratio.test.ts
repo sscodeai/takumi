@@ -23,7 +23,7 @@ const FORGE = join(REPO, 'extensions/judges/metamorphic-forge.sh');
 const PROSE_HALF_UP = 'Half-up, no currency printed';
 
 /** A requirement whose answer is a ratio of two counts the report prints. */
-function requirement(opts: { rounding?: string; anchor?: boolean } = {}): string {
+function requirement(opts: { rounding?: string; anchor?: boolean; totalFields?: string } = {}): string {
   const rounding = opts.rounding ?? 'half-up';
   return [
     'requirement:',
@@ -58,8 +58,9 @@ function requirement(opts: { rounding?: string; anchor?: boolean } = {}): string
     '      shape: "<site> <successes> <probes> <availability>"',
     '      fields: [id, numerator, denominator, ratio]',
     '    totals_line:',
-    '      shape: "TOTAL <count>"',
-    '      fields: [count]',
+    ...(opts.totalFields
+      ? ['      shape: "TOTAL <probes_sum> <successes_sum> <overall>"', `      fields: ${opts.totalFields}`]
+      : ['      shape: "TOTAL <count>"', '      fields: [count]']),
     '  relations:',
     '    - id: REL-001',
     '      relation: derived-ratio',
@@ -316,4 +317,41 @@ test('the forge still ACCEPTS a pure ratio line (the refusal is not a blanket ba
   } finally {
     cleanup(f);
   }
+});
+
+// LEDGER #108 — a TOTALS line may name `count` or `sum` and nothing else.
+//
+// Measured 2026-10-29: a document declared `shape: "TOTAL <passed_sum> <total_sum> <overall_pct>"` with
+// `fields: [sum, sum, ratio]`. The report was CORRECT — 68 and 82 summed, 82.9 printed — and the forge
+// refused it by name: `the totals output line declares the field role "ratio", which a judge cannot
+// compute (implemented: count sum)`.
+//
+// The refusal is right. The judge recomputes the totals from the records, and it can recompute two
+// sums; it cannot recompute a ratio that the document never gave it the pair for. What was wrong was
+// the prompt: it warned about `count` on a totals line (#99) and said nothing about `ratio`, so the
+// model reached for the ratio role the moment the answer was a percentage.
+
+test('the forge refuses `ratio` on a totals line, and says what it can compute', () => {
+  const fx = forge(requirement({ totalFields: '[sum, sum, ratio]' }));
+  try {
+    assert.notEqual(fx.forge.status, 0, `${fx.forge.out}`);
+    assert.match(fx.forge.out, /the totals output line declares the field role "ratio"/);
+    assert.match(fx.forge.out, /implemented: count sum/);
+  } finally {
+    rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test('the intake prompt warns about `ratio` on a totals line, naming the forge\'s own words', () => {
+  const prompt = readFileSync(
+    new URL('../../../../extensions/skills/req-intake/prompts/intake.md', import.meta.url),
+    'utf8',
+  );
+  assert.match(prompt, /DO NOT PUT `ratio` ON A TOTALS LINE/, 'the warning exists');
+  assert.match(prompt, /ledger #108/, 'and it cites what it was measured from');
+  assert.match(
+    prompt,
+    /Never write `ratio`, `mean`, `numerator` or `denominator` on a totals line/,
+    'it names every role that is refused, not just the one that was seen',
+  );
 });
