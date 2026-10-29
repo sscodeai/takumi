@@ -66,23 +66,21 @@ limitations:
       the relation is extended to derive the counts from the declared input world instead of reading both
       sides of the division from the report.
 
-  - id: a-ratio-report-cannot-declare-order-invariance
+  - id: a-ratio-report-cannot-declare-count-relations
     what: >-
-      A ratio report CANNOT declare `row-order-invariance`, `additivity`, `duplicate-resolution` or
-      `malformed-row-accounting`, even when the property is genuinely true of it. Measured 2026-10-29
-      four times across separate runs: the intake wrote `derived-ratio` beside `row-order-invariance`
-      ("shuffling the input rows leaves the report byte-identical") on documents whose per-id line is
-      `[id, numerator, denominator, ratio]`, and the forge refused each one. The refusal is correct
-      about the JUDGE and wrong about the WORLD: those relations are implemented by recomputing counts
-      and sums from the records and requiring them on the line, and a ratio line carries no such
-      counts. So the check is unavailable, not the property untrue — a ratio report that is genuinely
-      order-invariant cannot say so, and cannot be checked for it.
+      A ratio report cannot declare `additivity`, `duplicate-resolution`, `malformed-row-accounting` or
+      `independent-aggregation`, even when the property is genuinely true of it. Those four are
+      implemented by recomputing counts and sums from the records and requiring them ON THE LINE
+      (`additivity` sums count/sum roles across the per-id and totals lines; the others compare against
+      `check_report`/`aggregate`), and a ratio line carries no such roles. So the CHECK is unavailable,
+      not the property untrue. `row-order-invariance` used to be in this list and is NOT any more —
+      see ledger #110: its check is two runs and a comparison and needs no roles at all.
     where:
       file: extensions/judges/metamorphic-forge.sh
-      contains: "is a property of a RECORD-AGGREGATE report"
+      contains: "recomputes COUNTS or SUMS from the fixture"
     closes_when: >-
-      the four record-relations are implemented for a ratio line as well — recomputing the ratio from
-      the shuffled or duplicated fixture and comparing the printed ratio, rather than looking for
-      count/sum roles the line does not have. Until then the intake prompt must keep telling the model
-      to drop them, and a human reading the document must know the omission is a judge limitation and
-      not a claim that the report is order-dependent.
+      the four relations are implemented for a ratio line as well — recomputing from the shuffled or
+      duplicated fixture and comparing the printed RATIO, rather than looking for count/sum roles the
+      line does not have. Until then the intake prompt must keep telling the model to drop them, and a
+      human reading the document must know the omission is a judge limitation and not a claim that the
+      report lacks the property.
