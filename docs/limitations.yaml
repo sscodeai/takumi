@@ -39,13 +39,20 @@ limitations:
 
   - id: intake-reliability
     what: >-
-      The intake is REPAIRED, not made reliable: a bad document costs another attempt instead of
-      losing the run, and the first-attempt rate is not something the chain claims.
+      The intake is REPAIRED, not made reliable. Measured 2026-10-29 over three unattended runs of
+      three different request shapes (a pass percentage, an aggregate, a pair of counts): the FIRST
+      attempt passed its own shape gate in 1 of 3, and 2 of 3 delivered — both the failures were
+      caught by the gate and fixed by the repair round, which is the repair working, not the intake
+      being reliable. The failures were not the same defect twice: one document omitted the
+      `checkedAs:` a `derived-ratio` decision needs, the other declared no `deliverable.run` at all
+      and zero requirements. A first-attempt rate of 1/3 means an unattended run costs roughly three
+      attempts' worth of tokens and time for two of every three requests.
     where:
       file: docs/adr/057-the-intake-is-repaired-not-thrown-away.md
       contains: "repaired"
     closes_when: >-
-      the first attempt produces a confirmable document at a measured rate the operator accepts.
+      the first attempt produces a confirmable document at a measured rate the operator accepts —
+      measured with `scripts/measure-intake-rate.sh`, and the operator names the rate.
 
   - id: derived-ratio-proves-arithmetic-not-meaning
     what: >-
