@@ -21,8 +21,14 @@ function git(cwd: string, ...args: string[]) {
   return r.stdout;
 }
 
-/** A throwaway repository with `main` and `dev`, `dev` carrying `ahead` extra commits. */
-function repo(ahead: number): string {
+/**
+ * A throwaway repository with `main` and `dev`, `dev` carrying `ahead` extra commits.
+ *
+ * `ageDays` backdates every `dev` commit, so the AGE bound can be tested without waiting: a count
+ * bound cannot tell the difference between 155 commits released in a day and one commit forgotten
+ * for a month, and that difference is the whole point of the second bound.
+ */
+function repo(ahead: number, ageDays = 0): string {
   const dir = mkdtempSync(join(tmpdir(), 'mainlag-'));
   git(dir, 'init', '-q');
   git(dir, 'config', 'user.email', 't@example.invalid');
@@ -32,9 +38,20 @@ function repo(ahead: number): string {
   git(dir, 'commit', '-qm', 'base');
   git(dir, 'branch', '-m', 'main');
   git(dir, 'checkout', '-qb', 'dev');
+  const when = ageDays > 0 ? new Date(Date.now() - ageDays * 86_400_000).toISOString() : null;
   for (let i = 1; i <= ahead; i += 1) {
     writeFileSync(join(dir, 'f.txt'), `base\n${i}\n`);
-    git(dir, 'commit', '-qam', `dev commit ${i}`);
+    git(dir, 'add', '.');
+    const args = ['-c', 'user.email=t@example.invalid', '-c', 'user.name=test', 'commit', '-qm', `dev commit ${i}`];
+    if (when) {
+      const r = spawnSync('git', args, {
+        cwd: dir, encoding: 'utf8',
+        env: { ...process.env, GIT_COMMITTER_DATE: when, GIT_AUTHOR_DATE: when },
+      });
+      if (r.status !== 0) throw new Error(r.stderr);
+    } else {
+      git(dir, ...args);
+    }
   }
   return dir;
 }
@@ -116,6 +133,55 @@ test('check-main-lag: a non-numeric bound is refused, not coerced', () => {
     const r = check(dir, '--max', 'lots');
     assert.equal(r.status, 2);
     assert.match(r.stderr, /wants a whole number, got 'lots'/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// LEDGER #104 — THE COUNT WAS THE WRONG SHAPE OF NUMBER.
+//
+// Measured on this repository on 2026-10-27: 11, 34 and 155 commits in three consecutive weeks. A
+// count bound calibrated in the quiet week (40) waves through two months of the busy one, and the
+// same bound calibrated in the busy week fails during the quiet one. The number describes the
+// author's throughput, not the thing that hurts. The sentence this script was written from already
+// said the right bound — "one that is a fortnight behind is a formality" — so the age is what is
+// now measured, and the count stays as a cheap second opinion.
+
+test('check-main-lag: FEW commits, left unmerged for too long, still fails', () => {
+  // Two commits, well inside the count bound, twenty days old. The old check passed this happily;
+  // that is a release line nobody has touched for three weeks.
+  const dir = repo(2, 20);
+  try {
+    const r = check(dir);
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /oldest unmerged commit has sat on \S+ for 2\d day\(s\) \(bound 14\)/);
+    assert.match(r.stderr, /The count is within bounds \(2 commit\(s\)\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('check-main-lag: MANY commits released promptly pass — a burst is a release, not a lag', () => {
+  // Ten commits, all today. The count is inside the bound and the age is zero: nothing was left
+  // sitting. A count-only check cannot tell this apart from ten commits forgotten a month ago.
+  const dir = repo(10);
+  try {
+    const r = check(dir);
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /oldest unmerged commit is 0 day\(s\) old \(bound 14\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('check-main-lag: the age bound is configurable, and a bad value is refused', () => {
+  const dir = repo(3, 10);
+  try {
+    assert.equal(check(dir, '--max-age', '30').status, 0, 'a looser age bound accepts the same tree');
+    assert.equal(check(dir, '--max-age', '5').status, 1, 'a tighter one rejects it');
+    const bad = check(dir, '--max-age', 'soon');
+    assert.equal(bad.status, 2);
+    assert.match(bad.stderr, /--max-age wants a whole number of days, got 'soon'/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
