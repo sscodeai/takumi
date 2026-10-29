@@ -46,3 +46,15 @@ limitations:
       contains: "repaired"
     closes_when: >-
       the first attempt produces a confirmable document at a measured rate the operator accepts.
+
+  - id: derived-ratio-proves-arithmetic-not-meaning
+    what: >-
+      The `derived-ratio` check proves each printed ratio equals its OWN numerator and denominator. It
+      does not verify that the two counts mean what the document says they mean, so a document that
+      mislabels what it divides still passes.
+    where:
+      file: docs/adr/061-a-ratio-is-not-a-mean.md
+      contains: "It does not verify the denominator's meaning"
+    closes_when: >-
+      the relation is extended to derive the counts from the declared input world instead of reading both
+      sides of the division from the report.

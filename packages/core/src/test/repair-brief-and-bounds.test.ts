@@ -357,3 +357,62 @@ test('an attempt its JUDGE refused is briefed from the judge, not from a gate th
   assert.doesNotMatch(res.prompts[1] ?? '', /the delivered tests pass/, 'a gate that PASSED is not a brief');
   assert.match(res.step.summary, /REL-001 additivity: the totals do not add up/, 'and the record carries it too');
 });
+
+// LEDGER #98: A SKIPPED VERDICT'S SUMMARY IS NOT A REASON.
+//
+// The round history line used to read `acceptance?.summary ?? '(the acceptance step did not run)'`. `??`
+// falls back only on null/undefined, and a SKIPPED step still HAS an object whose summary is the
+// dependency note. So a round whose acceptance was skipped recorded
+//
+//     --- attempt 1 of 2: refused ---
+//     skipped (dependency skipped: judge_forge)
+//
+// and named the step that actually refused NOWHERE. Measured 2026-10-23: two runs kept exactly that as
+// the only account of why they failed, and no record could recover the reason — a refusal nobody can
+// attribute is one nobody can learn from, which is precisely what the failure taxonomy needs.
+test('a round whose acceptance was SKIPPED records the step that failed, not the skip (ledger #98)', async () => {
+  const p = project();
+  try {
+    const sub: WorkflowDefinition = {
+      name: 'the-attempt',
+      version: '0.1.0',
+      description: '',
+      steps: [
+        { id: 'implementation', type: 'agent', prompt: 'Attempt {repairRound}', timeoutMs: 600000 },
+        {
+          id: 'judge_forge',
+          type: 'judge_forge',
+          requirementRef: 'docs/requirements/feature.yaml',
+          forgeRef: join(p.dir, 'refusing-forge.sh'),
+          dependsOn: ['implementation'],
+          timeoutMs: 60000,
+        },
+        {
+          id: 'artifact_acceptance',
+          type: 'acceptance',
+          requirementRef: 'docs/requirements/feature.yaml',
+          acceptanceRef: join(p.dir, 'harness.sh'),
+          dependsOn: ['judge_forge'],
+        },
+      ],
+    };
+    const res = await run(p, sub, () => {});
+    assert.equal(res.status, 'failed');
+
+    // The round line is part of the step summary the record keeps.
+    assert.doesNotMatch(
+      res.step.summary,
+      /--- attempt 1 of 2: refused ---\s*\n\s*skipped \(dependency skipped/,
+      `the round's reason must not be the fact that its verdict was skipped\n${res.step.summary}`,
+    );
+    // The FAILING step here is `judge_forge`, and its own summary is the forge's complaint. What matters
+    // is that the round line carries THAT, and not the dependency note that replaced it.
+    assert.match(
+      res.step.summary,
+      /--- attempt 1 of 2: refused ---\s*\nthe judge forge did not report success/,
+      `the round must name the FAILING step's own reason\n${res.step.summary}`,
+    );
+  } finally {
+    rmSync(p.dir, { recursive: true, force: true });
+  }
+});

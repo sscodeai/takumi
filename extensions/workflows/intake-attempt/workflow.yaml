@@ -12,14 +12,54 @@ runtime: pi
 requiredSkills:
   - req-intake
 steps:
+  # STEP 1: WHICH SHAPE OF ANSWER IS THIS? (ledger #102)
+  #
+  # Split out because the model could not pick the field model while also writing a 400-line-ruled
+  # document. Measured 2026-10-27: given a request for a pass PERCENTAGE, the intake wrote an
+  # AGGREGATE document — row-order-invariance + duplicate-resolution alongside ratio fields — three
+  # separate times, including after the forge's own refusal named the offending relation in its repair
+  # round. Prose in the big prompt did not move it; a SHORT prompt that asks only "aggregate or quotient"
+  # answers all three of these requests correctly (verified directly against the API: pass percentage →
+  # QUOTIENT, availability → QUOTIENT, total/average salary → AGGREGATE, 190-341 output tokens each).
+  #
+  # The answer is carried to the next step through `{step.shape_decision}` (the engine records every
+  # step's summary into `vars['step.<id>']`), so the document step never has to re-derive it.
+  - id: shape_decision
+    type: agent
+    skill: req-intake
+    # The SHORT prompt: `prompts/shape.md` asks only "aggregate or quotient" and is what makes this step
+    # cheap (190-341 output tokens measured) and correct where the big prompt was not.
+    skillAction: shape
+    prompt: |
+      {input}
+    timeoutMs: 300000
   - id: req_intake
     type: agent
     skill: req-intake
+    skillAction: intake
     # `{repairFailures}` is EMPTY on the first attempt and carries the gate's own failing checks on the
     # next one (the engine sets it per attempt). The wording mirrors the delivery's repair prompt: the
     # document is the thing under repair, and the answer is never to weaken the contract.
     prompt: |
       {input}
+
+      STEP 1 OF THIS INTAKE ALREADY DECIDED THE SHAPE OF THE ANSWER. Its decision follows, and it is
+      BINDING — do not re-decide it, and do not add relations or fields from the other model:
+
+      --- what step 1 decided ---------------------------------------------------------------
+      {step.shape_decision}
+      ----------------------------------------------------------------------------------------
+
+      If it says `ANSWER_SHAPE: QUOTIENT`, the per-id line's `fields` must be `[id, numerator,
+      denominator, ratio]` and the ONLY relations you may declare are `derived-ratio`,
+      `mutation-detection` and at most one scenario. Do NOT declare row-order-invariance, additivity,
+      duplicate-resolution, malformed-row-accounting or an independent-aggregation anchor: the forge
+      REFUSES that combination by name, because those relations look for counts a ratio line does not
+      carry. A skip count, if the request wants one, goes on its own `SKIPPED <n>` line with
+      `skipped-count`.
+
+      If it says `ANSWER_SHAPE: AGGREGATE`, use `count`/`sum`/`min`/`max`/`mean` on the per-id line and
+      do NOT declare `derived-ratio`.
 
       This is intake attempt {repairRound}. If the text between the markers below is empty, this is the
       FIRST attempt and there is nothing to repair. If it is not empty, a previous attempt's document was
@@ -42,6 +82,7 @@ steps:
     # document from an earlier session.
     produces:
       - docs/requirements/intake.yaml
+    dependsOn: [shape_decision]
   - id: intake_shape
     # The document's contract IS this attempt's verdict — a `quality_gate`, not an `acceptance`: an
     # acceptance is bound to a CONFIRMED requirement and nothing is confirmed yet at intake time, so

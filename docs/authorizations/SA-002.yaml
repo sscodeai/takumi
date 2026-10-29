@@ -76,5 +76,26 @@ decisions:
     policy: document-default
   - class: mutation-detection
     policy: document-default
+  # WIDENED 2026-10-27, by the same instruction as AMB-004/005 above, after an unattended run stopped
+  # here and named it:
+  #   AMB-001 (derived-ratio) — class not in the authorization's decisions
+  # `derived-ratio` is ADR-061's relation for an answer that is a QUOTIENT of two counts the report
+  # itself prints (availability, hit rate, pass rate, conversion, error rate) rather than an aggregate
+  # of a per-row measure. It was added to the closed vocabulary because a CORRECT uptime delivery was
+  # refused for being a ratio where the only expressible shape was a mean (ledger #99).
+  #
+  # WHAT THIS SIGNS: that a document in scope may put a derived-ratio question to its own `default:`
+  # without a person at the keyboard. The ANSWER still comes from the document, is still listed in its
+  # `defaulted:` front-matter, and the confirmation digest still binds the delivery (ADR-025). It does
+  # NOT widen which documents are in reach, and it cannot reach a blocking question the validator would
+  # have refused (ADR-028).
+  #
+  # WHY THIS LIST KEEPS GROWING, stated plainly: `AUTHORIZATION_CLASSES` is fixed in code and a grant may
+  # only NARROW it, never widen it (`standing-authorization.ts` §1). So there is no "sign the whole
+  # vocabulary once" — each new relation is a new KIND of claim, and a human signs off on the kind. This
+  # is the second such widening documented in this file and it will not be the last; that is the cost of
+  # the property that a machine can never license a class nobody signed.
+  - class: derived-ratio
+    policy: document-default
 failures:
   - class: implementation-changes

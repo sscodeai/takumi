@@ -16,10 +16,22 @@ the whole job.
 ## Output contract
 
 Write the document to `docs/requirements/intake.yaml` (create the directory if it
-does not exist) AND emit it as your answer, exactly one YAML document and nothing
-else: no prose before it, no prose after it, no markdown fence. The file is what the
-loop reads -- a document that exists only in the conversation is a document the next
-step cannot confirm -- and the text of that file is what the confirmation hashes.
+does not exist). The FILE is the deliverable, and it is the only thing graded: the loop reads it, and the
+confirmation hashes its text.
+
+**WORK IN STEPS — DO NOT TRY TO EMIT THE WHOLE DOCUMENT IN ONE ANSWER (ledger #101).** Measured
+2026-10-27 on five consecutive runs: told to produce the entire document as a single answer, the agent
+spent its ENTIRE output budget reasoning before writing a character — `output: 32768, reasoning: 32768`,
+`stopReason: "length"`, ZERO bytes written — on a TRIVIAL request as well as a complex one. The same model
+on the same prompt SUCCEEDS when it is free to stop and act: its healthy turns reason ~18k, then
+`stopReason: "toolUse"`, then continue. The budget was never too small; a single "write it all now" answer
+is.
+
+So build the file incrementally with the tools you have — `write` the skeleton first, then `edit` in the
+blocks (requirements, then ambiguities, then deliverable), reading it back when you need to. Several calls
+are EXPECTED and are not a sign of failure. Then, as your final answer, state in ONE line that the
+document is written and how many requirements and ambiguities it records. **Do not paste the YAML into
+your answer** — it is already the file, and re-emitting it is what exhausts the budget.
 
 The document has three top-level keys: `requirements`, `ambiguities`, and `deliverable`.
 
@@ -176,6 +188,51 @@ deliverable:
 intake wrote for a grid-map request, and it is refused at the gate every time — which costs a round and
 teaches the next repair round nothing.
 
+**AND DO NOT MIX THE TWO FIELD MODELS INSIDE ONE SHAPE (ledger #99).** Shape A has two vocabularies of
+output field, and the judge checks EVERY relation you declare, so declaring relations from both makes it
+demand both in the same line:
+
+- the **record-aggregate** fields — `count`, `sum`, `min`, `max`, `mean` — are for a report whose numbers
+  are aggregates of a per-row measure. `malformed-row-accounting`, `duplicate-resolution`,
+  `row-order-invariance`, `additivity` and an `independent-aggregation` anchor all assume them;
+- the **derived-ratio** fields — `numerator`, `denominator`, `ratio` — are for a report whose answer is a
+  QUOTIENT of two counts. `derived-ratio` assumes them.
+
+Measured 2026-10-23: a correct uptime report declared `malformed-row-accounting` +
+`duplicate-resolution` + `derived-ratio` together and its line carried
+`[id, denominator, sum, numerator, ratio]`. The judge then demanded `sum`, which a ratio report has no
+reason to print, and refused a delivery whose availability arithmetic was right. **Pick the model the
+ANSWER needs and declare only that one.** A ratio report that must also skip malformed rows may declare
+`malformed-row-accounting` ONLY if its line really does carry `count` — otherwise express the skipping in
+the `expect:` words of a scenario and use `mutation-detection` for the answer, which needs no fields at all.
+
+**CHOOSE THE MODEL FROM THE ANSWER, NEVER FROM THE INPUT (ledger #99).** This is the distinction the
+sentence above still left ambiguous, and the next run made the wrong choice because of it. Measured
+2026-10-23: a request for an availability PERCENTAGE that also had to skip malformed rows was written as a
+record-aggregate document — `[id, count, min, max, mean]` plus `malformed-row-accounting` — because
+"skip malformed rows" is a record-shaped thing to say. The answer was still a quotient, `mean` still could
+not express it, and the judge still had nothing it could check.
+
+Ask what the printed NUMBER is, and let everything else follow:
+
+| the answer the request asks for | the field model |
+|---|---|
+| a count, total, min, max, **average of a per-row measure** | `count` / `sum` / `min` / `max` / `mean` |
+| a **percentage or a rate** — availability, hit rate, pass rate, conversion, error rate, success rate | `numerator` / `denominator` / `ratio` |
+
+"Skips malformed rows", "reports how many it skipped", "handles duplicates", "works on any order" are
+properties of the INPUT. They do not tell you which model to pick, and picking the record model because a
+request mentions malformed rows is the mistake this table exists to prevent. A ratio answer that must
+report its skips can do so in a `SKIPPED` line (which carries only `skipped-count` and belongs to NEITHER
+model), while its per-site line carries ONLY the ratio roles.
+
+**AND IN A RATIO DOCUMENT, DO NOT PUT `count` ON A TOTALS LINE (ledger #99).** `count` means ROWS or
+distinct ids to the judge — it is the aggregate model's word. A ratio report's total is usually a sum of
+probes, which is a DIFFERENT number: measured 2026-10-26, a totals line declared `TOTAL <probes>` with the
+`count` role, the tool printed 4 (four probes), the judge computed 2 (two sites), and the run was refused
+for `totals count=4 want 2`. If a ratio document needs a totals line at all, give it `sum` and say what is
+being summed, or leave the totals line out — `derived-ratio` does not read it.
+
 ## Rules
 
 1. `requirements[]` is never empty for a non-empty request. Use `REQ-nnn`
@@ -253,6 +310,13 @@ from your text alone.
       - `duplicate-resolution`   what happens when a key repeats (needs a decision)
       - `malformed-row-accounting`  what happens to a bad row (needs a decision)
       - `independent-aggregation`   recompute the answer independently and compare (differential)
+      - `derived-ratio`          the answer is a RATIO of two counts the report itself prints
+                                 (availability, hit rate, pass rate): declare `numerator`,
+                                 `denominator` and `ratio` among your line's `fields`, and the judge
+                                 checks each printed ratio equals its own two counts, rounded the way
+                                 your decision says (see rule 12). Use this whenever the answer is a
+                                 quotient — a `mean` of the raw measure is a DIFFERENT question and
+                                 the judge will recompute something nobody asked for
       - `browser-scenario`       run a declared end-to-end scenario of the surface and judge it by the
                                  command's exit code and the report it writes (see rule 13)
       - `mutation-detection`     the delivered TESTS fail when the delivered behaviour is mutated — the

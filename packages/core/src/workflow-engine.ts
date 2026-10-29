@@ -14,6 +14,7 @@ import {
 } from './index.js';
 import { groupByLevel } from './workflow.js';
 import { detectHardFailure, judgeGate, parseTestReport } from './quality-gate.js';
+import { summariseGateOutput } from './quality-gate-output.js';
 import { createGitRunner, type GitRunner } from './git-runner.js';
 import { ProviderError } from './provider-error.js';
 import type { CheckSummary, DeliveryMergeMethod, DeliveryProvider, MergeOutcome, PullRequestRef, PullRequestStatus } from './delivery.js';
@@ -28,6 +29,9 @@ import {
   type ReviewFinding,
 } from './review-rules.js';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { parseRequirements } from './requirement-decisions.js';
 import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { requirementDigest, shortDigest } from './review-digest.js';
@@ -1096,7 +1100,7 @@ export async function executeWorkflow(
           report.shape === 'unrecognised'
             ? `shape: unrecognised (no known test summary found in the output)\ncommand: ${cmd}`
             : `shape: ${report.shape}\ncommand: ${cmd}`;
-        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${shapeLine}\nreason: ${verdict.reason}\n${out.slice(0, 1200)}`;
+        const summary = `quality_gate ${gatePassed ? 'PASSED' : 'FAILED'}: ${fails} failing over ${totalTests} tests, exit ${exitOk ? 0 : '!0'}\n${shapeLine}\nreason: ${verdict.reason}\n${out.length <= 1200 ? out : summariseGateOutput(out)}`;
         if (gatePassed) {
           run.stepStatus[stepId] = 'completed';
           pushStep({ stepId, status: 'completed', summary, artifacts: [], tests: [] });
@@ -1234,9 +1238,23 @@ export async function executeWorkflow(
             subTests.push(...s.tests);
           }
           const passed = res.status === 'completed' && acceptance?.status === 'completed';
-          roundSummaries.push(
-            `--- ${label}: ${passed ? 'accepted' : 'refused'} ---\n${acceptance?.summary ?? '(the acceptance step did not run)'}`,
-          );
+          // A SKIPPED VERDICT IS NOT A VERDICT, AND ITS SUMMARY IS NOT A REASON (ledger #98).
+          //
+          // This line used to read `acceptance?.summary ?? '(the acceptance step did not run)'`. `??` only
+          // falls back on null/undefined, and a SKIPPED step still HAS an object whose summary is the
+          // dependency note — "skipped (dependency skipped: judge_forge)". So the round's recorded reason
+          // became the fact that the acceptance was skipped, and the step that actually refused was named
+          // NOWHERE. Measured 2026-10-23: two runs kept "skipped (dependency skipped: judge_forge)" as the
+          // only account of why they failed, and the reason could not be recovered from any record — a
+          // refusal nobody can attribute is a refusal nobody can learn from.
+          //
+          // A verdict is a reason only when it RAN. Otherwise the reason is the last FAILED step's own
+          // summary, which is exactly what the brief above already prefers.
+          const verdictSummary =
+            acceptance !== undefined && (acceptance.status === 'completed' || acceptance.status === 'failed')
+              ? (acceptance.summary ?? '')
+              : (lastFailed?.summary ?? '(the acceptance step did not run, and no step reported a failure)');
+          roundSummaries.push(`--- ${label}: ${passed ? 'accepted' : 'refused'} ---\n${verdictSummary}`);
           if (passed) {
             accepted = true;
             // The head the sub-run's acceptance JUDGED is carried up into this run's vars (ADR-040): a
@@ -1409,6 +1427,27 @@ export async function executeWorkflow(
 
         let findings: ReviewFinding[] = [];
         try {
+          // WHICH DECISIONS DID A MACHINE ANSWER? (ADR-060, ledger #96)
+          //
+          // The review is the only step that both sees the delivered files AND can be told what the
+          // confirmed document asked. Reading the document here is what lets the rule ask for an
+          // `AMB-nnn` anchor per decision — so an operator reviewing an unattended delivery can grep
+          // for the choice a machine made instead of reconstructing the run.
+          //
+          // A document that cannot be read is NOT a review failure: the confirmed-requirement digest is
+          // checked by the acceptance step, and a review that refused to run because a path was odd
+          // would fail the delivery for the wrong reason. An unreadable document simply supplies no
+          // ids, and the rule does not fire (it is a claim about a document nobody produced).
+          let decisionIds: readonly string[] | undefined;
+          if (ctx.confirmedRequirement !== undefined && ctx.confirmedRequirement.ref.trim().length > 0) {
+            try {
+              const docText = await readFile(join(ctx.worktree ?? ctx.cwd, ctx.confirmedRequirement.ref), 'utf8');
+              const ids = parseRequirements(docText).map((d) => d.id).filter((id) => id.length > 0);
+              if (ids.length > 0) decisionIds = ids;
+            } catch {
+              // No ids: the anchor rule stays silent rather than guessing.
+            }
+          }
           const input = await collectReviewInput(git, {
             worktree: ctx.worktree ?? ctx.cwd,
             baseSha,
@@ -1416,6 +1455,7 @@ export async function executeWorkflow(
             // Only test files need their CONTENT read; the rules that judge
             // everything else work from the change list.
             contentFor: (path) => isTestPath(path, step.rules?.testPathPatterns ?? []),
+            ...(decisionIds === undefined ? {} : { decisionIds }),
           });
           findings = runReviewRules(input, step.rules);
         } catch (e) {

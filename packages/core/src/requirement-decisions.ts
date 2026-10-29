@@ -20,6 +20,7 @@ export const JUDGE_RELATION_VOCABULARY = [
   'duplicate-resolution',
   'malformed-row-accounting',
   'independent-aggregation',
+  'derived-ratio',
   'browser-scenario',
   'mutation-detection',
 ] as const;
@@ -44,6 +45,9 @@ export const JUDGE_RELATIONS_THAT_NEED_THE_WORLD = [
   'duplicate-resolution',
   'malformed-row-accounting',
   'independent-aggregation',
+  // `derived-ratio` recomputes numerator/denominator FROM THE RECORDS, so the judge must know what a row
+  // looks like and how the quotient is rounded — exactly the two things the world supplies (ledger #99).
+  'derived-ratio',
 ] as const;
 
 /** The report formats a `browser-scenario` may name as its evidence, beyond the command's exit code. */
@@ -96,6 +100,8 @@ export const JUDGE_DECISION_MODES: Record<string, readonly string[]> = {
   'duplicate-resolution': ['first-row', 'last-row', 'latest-start-date', 'merge', 'error'],
   'malformed-row-accounting': ['skip-count', 'skip-silent', 'stop-error'],
   'independent-aggregation': ['half-up', 'truncate'],
+  // A ratio is a division, so it needs the same rounding decision an aggregate does (ledger #99).
+  'derived-ratio': ['half-up', 'truncate'],
 };
 
 /**
@@ -128,8 +134,18 @@ export const JUDGE_COLUMN_ROLES = ['id', 'measure', 'date', 'other'] as const;
  * declared line shape, positionally. `<station> <count> <min> <max> <mean>` in the document's words is
  * `id`, `count`, `min`, `max`, `mean` in the judge's, and the judge computes the expectation from the
  * fixture rather than from prose.
+ *
+ * `numerator` / `denominator` / `ratio` exist for `derived-ratio` (ledger #99). A business answer is very
+ * often a RATIO of two counts rather than an aggregate of a measure — availability = successes/probes,
+ * hit rate, pass rate, conversion — and before this the vocabulary could only express it as a `mean` of
+ * the raw measure, so the judge recomputed something the requirement never asked for and refused correct
+ * deliveries. Measured 2026-10-23: a correct `availability = 100*(1-fail/probes)` report was rejected
+ * because the judge compared `mean=25.0` against `0.8`.
  */
-export const JUDGE_FIELD_ROLES = ['id', 'count', 'sum', 'min', 'max', 'mean', 'skipped-count'] as const;
+export const JUDGE_FIELD_ROLES = [
+  'id', 'count', 'sum', 'min', 'max', 'mean', 'skipped-count',
+  'numerator', 'denominator', 'ratio',
+] as const;
 
 export interface InputFormat {
   /** `date:date`, `station:id`, `temperature_c:measure` … the header, typed. */

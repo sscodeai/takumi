@@ -407,7 +407,7 @@ decides_of() { # $1 relation/anchor id -> the decision it exercises, or empty
 has_rel() { printf '%s\n' "$RELATIONS" | awk -v r="$1" '$2 == r { f = 1 } END { print f ? "yes" : "no" }'; }
 
 # Every declared relation must be one this forge implements: refusing beats a silent gap.
-IMPLEMENTED=" row-order-invariance additivity duplicate-resolution malformed-row-accounting independent-aggregation browser-scenario mutation-detection "
+IMPLEMENTED=" row-order-invariance additivity duplicate-resolution malformed-row-accounting independent-aggregation derived-ratio browser-scenario mutation-detection "
 MISSING=""
 while read -r id relation; do
   [ -z "${relation:-}" ] && continue
@@ -500,6 +500,7 @@ while read -r id relation; do
     duplicate-resolution) wants="$DUPLICATE_MODES" ;;
     malformed-row-accounting) wants="$MALFORMED_MODES" ;;
     independent-aggregation) wants="$ROUNDING_MODES" ;;
+    derived-ratio) wants="$ROUNDING_MODES" ;;
   esac
   if [ -n "$wants" ]; then
     case " $wants " in
@@ -514,6 +515,8 @@ while read -r id relation; do
       ;;
     malformed-row-accounting) MALFORMED_MODE="$mode" ;;
     independent-aggregation) ROUNDING_MODE="$mode" ;;
+    # A ratio is a division: it defines the rounding the recomputation must use just as an aggregate does.
+    derived-ratio) ROUNDING_MODE="$mode" ;;
   esac
 done <<EOF
 $RELATIONS
@@ -570,7 +573,7 @@ esac
 # a demand made on behalf of one family, of a document outside it. Measured 2026-10-13 (round 8).
 WORLD_NEEDED=0
 case "$REL_TYPES" in
-  *" row-order-invariance "*|*" additivity "*|*" duplicate-resolution "*|*" malformed-row-accounting "*|*" independent-aggregation "*) WORLD_NEEDED=1 ;;
+  *" row-order-invariance "*|*" additivity "*|*" duplicate-resolution "*|*" malformed-row-accounting "*|*" independent-aggregation "*|*" derived-ratio "*) WORLD_NEEDED=1 ;;
 esac
 
 # Empty defaults for everything the assembly fills, so a document that needs no world leaves them DEFINED
@@ -811,9 +814,71 @@ check_fields "totals output line" "$TOTAL_SHAPE" "$TOTAL_FIELDS"
 for role in $GROUP_FIELDS; do
   case "$role" in
     id|count|sum|min|max|mean) ;;
-    *) refuse "the per-id output line declares the field role \"$role\", which a judge cannot compute (implemented: id count sum min max mean)" ;;
+    # THE THREE ROLES `derived-ratio` READS (ledger #99). They are not "computed" by the judge the way
+    # count/sum are: the judge takes the tool's own numerator and denominator and checks the printed
+    # ratio against them. Refusing them here would make the relation unreachable — the one vocabulary
+    # entry for a quotient could never be declared, which is how a correct availability report was
+    # rejected before this line existed.
+    numerator|denominator|ratio) ;;
+    *) refuse "the per-id output line declares the field role \"$role\", which a judge cannot compute (implemented: id count sum min max mean numerator denominator ratio)" ;;
   esac
 done
+
+# THE TWO FIELD MODELS ARE ALTERNATIVES, AND THE FORGE IS WHERE THAT IS ENFORCED (ledger #99).
+#
+# Telling the intake so in prose was not enough: measured 2026-10-26, three consecutive runs wrote a
+# mixed line — `[id, denominator, sum, numerator, ratio]`, then `[id, denominator, count, numerator,
+# ratio]` — because a ratio answer that also skips malformed rows reads like a record report. The judge
+# then demands the aggregate fields from a report that has no reason to print them, and a CORRECT
+# delivery dies at acceptance after paying for an implementation.
+#
+# So the front door refuses the shape instead. The rule is exactly the judge's own semantics: an
+# aggregate field describes an aggregate of a per-row measure, a ratio field describes a quotient, and a
+# line cannot be both. The message names the two sets so the repair round has something to act on.
+if [ -n "$GROUP_FIELDS" ]; then
+  has_agg=0; has_ratio=0
+  for role in $GROUP_FIELDS; do
+    case "$role" in
+      count|sum|min|max|mean) has_agg=1 ;;
+      numerator|denominator|ratio) has_ratio=1 ;;
+    esac
+  done
+  if [ "$has_agg" = 1 ] && [ "$has_ratio" = 1 ]; then
+    refuse "the per-id output line mixes the two field models: it declares both an aggregate field (count/sum/min/max/mean) and a ratio field (numerator/denominator/ratio) in \"$GROUP_SHAPE\". They answer different questions — an aggregate field describes an aggregate of a per-row measure, a ratio field describes a quotient — and the judge would require both from one line, so a report that is correct in ONE of them is refused for the other. Choose the model from the ANSWER: an average or a total of a measure uses count/sum/min/max/mean; a percentage or a rate (availability, hit rate, pass rate) uses numerator/denominator/ratio. If the answer is a rate, the SKIPPED line (skipped-count) is where a skip count goes, and it belongs to neither model"
+  fi
+
+  # A RATIO LINE MAY NOT DECLARE A RELATION THAT RECOMPUTES AN AGGREGATE (ledger #101).
+  #
+  # Measured 2026-10-27, on a real run: the intake wrote `fields: [id, numerator, denominator, ratio]`
+  # together with `row-order-invariance` and `duplicate-resolution`. The fields were the RIGHT model and
+  # the shape check above passed — the field-model check only looks at FIELDS, so it saw nothing wrong.
+  # But those two relations are properties of an aggregate REPORT: the judge recomputes counts and sums
+  # from the fixture and looks for them in the line, and a ratio line has no `count` to find. The
+  # delivered report was CORRECT (`checkout 8 10 80.0`, `search 3 4 75.0`) and the judge refused it with
+  # "nothing in its output matched a declared output shape" — a correct delivery lost to a document that
+  # declared two incompatible vocabularies at once.
+  #
+  # AND A REFUSAL ALONE DID NOT FIX IT. Told this in prose, and then told again by this very refusal in
+  # its repair round, the intake wrote the same two relations twice more (measured 2026-10-27, run
+  # `wf-...` attempt 1 and repair round 2, both refused). A rule the document can ignore is a suggestion.
+  #
+  # So this is now a WHITELIST, not a blacklist: when the per-id line is a ratio, ONLY the relations that
+  # read those fields (or need no fields at all) may be declared. Anything else is refused by name, and
+  # there is no formulation of the document that keeps both vocabularies.
+  if [ "$has_ratio" = 1 ]; then
+    while read -r rel_id rel_kind; do
+      [ -z "${rel_kind:-}" ] && continue
+      case "$rel_kind" in
+        derived-ratio|mutation-detection|browser-scenario) ;;
+        *)
+          refuse "the document declares the relation \"$rel_kind\" ($rel_id) on a report whose per-id line is a RATIO (fields: $GROUP_FIELDS). \"$rel_kind\" is a property of a RECORD-AGGREGATE report: the judge recomputes counts and sums from the fixture and requires them in the line, and a ratio line carries none — so a CORRECT ratio report is refused with \"nothing matched a declared output shape\". On a ratio document the ONLY checkable relations are: derived-ratio (reads numerator/denominator/ratio), mutation-detection (proves the delivered tests can fail), and a browser-scenario (runs the surface end to end). Drop \"$rel_kind\"; if the answer really is an aggregate, drop derived-ratio instead and carry count/sum/min/max/mean on the line"
+          ;;
+      esac
+    done <<EOF
+$RELATIONS
+EOF
+  fi
+fi
 for role in $TOTAL_FIELDS; do
   case "$role" in
     count|sum) ;;
@@ -1489,8 +1554,15 @@ check_report() { # $1 fixture, $2 output, $3 dup rule
     fv=$(match_fields "$fline" "$GROUP_RE" "$GROUP_FIELDS")
     for role in $GROUP_FIELDS; do
       [ "$role" = id ] && continue
+      # A ROLE THIS RECOMPUTATION CANNOT DERIVE IS NOT A DISAGREEMENT (ledger #99). `role_token` answers
+      # `?` for a role it does not compute — `numerator`, `denominator` and `ratio` are exactly that,
+      # since they belong to `derived-ratio` and are checked there. Comparing `?` against the tool's
+      # number reported `numerator=2 want ?`, which is not a finding: it is this relation trying to grade
+      # a field it cannot see. Measured 2026-10-26 on a correct report whose availability arithmetic was
+      # right, refused by DIFF-001 for three fields it has no business checking.
       tok=$(fieldval "$fv" "$role")
       want=$(role_token "$role" "$cnt" "$ssum" "$smin" "$smax" "$tok" "${rsum[@]}")
+      [ "$want" = "?" ] && continue
       [ "$tok" = "$want" ] || msg="$msg; id $id $role=$tok want $want"
     done
   done < <(printf '%s\n' "$exp" | grep '^ID ')
@@ -1505,6 +1577,7 @@ check_report() { # $1 fixture, $2 output, $3 dup rule
     for role in $TOTAL_FIELDS; do
       tok=$(fieldval "$tfv" "$role")
       want=$(role_token "$role" "$tcnt" "$tsum" 0 0 "$tok" "${trsum[@]}")
+      [ "$want" = "?" ] && continue
       [ "$tok" = "$want" ] || msg="$msg; totals $role=$tok want $want"
     done
   fi
@@ -1695,6 +1768,80 @@ else
   fi
 fi
 DIFF001
+        ;;
+      derived-ratio)
+        # A RATIO OF TWO DECLARED COUNTS, RECOMPUTED FROM THE RECORDS (ledger #99).
+        #
+        # The delivered report declares three fields per line: `numerator`, `denominator` and `ratio`. The
+        # judge does NOT recompute the ratio from its own idea of what the denominator should be — it takes
+        # the tool's OWN two counts and checks only that the printed ratio equals them, rounded the way the
+        # document's decision says. That is deliberately narrower than independent-aggregation: the counts
+        # themselves are checked by whatever declared them (additivity, malformed-row-accounting), and what
+        # this relation adds is the ARITHMETIC of the derived value — the thing a `mean` cannot express and
+        # that the vocabulary used to reject correct deliveries for.
+        #
+        # A ratio whose denominator is ZERO is not a checkable number: the document must say what the row
+        # prints then, and a line with no ratio is skipped here rather than failing the delivery for a case
+        # the tool was never asked about. If EVERY line lacks a ratio, nothing was checked, so the relation
+        # FAILS rather than passing on an empty set.
+        cat <<'RATIO001' | sed "s/@RID@/$rid/g"
+if [ "$alive" != 1 ]; then
+  guard_fail @RID@ "derived-ratio: each printed ratio equals its own numerator/denominator"
+else
+  rat_bad=""
+  rat_seen=0
+  while IFS= read -r l; do
+    fv=$(match_fields "$l" "$GROUP_RE" "$GROUP_FIELDS")
+    num=$(fieldval "$fv" numerator)
+    den=$(fieldval "$fv" denominator)
+    rat=$(fieldval "$fv" ratio)
+    idv=$(fieldval "$fv" id)
+    [ -z "$num" ] || [ -z "$den" ] || [ -z "$rat" ] && continue
+    # A NON-NUMERIC ratio is not a wrong number, it is a value the report declined to compute — and
+    # saying "n/a disagrees with its own arithmetic" would name the wrong problem. It counts as a line
+    # that declared no usable ratio, which the `rat_seen` check below reports honestly.
+    case "$rat" in
+      ''|*[!0-9.+-]*) continue ;;
+    esac
+    rat_seen=$((rat_seen + 1))
+    # WHICH SCALE IS THE RATIO AT? The judge cannot assume, and guessing would refuse correct work:
+    # `availability` is conventionally a PERCENTAGE (0-100) while a hit rate is often a FRACTION (0-1),
+    # and both are legitimate. The two are distinguished by the ratio itself — 100x apart, so no sane
+    # value is ambiguous — and the document's rounding decision is applied at BOTH scales, accepting
+    # whichever the report actually printed. Measured 2026-10-23: without this the judge read a correct
+    # `availability=50` as `1/2=1` and refused the delivery.
+    #
+    # The check is therefore still exact: one of the two scales must match to the rounded digit. It does
+    # NOT loosen into a tolerance, which is what would let a wrong answer through.
+    want=$(awk -v n="$num" -v d="$den" 'BEGIN { if (d + 0 == 0) { print "div0"; exit } printf "%.10g", (n / d) }')
+    if [ "$want" = div0 ]; then
+      rat_bad="$rat_bad $idv prints a ratio over a zero denominator;"
+      continue
+    fi
+    round_to_int() { # $1 value, $2 mode  ->  the rounded integer, honouring the sign
+      case "$2" in
+        truncate) awk -v v="$1" 'BEGIN { printf "%d", (v < 0 ? -int(-v) : int(v)) }' ;;
+        *)        awk -v v="$1" 'BEGIN { printf "%d", (v < 0 ? -int(-v + 0.5) : int(v + 0.5)) }' ;;
+      esac
+    }
+    want_frac=$(round_to_int "$want" "$ROUNDING_MODE")
+    want_pct=$(round_to_int "$(awk -v v="$want" 'BEGIN { printf "%.10g", v * 100 }')" "$ROUNDING_MODE")
+    got=$(awk -v v="$rat" 'BEGIN { printf "%d", (v < 0 ? -int(-v + 0.5) : int(v + 0.5)) }')
+    if [ "$got" = "$want_frac" ] || [ "$got" = "$want_pct" ]; then
+      :
+    else
+      rat_bad="$rat_bad $idv ratio=$rat but $num/$den rounds to $want_frac (fraction) or $want_pct (percent);"
+    fi
+  done < <(group_lines "$base_output")
+  if [ "$rat_seen" -eq 0 ]; then
+    relation not_ok @RID@ "derived-ratio: no report line declared numerator, denominator and ratio together, so the derived value was never checked" "group_re=$GROUP_RE fields=$GROUP_FIELDS"
+  elif [ -n "$rat_bad" ]; then
+    relation not_ok @RID@ "derived-ratio: the printed ratio does not equal its own numerator/denominator (rounding: $ROUNDING_MODE)$rat_bad" "checked=$rat_seen"
+  else
+    relation ok @RID@ "derived-ratio: each of $rat_seen printed ratio(s) equals its own numerator/denominator (rounding: $ROUNDING_MODE)"
+  fi
+fi
+RATIO001
         ;;
       browser-scenario)
         cat <<'SCN' | sed "s/@RID@/$rid/g"

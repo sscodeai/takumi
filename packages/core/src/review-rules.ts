@@ -39,6 +39,19 @@ export interface ReviewInput {
   baseSha: string;
   headSha: string;
   changes: readonly ReviewFileChange[];
+  /**
+   * The AMB-nnn ids the CONFIRMED requirement document carries (ADR-060, ledger #96).
+   *
+   * An unattended delivery answers decisions nobody read: a signed standing authorization takes the
+   * document's own `default:` for them (ADR-045), and that fact lives in the document's front matter,
+   * not in the code the delivery writes. An operator reviewing overnight then has a delivery whose
+   * behaviour was partly chosen by a machine, with no way to find WHICH parts without reconstructing
+   * the run. This field is what lets a deterministic rule ask for the anchors that close that gap.
+   *
+   * Absent means the caller is not a delivery of a requirement document (a review of something else),
+   * so the rule that consumes it does not fire.
+   */
+  decisionIds?: readonly string[];
 }
 
 /**
@@ -420,6 +433,57 @@ export function runReviewRules(input: ReviewInput, rules: ReviewRules = {}): Rev
         path: change.path,
         line: suspicious.line,
         detail: `a long high-entropy string (…${suspicious.value.slice(-6)}) looks like a credential; a person decides — if it is one, it must be rotated, not just removed`,
+      });
+    }
+  }
+
+  // --- a machine-answered decision must be FINDABLE IN THE DELIVERY (ADR-060, ledger #96) --------
+  //
+  // An unattended delivery answers decisions nobody read: the standing authorization took the
+  // document's own `default:` for each one (ADR-045), and the record of that is the document's front
+  // matter — not the code the agent just wrote. An operator reviewing overnight therefore holds a
+  // delivery whose behaviour was partly chosen by a machine, with no way to find WHICH parts without
+  // reconstructing the whole run. That is the difference between a delivery that is REVIEWABLE and one
+  // that is merely finished, and it is the reason someone has to sit with it in the morning.
+  //
+  // The rule asks for the cheap thing that closes it: a `docs/decisions.md` naming every AMB-nnn, and
+  // an `AMB-nnn` marker somewhere in the delivered files so `grep -rn 'AMB-002' .` LANDS on the code
+  // that enacts it. It does NOT ask for the anchors to be correct — that is not mechanically checkable
+  // (a comment can lie), and a rule that pretended otherwise would be the kind of gate that passes
+  // because it was satisfied, not because it was true.
+  //
+  // Severity is `block`, not `human`: the fix is mechanical and entirely the AGENT's — add a table and
+  // a one-line comment — and leaving it to a person means the person does the typing, which is the
+  // thing this rule exists to avoid. `human` here would ALSO stop an unattended run, which is the
+  // opposite of the intent: the point is that nobody has to wait.
+  if (input.decisionIds !== undefined && input.decisionIds.length > 0) {
+    const delivered = changes.filter((c) => c.status !== 'deleted');
+    const fileText = (path: string): string => {
+      const c = delivered.find((x) => x.path === path);
+      return c?.headContent ?? '';
+    };
+    const decisionsDoc = fileText('docs/decisions.md');
+    // Every delivered file EXCEPT the decisions table, as one haystack. The table names every id by
+    // construction, so including it would make the marker check pass for free — the first version of
+    // this rule did exactly that, and the test caught it (`both decisions are listed but neither is
+    // findable`, 0 findings where 2 were owed). The marker has to be somewhere a reviewer would look
+    // for the CODE, which is precisely not the file that lists the ids.
+    const haystack = delivered
+      .filter((c) => c.path !== 'docs/decisions.md')
+      .map((c) => c.headContent ?? '')
+      .join('\n');
+    for (const id of input.decisionIds) {
+      const inDoc = decisionsDoc.includes(id);
+      const anchored = haystack.includes(id);
+      if (inDoc && anchored) continue;
+      const missing: string[] = [];
+      if (!inDoc) missing.push(`\`docs/decisions.md\` does not mention ${id}`);
+      if (!anchored) missing.push(`no delivered file carries an \`${id}\` marker, so \`grep -rn '${id}' .\` would not find where it is honoured`);
+      findings.push({
+        rule: 'decision-anchor',
+        severity: 'block',
+        path: inDoc ? undefined : 'docs/decisions.md',
+        detail: `a machine answered ${id} from the document's own default, and this delivery cannot be reviewed without finding it: ${missing.join(', ')} (ADR-060). Record every AMB-nnn in docs/decisions.md with the answer and where it is implemented, and put a one-line \`${id}: <what it does>\` comment above the code that enacts it`,
       });
     }
   }
