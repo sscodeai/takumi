@@ -1,7 +1,15 @@
 # Takumi Agent Evaluation
 
 > Phase 2 deliverable — scientifically measuring the real software-engineering reliability of coding agents.
-> Date: 2026-08-21 | Per `docs/finalization-protocol.md` §2-§9
+> Method: 2026-08-21 | **Results: 2026-11-02, see `RESULTS.md`**
+
+> ⚠️ **The RQ answers in §2 below are from 2026-08-21 and are superseded.** That
+> data was produced before three measurement defects were found and fixed: the
+> verifier scored with the agent's own tests, error turns were reported as
+> completions, and the held-out tests were readable from the work directory.
+> The current numbers, the exclusions, and the reproductions live in
+> `docs/eval-integrity.md` and `eval/REPEATS.md`. Method sections §3–§9 below
+> still describe the task set and metrics and remain accurate.
 
 ---
 
@@ -12,13 +20,13 @@ This `eval/` is an **Agent Evaluation** (measures coding-agent reliability on re
 
 ## 2. Research questions (RQ)
 
-| RQ | Question | Current answer |
+| RQ | Question | Current answer (2026-11-02, 3 runs/arm) |
 |---|---|---|
-| RQ1 | Actual completion rate when an agent claims "done"? | 23/23 (100%) — highly reliable on controlled small tasks |
-| RQ2 | Agreement between self-report and independent verification? | 23/23 consistent (0% disagreement) |
-| RQ3 | Do Verification + Repair improve final success? | **Yes (evidence)**: v4-pro 80% first-pass → 1 repair → **100% final** |
-| RQ4 | Differences across harnesses? | deepseek vs pi both 100% (pi 2x slower); **real model-level differences exist** (flash 100% vs pro 80%+repair) |
-| RQ5 | Does the Quality Gate catch False Completion? | 0 triggered on current tasks; repair-demo proves the capture mechanism |
+| RQ1 | Actual completion rate when an agent claims "done"? | **86.9–95.7%** — claims that are true. False completion: 13.0% (weak model) / 4.3% (strong), baseline |
+| RQ2 | Agreement between self-report and independent verification? | **Disagrees in 4–17% of tasks** depending on model — self-report is not a substitute for verification |
+| RQ3 | Do Verification + Repair improve final success? | **Yes**: 13/13 repair attempts succeeded; final success 87%/95.7% → **100%** in every run. First-pass rate is unchanged |
+| RQ4 | Differences across harnesses? | Not re-measured since the fixes. Prior deepseek-vs-pi comparison is superseded |
+| RQ5 | Does the Quality Gate catch False Completion? | **Yes** — it is what converts 13.0%/4.3% into 0%. Only 5 of 23 tasks ever discriminate |
 
 ## 3. Dataset
 
