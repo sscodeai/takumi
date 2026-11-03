@@ -45,6 +45,24 @@ steps:
       Keep it, and make sure your commit includes it. takumi never commits — the host runs what YOU
       commit — so the delivery must be one commit that contains your work AND that pipeline file.
 
+      THIS DIRECTORY MAY ALREADY CONTAIN ANOTHER REQUEST'S WORK. The delivery repository is reused
+      between runs, so the worktree starts from its `main`, which can hold deliverables from PREVIOUS
+      requests: an old `summary.py`, a `docs/requirements/intake.yaml` describing a different input,
+      tests for behaviour nobody asked you for. Measured 2026-10-29: a request for a per-suite pass
+      percentage, whose document declared `suite:id,passed:measure,total:other`, produced an
+      implementation whose own docstring described `region,amount` — the input of an earlier request —
+      because the implementer found that file already present and CONTINUED it. The judge refused the
+      delivery and the whole run was spent.
+
+      So: take the input world from THIS requirement document's `input_format.columns`, never from a
+      file you found. Do not assume an existing script computes what this request asks for, and do not
+      infer the input from what is already on disk. If an inherited file does something this
+      requirement does not ask for, REPLACE it; a file whose behaviour the requirement does not
+      mention is not yours to keep merely because it is there. What you must NOT do is clear the
+      repository out to start over: do not remove whole directories, and do not treat "unfamiliar
+      file" as "file to erase". Replace the files the requirement is about; leave alone the ones it
+      is not about, and say which in your commit message if it matters.
+
       This is delivery attempt {repairRound}. If the text between the markers below is empty, this is the
       FIRST attempt at this delivery and there is nothing to repair. If it is not empty, a previous
       attempt was REFUSED by an independent judge, and these are the exact checks that failed:

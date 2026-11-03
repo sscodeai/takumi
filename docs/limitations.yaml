@@ -105,3 +105,22 @@ limitations:
       declared in the document), or the implementation step is told to treat an inherited file that
       belongs to a different requirement as something to replace rather than extend — and a real run
       demonstrates a second request landing cleanly on a repository whose main already holds a first one.
+
+  - id: the-sandbox-writability-test-assumes-a-stricter-host
+    what: >-
+      `packages/core/src/test/sandbox.test.ts` — "project dir is writable, host outside is read-only" —
+      FAILS on the development host (measured 2026-10-29, kernel 6.1.0-44-amd64, uid 999) and passes in
+      CI. The test asserts that a write to a path outside the project directory is refused inside the
+      `unshare` boundary; on this host `unshare -r -n bash -c 'echo test > /tmp/x'` SUCCEEDS, so the
+      assertion `1 !== 0`. The boundary the chain relies on is therefore weaker on this machine than the
+      test's model of it — that is a real observation about the host, not a test that needs loosening.
+      It is recorded rather than skipped because a skipped test reads as "not applicable", and this one
+      is applicable: it is simply failing.
+    where:
+      file: packages/core/src/test/sandbox.test.ts
+      contains: "project dir is writable, host outside is read-only"
+    closes_when: >-
+      either the host's user namespaces are configured so the assertion holds (and the test goes green
+      on this machine), or the test is rewritten to detect the boundary the host actually provides and
+      to fail only when the project directory itself is unprotected — in which case the weaker
+      outside-write protection must be stated in docs/limitations.yaml as its own entry.
