@@ -61,6 +61,13 @@ steps:
       If it says `ANSWER_SHAPE: AGGREGATE`, use `count`/`sum`/`min`/`max`/`mean` on the per-id line and
       do NOT declare `derived-ratio`.
 
+      IT ALSO DECIDED WHICH RELATIONS ARE POSSIBLE, AND `relations:` MUST BE A SUBSET OF THAT LINE.
+      Step 1's answer includes `ALLOWED_RELATIONS: ...`. Every `relation:` you write must be named in
+      it; a relation that is not there is REFUSED by the forge and the run is lost before any code is
+      written. Measured 2026-11-04: a ratio document declared `independent-aggregation`, which recomputes
+      counts from the records and cannot read a ratio line — five separate runs have now been lost to
+      this one mistake. You do not have to use every allowed relation; you may not use any other.
+
       IT ALSO DECIDED THE ENTRY POINT, AND `deliverable.run` MUST BE EXACTLY THAT LINE. Step 1's answer
       includes `ENTRY_POINT: bash <name> {csv}`. Copy it into `deliverable.run` verbatim, keeping the
       literal `{csv}` — the judge replaces that with a fixture path. Measured 2026-10-29, three times: a
