@@ -9,7 +9,7 @@ import type {
   TaskStatus,
   Usage,
 } from '@takumi/core';
-import { createAgentSession } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, type CreateAgentSessionOptions } from '@earendil-works/pi-coding-agent';
 import { EventEmitter } from 'node:events';
 import { createConfinedTools, confinementOf, type Confinement } from './confinement.js';
 
@@ -37,8 +37,19 @@ import { createConfinedTools, confinementOf, type Confinement } from './confinem
  * A truncated turn is a FAILED turn, not a finished one. This returns the failure to report, or null
  * when the stop reason does not say the turn was cut off — an agent that simply answered with nothing
  * is left alone, because silence is only a failure when the evidence says it was truncation.
+ *
+ * A turn that STOPPED ON AN ERROR is also a failed turn. Measured on 2026-11-02: an eval run pointed at
+ * a model the provider had retired (opencode-go/deepseek-v4-flash) got
+ * `stopReason: "error"` with `400 Upstream request failed: Model is unavailable`, zero tokens and zero
+ * tool calls on all 23 tasks. The adapter reported each as "agent turn finished", the engine recorded
+ * `completed`, and the run looked like a model that fails 96% of the time when in truth the model was
+ * never called at all. An error stop is not silence and not truncation: it says the request never
+ * produced an answer, so the step produced nothing.
  */
-export function unfinishedTurnFailure(stopReason: string | undefined): string | null {
+export function unfinishedTurnFailure(stopReason: string | undefined, errorMessage?: string): string | null {
+  if (stopReason === 'error') {
+    return `the model call failed before answering (stopReason "error"${errorMessage ? `: ${errorMessage}` : ''}) — no answer and no tool calls were produced, so this step produced nothing. This is a configuration/provider failure, not an agent failure: check the model id, its availability, and the API key`;
+  }
   if (stopReason !== 'length') return null;
   return 'the turn hit the model\'s output limit before answering (stopReason "length"): the model spent its whole output budget on reasoning and produced no answer, so this step produced nothing. Raise the model\'s output limit (maxTokens) or use a model that answers within it — a turn cut off at the limit is a failure, not a finished turn';
 }
@@ -50,6 +61,7 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly lastMessages = new Map<TaskId, string>();
   /** The last assistant message's stop reason per task: 'length' means the turn was cut off. */
   private readonly lastStopReasons = new Map<TaskId, string>();
+  private readonly lastStopErrors = new Map<TaskId, string>();
   private readonly eventsCount = new Map<TaskId, number>();
   /** Task ids whose session was built with a boundary: what `agentToolBoundary` reports. */
   private readonly confinedTasks = new Set<TaskId>();
@@ -154,15 +166,44 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
         this.pool.delete(poolKey);
       }
 
+      // Resolve an explicit model when the caller pinned one ("provider/id"),
+      // otherwise Pi resolves provider/model + API key from ~/.pi/agent.
+      // Pinning exists so an eval can hold provider and tools constant while
+      // varying model strength — otherwise a "weaker model" comparison would
+      // silently run the user's default model and measure nothing.
+      const pinned: Pick<CreateAgentSessionOptions, 'modelRuntime' | 'model'> = {};
+      if (this.options.model) {
+        const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
+        const modelRuntime = await ModelRuntime.create();
+        const [providerId, ...rest] = this.options.model.split('/');
+        const modelId = rest.join('/');
+        if (!providerId || !modelId) {
+          throw new Error(`PiRuntimeAdapter: model must be "provider/id", got "${this.options.model}"`);
+        }
+        const resolved = modelRuntime.getModel(providerId, modelId);
+        if (!resolved) {
+          const available = modelRuntime
+            .getModels(providerId)
+            .map((m) => m.id)
+            .join(', ');
+          throw new Error(
+            `PiRuntimeAdapter: unknown model "${this.options.model}" (provider "${providerId}"). ` +
+              `Available: ${available || '(none — provider not configured)'}`,
+          );
+        }
+        Object.assign(pinned, { modelRuntime, model: resolved });
+      }
+
       const result =
         confinement === undefined
           ? await createAgentSession({
               cwd,
+              ...pinned,
               tools: ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls'],
-              // model omitted: Pi resolves provider/model + API key from ~/.pi/agent.
             })
           : await createAgentSession({
               cwd,
+              ...pinned,
               // No builtin tools: every tool the agent gets is a contained one.
               noTools: 'builtin',
               customTools: createConfinedTools(cwd, confinement, (name, reason) =>
@@ -259,7 +300,9 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
 
       // A turn that produced no answer because it was cut off is NOT a completed task: the status must
       // agree with the failure event `mapPiEvent` emitted for it (see unfinishedTurnFailure).
-      const unfinished = this.lastMessages.has(id) ? null : unfinishedTurnFailure(this.lastStopReasons.get(id));
+      const unfinished = this.lastMessages.has(id)
+        ? null
+        : unfinishedTurnFailure(this.lastStopReasons.get(id), this.lastStopErrors.get(id));
       if (unfinished) {
         this.statuses.set(id, 'failed');
       } else {
@@ -319,7 +362,13 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
       const m = msg.message;
       // The stop reason is the difference between "the model answered" and "the model was cut off".
       const stop = (m as { stopReason?: string } | undefined)?.stopReason;
-      if (typeof stop === 'string' && stop.length > 0) this.lastStopReasons.set(taskId, stop);
+      if (typeof stop === 'string' && stop.length > 0) {
+        this.lastStopReasons.set(taskId, stop);
+        // Keep the provider's own words: "Model is unavailable" names the cause,
+        // "stopReason: error" alone does not.
+        const err = (m as { errorMessage?: string } | undefined)?.errorMessage;
+        if (typeof err === 'string' && err.length > 0) this.lastStopErrors.set(taskId, err);
+      }
       let text = '';
       if (m && typeof m.content === 'string') {
         text = m.content;
@@ -368,7 +417,10 @@ export class PiRuntimeAdapter implements AgentRuntimeAdapter {
         }
         // No text: either the model chose to say nothing, or it was cut off before it could. A cut-off
         // turn is reported as a FAILURE, because that is what the engine must act on.
-        const unfinished = unfinishedTurnFailure(this.lastStopReasons.get(taskId));
+        const unfinished = unfinishedTurnFailure(
+          this.lastStopReasons.get(taskId),
+          this.lastStopErrors.get(taskId),
+        );
         if (unfinished) {
           return { id: `${taskId}-ev${seq}`, type: 'task.failed', message: unfinished, ...base };
         }

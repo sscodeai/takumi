@@ -869,9 +869,19 @@ if [ -n "$GROUP_FIELDS" ]; then
     while read -r rel_id rel_kind; do
       [ -z "${rel_kind:-}" ] && continue
       case "$rel_kind" in
-        derived-ratio|mutation-detection|browser-scenario) ;;
+        # LEDGER #110: `row-order-invariance` BELONGS on this list. It reads no field roles at all —
+        # its check is `run_tool` twice, sort both reports, compare — so a ratio report is exactly as
+        # checkable for order-invariance as an aggregate one. #101 copied its neighbours' reasoning
+        # onto it, and the cost was real: measured 2026-10-29, four runs declared "shuffling the input
+        # rows leaves the report byte-identical", which is TRUE of a correct ratio report, and were
+        # refused for claiming something the judge can perfectly well check.
+        #
+        # The three that stay out genuinely need counts: `additivity` sums count/sum roles across both
+        # the per-id and totals lines, `duplicate-resolution` and `malformed-row-accounting` compare
+        # against `check_report`/`aggregate`, which recompute counts from the records.
+        derived-ratio|row-order-invariance|mutation-detection|browser-scenario) ;;
         *)
-          refuse "the document declares the relation \"$rel_kind\" ($rel_id) on a report whose per-id line is a RATIO (fields: $GROUP_FIELDS). \"$rel_kind\" is a property of a RECORD-AGGREGATE report: the judge recomputes counts and sums from the fixture and requires them in the line, and a ratio line carries none — so a CORRECT ratio report is refused with \"nothing matched a declared output shape\". On a ratio document the ONLY checkable relations are: derived-ratio (reads numerator/denominator/ratio), mutation-detection (proves the delivered tests can fail), and a browser-scenario (runs the surface end to end). Drop \"$rel_kind\"; if the answer really is an aggregate, drop derived-ratio instead and carry count/sum/min/max/mean on the line"
+          refuse "the document declares the relation \"$rel_kind\" ($rel_id) on a report whose per-id line is a RATIO (fields: $GROUP_FIELDS). \"$rel_kind\" recomputes COUNTS or SUMS from the fixture and requires them in the line — additivity sums count/sum roles across the per-id and totals lines, and duplicate-resolution / malformed-row-accounting compare against a recomputed count — and a ratio line carries none of those roles, so a CORRECT ratio report would be refused with \"nothing matched a declared output shape\". On a ratio document the checkable relations are: derived-ratio (reads numerator/denominator/ratio), row-order-invariance (sorts both reports and compares — needs no roles), mutation-detection (proves the delivered tests can fail), and a browser-scenario (runs the surface end to end). Drop \"$rel_kind\"; if the answer really is an aggregate, drop derived-ratio instead and carry count/sum/min/max/mean on the line"
           ;;
       esac
     done <<EOF
@@ -974,10 +984,21 @@ SAMPLE_HAS_DUP=$(printf '%s\n' "$SAMPLE_ROWS" | awk -F, -v idc="$COL_ID" '{ c[$(
 ROW_ORDER_NOTE=""
 BASE_SAMPLE="$SAMPLE_ROWS"
 ORDER_SAMPLE="$SAMPLE_ROWS"
-if [ "$DUPLICATE_MODE" != "merge" ]; then
-  ORDER_SAMPLE="$PROJ_SAMPLE"
-  ROW_ORDER_NOTE="row-order-invariance is judged on one occurrence per id: the chosen duplicate rule \"$DUPLICATE_MODE\" resolves a repeated id by its position, so the duplicate decision owns the repeated rows and this relation owns the aggregation order"
-fi
+# ONLY WHEN A POSITION-DEPENDENT DUPLICATE RULE IS ACTUALLY DECLARED (ledger #111).
+#
+# This used to read `[ "$DUPLICATE_MODE" != "merge" ]`, which is true when NO duplicate-resolution
+# relation is declared at all — `DUPLICATE_MODE` is then the empty string, not "merge". So a document
+# with no duplicate rule got its sample collapsed to one occurrence per id, and the row-order check ran
+# on a fixture where every id appears once. Measured 2026-10-29: a 4-row sample (two probes per site)
+# became `alpha(1) bravo(1)`, the report was identical in both orders for a tool that was in fact
+# ORDER-DEPENDENT, and the relation reported `ok`. A check whose fixture cannot distinguish the two
+# orders is not a check.
+case "${DUPLICATE_MODE:-}" in
+  first-row | last-row | latest-start-date | error)
+    ORDER_SAMPLE="$PROJ_SAMPLE"
+    ROW_ORDER_NOTE="row-order-invariance is judged on one occurrence per id: the chosen duplicate rule \"$DUPLICATE_MODE\" resolves a repeated id by its position, so the duplicate decision owns the repeated rows and this relation owns the aggregation order"
+    ;;
+esac
 if [ "$DUPLICATE_MODE" = "error" ] && [ "$SAMPLE_HAS_DUP" = yes ]; then
   BASE_SAMPLE="$PROJ_SAMPLE"
   ROW_ORDER_NOTE="the declared duplicate rule \"error\" makes the repeated id in the sample an error, so the shared fixtures keep one occurrence per id; the duplicate decision is judged on the dedicated duplicate fixtures"
@@ -1385,7 +1406,19 @@ case "$DUPLICATE_MODE" in
   last-row) DUP_RULE=last ;;
   merge) DUP_RULE=merge ;;
   error) DUP_RULE=error ;;
-  *) printf '# the forged judge got an unknown duplicate mode "%s"\n' "$DUPLICATE_MODE"; DUP_RULE=none ;;
+  # NO DUPLICATE RULE AT ALL MEANS "EVERY ROW COUNTS", NOT "ONE ROW PER ID" (ledger #111).
+  #
+  # `none` used to fall through to the aggregator's non-merge branch, which keeps only the FIRST row
+  # of each id. A document that never mentioned duplicates was therefore judged as if it had chosen
+  # `first-row`: measured 2026-10-29 on a plainly correct report —
+  #   north 2 25 / south 1 20 / west 1 5 / TOTAL 4 50
+  # — the judge recomputed `north count=1 want 10` and failed the delivery, and its row-order fixture
+  # had been collapsed to one row per id as well (the same `!= merge` mistake, one file away).
+  #
+  # When nothing is declared there is no rule to apply, so every row counts; `counts[]` is set for all
+  # rows exactly as it is under `merge`. The difference from `merge` is only that `merge` is a DECISION
+  # the document made and can be judged against, while this is the absence of one.
+  *) DUP_RULE=none ;;
 esac
 
 # --- the judge's own recomputation, in the document's declared world ----------------------------
@@ -1435,7 +1468,7 @@ aggregate() { # $1 fixture, $2 latest|first|last|merge|error, $3 half-up|truncat
         if (rule == "last") { chosen[id] = i; continue }
         if (rule == "latest" && rdate[i] >= rdate[chosen[id]]) chosen[id] = i
       }
-      if (rule == "merge") { for (i = 1; i <= n; i++) counts[i] = 1 }
+      if (rule == "merge" || rule == "none") { for (i = 1; i <= n; i++) counts[i] = 1 }
       else { for (id in chosen) counts[chosen[id]] = 1 }
       for (i = 1; i <= n; i++) {
         if (!counts[i]) continue
@@ -1651,12 +1684,26 @@ reversed_output="$RUN_OUT"
 if [ "$alive" != 1 ] || [ "${base_groups:-0}" -eq 0 ]; then
   guard_fail @RID@ "row-order-invariance: reshuffling the rows changes nothing"
 else
-  sorted_base=$(printf '%s\n' "$ord_base" | sort)
-  sorted_reversed=$(printf '%s\n' "$reversed_output" | sort)
-  if [ -n "$base_output" ] && [ "$sorted_base" = "$sorted_reversed" ]; then
+  # COMPARE THE TWO REPORTS AS EMITTED — DO NOT SORT THEM (ledger #111).
+  #
+  # This used to be `sort "$ord_base"` vs `sort "$reversed_output"`, which sorts away the very
+  # property the relation is named for. Measured 2026-10-29: a tool that printed its sites in the
+  # order they first appeared gave
+  #   base:     alpha 1 2 50.0 / bravo 2 2 100.0 / TOTAL 4 3
+  #   reversed: bravo 2 2 100.0 / alpha 1 2 50.0 / TOTAL 4 3
+  # — genuinely order-dependent — and the relation reported "reshuffling the rows changes nothing",
+  # because sorting both made them equal.
+  #
+  # A document declares row-order-invariance to claim the report is BYTE-IDENTICAL under a shuffle.
+  # Anything the two runs differ in, including line order, falsifies that claim, so the comparison is
+  # exact. (The `base_output` emptiness guard stays: a tool that printed nothing has not been shown
+  # to be invariant, it has been shown to be broken.)
+  order_base_out="$ord_base"
+  order_reversed_out="$reversed_output"
+  if [ -n "$base_output" ] && [ "$order_base_out" = "$order_reversed_out" ]; then
     relation ok @RID@ "row-order-invariance: reshuffling the rows changes nothing"
   else
-    relation not_ok @RID@ "row-order-invariance: reshuffling the rows changes the report" "$(printf '%s\n' "$sorted_base" | diff - <(printf '%s\n' "$sorted_reversed") | head -4 | tr '\n' ' ')"
+    relation not_ok @RID@ "row-order-invariance: reshuffling the rows changes the report" "$(printf '%s\n' "$order_base_out" | diff - <(printf '%s\n' "$order_reversed_out") | head -4 | tr '\n' ' ')"
   fi
 fi
 REL001

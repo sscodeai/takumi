@@ -233,6 +233,21 @@ probes, which is a DIFFERENT number: measured 2026-10-26, a totals line declared
 for `totals count=4 want 2`. If a ratio document needs a totals line at all, give it `sum` and say what is
 being summed, or leave the totals line out — `derived-ratio` does not read it.
 
+**AND DO NOT PUT `ratio` ON A TOTALS LINE EITHER (ledger #108).** The totals line accepts `count` and
+`sum` and NOTHING ELSE, because those are the two roles the judge can recompute from the records. A
+`ratio` there is not just unread, it is refused by name: measured 2026-10-29, a document declared
+`shape: "TOTAL <passed_sum> <total_sum> <overall_pct>"` with `fields: [sum, sum, ratio]` — a correct
+report — and the forge refused it with `the totals output line declares the field role "ratio", which
+a judge cannot compute (implemented: count sum)`. The overall percentage is a real number the tool must
+print; it just is not a role the TOTALS line may name. Two ways out, both correct:
+
+  - declare `fields: [sum, sum]` for the totals shape's first two placeholders and state in the
+    requirement text that the third is the ratio of those two sums (the judge checks the sums against
+    the records and does not check the third — say so in the text, do not pretend it is checked), or
+  - leave the totals line out entirely if the request does not need one.
+
+Never write `ratio`, `mean`, `numerator` or `denominator` on a totals line.
+
 ## Rules
 
 1. `requirements[]` is never empty for a non-empty request. Use `REQ-nnn`

@@ -222,6 +222,31 @@ test('the REAL intake manifests declare the document its agent step must produce
     /\{step\.shape_decision\}/,
     'and the decision reaches that step through the engine\'s per-step vars, or the split decides nothing',
   );
+  // LEDGER #107: `deliverable.run` went missing THREE times (2026-10-29). The rule was in the 400-line
+  // document prompt already and was ignored there, so the entry point is now decided in the SHORT step
+  // and the document step is told to copy it verbatim. Both halves are load-bearing: a short prompt
+  // that never emits ENTRY_POINT decides nothing, and a document prompt that is not told to copy it
+  // goes on ignoring the rule it already had.
+  const shapePrompt = readFileSync(
+    new URL('../../../../extensions/skills/req-intake/prompts/shape.md', import.meta.url),
+    'utf8',
+  );
+  assert.match(shapePrompt, /^ENTRY_POINT: /m, 'the short step emits the entry point');
+  assert.match(
+    shapePrompt,
+    /\{csv\}/,
+    'and keeps the literal {csv} the judge replaces with a fixture path',
+  );
+  assert.match(
+    String(agent?.prompt ?? ''),
+    /ENTRY_POINT/,
+    'the document step is told that line exists',
+  );
+  assert.match(
+    String(agent?.prompt ?? ''),
+    /deliverable\.run/,
+    'and told what to do with it',
+  );
 
   // The gate that reads the document must depend on the step that produces it, or the declaration
   // is checked after something has already read the stale file.

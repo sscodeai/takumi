@@ -61,6 +61,13 @@ steps:
       If it says `ANSWER_SHAPE: AGGREGATE`, use `count`/`sum`/`min`/`max`/`mean` on the per-id line and
       do NOT declare `derived-ratio`.
 
+      IT ALSO DECIDED THE ENTRY POINT, AND `deliverable.run` MUST BE EXACTLY THAT LINE. Step 1's answer
+      includes `ENTRY_POINT: bash <name> {csv}`. Copy it into `deliverable.run` verbatim, keeping the
+      literal `{csv}` — the judge replaces that with a fixture path. Measured 2026-10-29, three times: a
+      document came out with NO `run` at all, so the judge had no way to invoke anything and every run
+      died with "the deliverable block declares no run" before a line of code was written. A document
+      whose `deliverable` block has no `run`, or a `run` that differs from that line, is not a document.
+
       This is intake attempt {repairRound}. If the text between the markers below is empty, this is the
       FIRST attempt and there is nothing to repair. If it is not empty, a previous attempt's document was
       REFUSED by the document's own machine-checked contract, and these are the exact checks that failed:
