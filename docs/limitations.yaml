@@ -103,24 +103,3 @@ limitations:
       on this machine), or the test is rewritten to detect the boundary the host actually provides and
       to fail only when the project directory itself is unprotected — in which case the weaker
       outside-write protection must be stated in docs/limitations.yaml as its own entry.
-
-  - id: the-delivery-worktree-cannot-see-the-confirmed-document
-    what: >-
-      The intake writes `docs/requirements/intake.yaml` into the TAKUMI project, but the delivery
-      worktree is CLONED from the delivery repository, whose `main` may already hold a DIFFERENT
-      document under that same path. Measured 2026-11-04 on run `wf-b4760a89`: the request asked for a
-      `suite,passed,total` pass-percentage tool and the project's document said exactly that, while the
-      worktree's `docs/requirements/intake.yaml` described `region:id,amount:measure` — inherited from a
-      previous request merged into `sscodeai/takumi-delivery-demo`. The implementer read the document
-      that was IN ITS DIRECTORY, built a per-region revenue summary, and the judge refused it. Every
-      gate that checks "the document says X" reads the project's copy; the implementer reads the
-      worktree's copy; nothing asserts that they are the same file. #114 told the implementer to take
-      the input world from "THIS requirement document", which is only advice if the document it can
-      see is a different one.
-    where:
-      file: docs/bugs-fixed.md
-      contains: "region:id,amount:measure"
-    closes_when: >-
-      the confirmed document is placed in the delivery worktree (and committed with the delivery) before
-      the implementation step runs, and a check fails closed if the worktree's copy differs from the
-      digest the confirmation licensed — with a real run showing an implementation built from it.
