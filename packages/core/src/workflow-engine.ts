@@ -692,6 +692,11 @@ export async function executeWorkflow(
    */
   const confirmedRef = ctx.confirmedRequirement?.ref ?? '';
   vars['requirement'] = confirmedRef;
+  // LEDGER #120: the DIGEST the confirmation licensed, so a step can put that exact document where
+  // the implementer reads it and refuse a stale one. Without it a manifest can only say "the
+  // requirement", which is a path, not an identity — and a path is what a reused delivery repository
+  // happily fills with somebody else's document.
+  vars['requirementDigest'] = ctx.confirmedRequirement?.digest ?? '';
   if (confirmedRef.length === 0) {
     const namesRequirement = workflow.steps.filter((s) =>
       [s.prompt ?? '', s.requirementRef ?? '', s.acceptanceRef ?? '', s.forgeRef ?? ''].some((t) =>
@@ -703,6 +708,17 @@ export async function executeWorkflow(
         `workflow "${workflow.name}" names {requirement} in step(s) [${namesRequirement
           .map((s) => s.id)
           .join(', ')}] — the document the run was confirmed against — but this run has no confirmed requirement on record (pass --requirement and --confirmed-requirement)`,
+      );
+    }
+  } else if (vars['requirementDigest'] === '') {
+    // A step that PLACES the confirmed document identifies it by digest. "Confirmed" with no digest
+    // would let the placement accept whatever is on disk, which is the defect #120 exists to stop.
+    const needsDigest = workflow.steps.filter((s) => (s.prompt ?? '').includes('{requirementDigest}'));
+    if (needsDigest.length > 0) {
+      throw new Error(
+        `workflow "${workflow.name}" names {requirementDigest} in step(s) [${needsDigest
+          .map((s) => s.id)
+          .join(', ')}] but this run's confirmed requirement carries no digest, so the step could not tell the licensed document from whatever it finds on disk`,
       );
     }
   }

@@ -8,6 +8,28 @@ description: >
   attempt is told exactly which checks the first one failed (ADR-034).
 runtime: pi
 steps:
+  # STEP 0 (ledger #120): PUT THE CONFIRMED DOCUMENT WHERE THE IMPLEMENTER READS IT.
+  #
+  # Measured 2026-11-04 on `wf-b4760a89`: three different files were in play at once — the confirmed
+  # digest (`sha256:cdda0c7b…`, what the confirmation licensed and what every GATE reads), the
+  # worktree's `docs/requirements/intake.yaml` (`sha256:12dfd7f2…`, what the AGENT read, inherited from
+  # `27b8f14 feat: deliver per-region revenue summary`), and the project's copy at the end of the run.
+  # The request was a `suite,passed,total` pass percentage; the implementer built a per-region revenue
+  # summary from the only document it could see. Telling it to "use THIS requirement document" (#114)
+  # is advice about a file it never had.
+  #
+  # The worktree is cloned from the delivery repository, whose `main` can hold a different document at
+  # the same path, so the confirmed one is placed here, checked against the licensed digest
+  # (`{requirementDigest}`), and committed — an uncommitted copy would be refused by worktree_ready.
+  - id: place_document
+    type: tool
+    prompt: |
+      bash "$TAKUMI_PROJECT/scripts/place-confirmed-document.sh" \
+        --project "$TAKUMI_PROJECT" \
+        --worktree "$TAKUMI_WORKTREE" \
+        --ref {requirement} \
+        --digest {requirementDigest}
+    timeoutMs: 60000
   - id: ci_config
     # The host's pipeline, written into the DELIVERY before the implementer commits (ADR-037). Order matters:
     # takumi never commits — the agent's boundary IS the commit — so a pipeline written after that commit
@@ -30,6 +52,7 @@ steps:
     # check set (docs/bugs-fixed.md #48). A step that genuinely needs a dialect of its own can still declare
     # one, and that declaration WINS over the derivation.
     requirementRef: "{requirement}"
+    dependsOn: [place_document]
   - id: implementation
     type: agent
     prompt: |
