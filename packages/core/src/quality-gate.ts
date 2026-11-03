@@ -180,17 +180,32 @@ function parseMaven(out: string): Counts | undefined {
 function parseTap(out: string): Counts | undefined {
   const total_ = (re: RegExp) => [...out.matchAll(re)].reduce((n, m) => n + parseInt(m[1] ?? '0', 10), 0);
   const has = (re: RegExp) => re.test(out);
-  const testLine = /^#\s*tests\s*:?\s*\d+/m;
-  const failLine = /^#\s*fail\s*:?\s*\d+/m;
-  const skipLine = /^#\s*skip\s*:?\s*\d+/m;
+  // LEDGER #124: `checks`/`failed` are the synonyms a hand-rolled runner reaches for, and a stream
+  // that prints `ok N - ...` per check IS TAP however it words its footer. Measured 2026-11-04: 91 `ok`
+  // lines closed by `# checks 91` / `# failed 0` was `unrecognised`, so a correct delivery died at the
+  // smoke gate — the run was lost to a vocabulary difference, not to a defect.
+  const testLine = /^#\s*(?:tests|checks)\s*:?\s*\d+/m;
+  const failLine = /^#\s*(?:fail|failed|failures)\s*:?\s*\d+/m;
+  const skipLine = /^#\s*skip(?:ped)?\s*:?\s*\d+/m;
+  // The checks themselves. Counted, because they are the most direct evidence of how many ran and how
+  // many failed — and because a runner may print no footer at all.
+  const okLines = (out.match(/^ok\b(?!\s+not\b)/gm) ?? []).length;
   const notOk = (out.match(/^not ok\b/gm) ?? []).length;
-  if (!has(testLine) && !has(failLine) && !has(skipLine) && notOk === 0) return undefined;
+  const sawPlan = /^1\.\.\d+/m.test(out);
+  if (!has(testLine) && !has(failLine) && !has(skipLine) && notOk === 0 && okLines === 0 && !sawPlan) {
+    return undefined;
+  }
 
-  const failed = has(failLine) ? total_(/^#\s*fail\s*:?\s*(\d+)/gm) : notOk;
-  const skipped = has(skipLine) ? total_(/^#\s*skip\s*:?\s*(\d+)/gm) : 0;
-  // Without a `# tests` line, a failing TAP run reports no usable total; use the
-  // failure count so `failed > 0` still drives the verdict.
-  const total = has(testLine) ? total_(/^#\s*tests\s*:?\s*(\d+)/gm) : failed;
+  const failed = has(failLine) ? total_(/^#\s*(?:fail|failed|failures)\s*:?\s*(\d+)/gm) : notOk;
+  const skipped = has(skipLine) ? total_(/^#\s*skip(?:ped)?\s*:?\s*(\d+)/gm) : 0;
+  // A declared count wins; otherwise count the checks that actually ran, which is strictly better than
+  // reporting the failure count as the total (the old fallback) — that read a 91-check green run as
+  // one test.
+  const declared = has(testLine) ? total_(/^#\s*(?:tests|checks)\s*:?\s*(\d+)/gm) : undefined;
+  const counted = okLines + notOk;
+  const total = declared ?? (counted > 0 ? counted : failed);
+  // A passing TAP run must not be reported as zero tests: `failed: 0, total: 0` is the vacuous green
+  // the gate exists to refuse, so when checks were counted and none failed, the total is what ran.
   return counts(total, failed, skipped);
 }
 

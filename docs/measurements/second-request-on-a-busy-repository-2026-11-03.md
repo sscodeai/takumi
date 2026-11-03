@@ -61,7 +61,31 @@ the worktree reached the state measured above. The judge invoked `bash run-mutat
 judge does — succeeds with 18 mutants killed and 0 survivors. The worktree at acceptance time
 therefore did not yet contain what it contains now.
 
-That is a **distinct defect**, not a continuation of #112: a delivery step can be judged before the
-files it declares exist. It is filed separately rather than folded in here, because the honest reading
-is "the collision is fixed; the mutation harness was judged too early", and merging the two would let
-the second one hide behind the first.
+That is a **distinct defect**, not a continuation of #112: a delivery step could be judged before the
+files it declares exist. It was filed separately rather than folded in here, because the honest
+reading was "the collision is fixed; the mutation harness was judged too early", and merging the two
+would have let the second one hide behind the first.
+
+**FIXED in ledger #118, after this file was written.** `worktree_clean` — which already ran before
+`rule_review`, `judge_forge` and `artifact_acceptance` — checked only that nothing was left
+uncommitted; it never asked whether the paths the document declares are present. A missing
+`run-mutation.sh` is not an uncommitted change, so that step passed and the judge was the first to
+notice. The check is now `scripts/worktree-ready.sh`: a clean tree AND every declared entry point
+present, covering the NESTED `deliverable.mutation.run` as well as `deliverable.run`.
+
+The first draft of that fix had the exact bug it was written to catch: an inline indentation-based
+parse that looked only at top-level keys, so `mutation:` — indented under `deliverable:` in every real
+document — was never read, and it reported READY while the file was absent. It was caught by running
+it against the real document from this run rather than against a fixture written to pass.
+
+**FIXED in ledger #118, after this file was written.** `worktree_clean` — which already ran before
+`rule_review`, `judge_forge` and `artifact_acceptance` — checked only that nothing was left
+uncommitted; it never asked whether the paths the document declares are present. A missing
+`run-mutation.sh` is not an uncommitted change, so that step passed and the judge was the first to
+notice. The check is now `scripts/worktree-ready.sh`: a clean tree AND every declared entry point
+present, covering the NESTED `deliverable.mutation.run` as well as `deliverable.run`.
+
+The first draft of that fix had the exact bug it was written to catch: an inline indentation-based
+parse that looked only at top-level keys, so `mutation:` — indented under `deliverable:` in every real
+document — was never read, and it reported READY while the file was absent. It was caught by running
+it against the real document from this run rather than against a fixture written to pass.

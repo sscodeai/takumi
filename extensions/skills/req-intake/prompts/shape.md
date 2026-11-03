@@ -59,9 +59,37 @@ So decide it HERE, where it is the only other thing on the page:
 - A one-file command-line tool that reads a CSV is what these requests ask for. Do not invent a
   package, a subcommand, or a build step.
 
+## The third thing: which relations are even possible
+
+The judge can check some relations on a ratio report and some on an aggregate one, and the split is
+not a matter of taste — it follows from the fields. Getting this wrong has cost five separate runs,
+including one on 2026-11-04 that declared `independent-aggregation` on a ratio line and was refused
+before a line of code was written.
+
+So write the list yourself, from the shape you just chose. Copy the line for your answer EXACTLY:
+
+**If `ANSWER_SHAPE: QUOTIENT`** (the printed number is a division):
+
+```
+ALLOWED_RELATIONS: derived-ratio, row-order-invariance, mutation-detection, browser-scenario
+```
+
+**If `ANSWER_SHAPE: AGGREGATE`** (the printed number is a count, total, min, max or mean):
+
+```
+ALLOWED_RELATIONS: independent-aggregation, additivity, duplicate-resolution, malformed-row-accounting, row-order-invariance, mutation-detection, browser-scenario
+```
+
+Why the difference, so you can apply it rather than copy it: `additivity`, `duplicate-resolution`,
+`malformed-row-accounting` and `independent-aggregation` all work by recomputing COUNTS and SUMS from
+the input records and requiring those numbers on the report line. A ratio line prints a numerator, a
+denominator and the ratio — it has no count or sum for them to find, so those four cannot check it.
+`row-order-invariance` needs no fields at all (it shuffles the input and compares the two reports), and
+`mutation-detection` and `browser-scenario` run commands, so all three work for either shape.
+
 ## Your answer
 
-Answer with EXACTLY these five lines and nothing else:
+Answer with EXACTLY these six lines and nothing else:
 
 ```
 ANSWER_SHAPE: AGGREGATE
@@ -76,6 +104,7 @@ followed by:
 THE_NUMBER_IS: <one short phrase naming the printed number, e.g. "mean salary per department" or "pass percentage per suite">
 THE_TWO_COUNTS_ARE: <for QUOTIENT only: what is divided by what, e.g. "passes divided by total runs". Write NONE for AGGREGATE.>
 ENTRY_POINT: bash <name> {csv}
+ALLOWED_RELATIONS: <the exact list above for your shape, copied verbatim>
 WHY_NOT_THE_OTHER: <one sentence: why the other shape does not express this number>
 ```
 

@@ -54,13 +54,26 @@ test('the clean check FAILS on a leftover file, and names every one of them', ()
   assert.ok(clean);
   assert.equal(clean?.type, 'tool', 'it is a shell step: nothing here needs a model');
 
+  // LEDGER #118 moved the body of this check out of the manifest and into scripts/worktree-ready.sh,
+  // because an inline indentation-based parse of a nested key silently matched nothing. The manifest
+  // still has to CALL it — a check that is not invoked is the same as no check.
   const script = String(clean?.prompt ?? '');
-  assert.match(script, /git status --porcelain/, 'it reads the real status, not a marker file');
-  assert.match(script, /exit 1/, 'a leftover fails the step');
+  assert.match(script, /scripts\/worktree-ready\.sh/, 'the step runs the shared script');
+  assert.match(script, /\{requirement\}/, 'and hands it the confirmed document');
+  // The behaviour itself is asserted against the real script in declared-entry-points.test.ts.
+  const body = readFileSync(new URL('../../../../scripts/worktree-ready.sh', import.meta.url), 'utf8');
+  assert.match(body, /git status --porcelain/, 'it reads the real status, not a marker file');
+  assert.match(body, /exit 1/, 'a leftover fails the step');
   // The point of listing ALL of them: the repair round is told the whole list, not one path per round.
-  assert.match(script, /printf '%s\\n' "\$left"/, 'it prints the full porcelain, not a first entry');
+  assert.match(body, /printf '%s\\n' "\$left"/, 'it prints the full porcelain, not a first entry');
+  // Only EXECUTABLE lines count: the file's own comments warn AGAINST `git add -A` and quoting that
+  // warning verbatim is not the same as doing it.
+  const commands = body
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
   assert.doesNotMatch(
-    script,
+    commands,
     /git add -A|git commit/,
     'it must NEVER commit for the agent: the boundary is the agent\'s commit, and a runner that commits is a runner that launders an unfinished attempt',
   );

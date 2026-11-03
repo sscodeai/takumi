@@ -275,3 +275,54 @@ test('a manifest declaring produces on a step type whose output is NOT checked i
     'the refusal says where a declared output is actually checked',
   );
 });
+
+// LEDGER #121: the SHAPE step also decides which relations are POSSIBLE, because the same model kept
+// picking an aggregate relation for a ratio answer — five separate runs, the last on 2026-11-04
+// declaring `independent-aggregation` on a ratio line and losing the run before any code was written.
+//
+// The list is derivable from the fields, so it is decided in the 60-line step and handed to the
+// 400-line document step as a constraint, instead of being rediscovered (wrongly) inside it.
+test('the shape step declares the relations each field model allows', () => {
+  const shapePrompt = readFileSync(
+    new URL('../../../../extensions/skills/req-intake/prompts/shape.md', import.meta.url),
+    'utf8',
+  );
+  assert.match(shapePrompt, /^ALLOWED_RELATIONS: /m, 'the step emits the list');
+
+  // QUOTIENT: only the relations that read no aggregate roles.
+  const quotient = shapePrompt.match(/ALLOWED_RELATIONS: ([^\n]+)/g) ?? [];
+  assert.ok(quotient.length >= 2, 'one list per shape');
+  const ratioList = quotient[0] ?? '';
+  assert.match(ratioList, /derived-ratio/, 'a ratio document can always declare derived-ratio');
+  assert.match(ratioList, /row-order-invariance/, 'and row-order, which needs no fields (#110)');
+  for (const forbidden of ['independent-aggregation', 'additivity', 'duplicate-resolution', 'malformed-row-accounting']) {
+    assert.doesNotMatch(
+      ratioList,
+      new RegExp(forbidden),
+      `${forbidden} recomputes counts and cannot check a ratio line`,
+    );
+  }
+
+  // AGGREGATE: all seven, since the aggregate model has the roles they read.
+  const aggList = quotient[1] ?? '';
+  for (const kind of [
+    'independent-aggregation',
+    'additivity',
+    'duplicate-resolution',
+    'malformed-row-accounting',
+    'row-order-invariance',
+    'mutation-detection',
+    'browser-scenario',
+  ]) {
+    assert.match(aggList, new RegExp(kind), `an aggregate document can declare ${kind}`);
+  }
+});
+
+test('the document step is told the list is a CONSTRAINT, not a suggestion', () => {
+  const def = parseYaml(readFileSync(new URL('../../../../extensions/workflows/intake-attempt/workflow.yaml', import.meta.url), 'utf8')) as WorkflowDefinition;
+  const doc = (def.steps ?? []).find((s) => (s.produces ?? []).includes('docs/requirements/intake.yaml'));
+  const prompt = String(doc?.prompt ?? '');
+  assert.match(prompt, /ALLOWED_RELATIONS/, 'it names the line');
+  assert.match(prompt, /SUBSET/, 'and calls it a subset constraint');
+  assert.match(prompt, /may not use any other|REFUSED/, 'with the consequence stated');
+});
