@@ -124,3 +124,21 @@ limitations:
       the confirmed document is placed in the delivery worktree (and committed with the delivery) before
       the implementation step runs, and a check fails closed if the worktree's copy differs from the
       digest the confirmation licensed — with a real run showing an implementation built from it.
+
+  - id: a-delivered-test-runner-may-emit-a-summary-the-gate-cannot-read
+    what: >-
+      `quality_gate` recognises TAP, jest, pytest, maven, gradle, ctrf and unittest summaries, and fails
+      closed on anything else. A delivered test runner that prints its own summary — `# checks 91` /
+      `# failed 0`, with 91 `ok N - ...` lines above it — is therefore `unrecognised`, and the gate
+      aborts the attempt with `0 failing`. Measured 2026-11-04 on `wf-385ed5bc`: `bash run-tests.sh` in
+      that worktree exits 0 and reports 91 checks, 0 failed, when run by hand, and the delivery was
+      refused anyway. The gate is RIGHT to fail closed — an unreadable summary is not a pass — but the
+      run was lost for a formatting disagreement, not for a defect in what was delivered.
+    where:
+      file: docs/bugs-fixed.md
+      contains: "# checks 91"
+    closes_when: >-
+      either a TAP run's own count is derived from its `ok`/`not ok` lines when no `1..N` plan is
+      printed (the JSON-ish `# checks`/`# failed` pair is a common hand-rolled convention), or the
+      document's deliverable contract states which summary shape the gate reads so the implementer can
+      be told to emit it — with a real run showing a delivered runner's summary accepted.
