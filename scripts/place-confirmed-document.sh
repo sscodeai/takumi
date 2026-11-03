@@ -42,13 +42,31 @@ case "$DIGEST" in
   sha256:*) DIGEST="${DIGEST#sha256:}" ;;
 esac
 
+# THE DIGEST IS NOT `sha256sum` (ledger #122).
+#
+# `requirementDigest()` canonicalises before hashing — CRLF to LF, trailing whitespace removed, exactly
+# one trailing newline — so that an editor saving the file differently does not invalidate a
+# confirmation while any change to what the document SAYS still does
+# (packages/core/src/review-digest.ts). Measured 2026-11-04: `sha256sum` said 214290b7 for a document
+# whose takumi digest was 443b6352, so a check that compared raw bytes would have refused EVERY
+# correctly confirmed document — the exact bug this script exists to prevent, from the other side.
+digest_of() {
+  local file="$1"
+  python3 - "$file" <<'PYEOF'
+import hashlib, re, sys
+text = open(sys.argv[1], 'r', encoding='utf-8', newline='').read()
+normalised = re.sub(r'\s+$', '', text.replace('\r\n', '\n')) + '\n'
+print(hashlib.sha256(normalised.encode('utf-8')).hexdigest())
+PYEOF
+}
+
 SRC="$PROJECT/$REF"
 [ -f "$SRC" ] || { echo "place-confirmed-document: the project has no '$REF'" >&2; exit 2; }
 [ -d "$WORKTREE" ] || { echo "place-confirmed-document: the worktree '$WORKTREE' does not exist" >&2; exit 2; }
 
 # The document on disk must be the one the confirmation licensed. If it is not, the project copy
 # changed after the confirmation and placing it would deliver a document nobody signed.
-actual=$(sha256sum "$SRC" | awk '{ print $1 }')
+actual=$(digest_of "$SRC")
 if [ "$actual" != "$DIGEST" ]; then
   echo "place-confirmed-document: the project's '$REF' does not match the confirmed digest." >&2
   echo "  confirmed: $DIGEST" >&2
@@ -59,7 +77,7 @@ fi
 
 DST="$WORKTREE/$REF"
 if [ -f "$DST" ]; then
-  dst_actual=$(sha256sum "$DST" | awk '{ print $1 }')
+  dst_actual=$(digest_of "$DST")
   if [ "$dst_actual" = "$DIGEST" ]; then
     echo "the worktree already holds the confirmed document ($REF sha256:${DIGEST%"${DIGEST#???????}"})"
     exit 0
@@ -70,7 +88,7 @@ fi
 mkdir -p "$(dirname "$DST")"
 cp "$SRC" "$DST"
 
-placed=$(sha256sum "$DST" | awk '{ print $1 }')
+placed=$(digest_of "$DST")
 if [ "$placed" != "$DIGEST" ]; then
   echo "place-confirmed-document: the copy did not land byte-for-byte (expected $DIGEST, got $placed)" >&2
   exit 1

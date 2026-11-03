@@ -31,8 +31,17 @@ import { fileURLToPath } from 'node:url';
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
 const SCRIPT = join(REPO, 'scripts/place-confirmed-document.sh');
 
+/**
+ * The digest takumi uses, NOT `sha256sum` (ledger #122).
+ *
+ * `requirementDigest()` canonicalises before hashing — CRLF to LF, trailing whitespace removed, exactly
+ * one trailing newline — so an editor saving the file differently does not invalidate a confirmation.
+ * Measured 2026-11-04: `sha256sum` said 214290b7 for a document whose takumi digest was 443b6352. A
+ * test using `sha256sum` would have agreed with a broken script and disagreed with the product.
+ */
 function sha256(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+  const text = readFileSync(path, 'utf8');
+  return createHash('sha256').update(`${text.replace(/\r\n/g, '\n').replace(/\s+$/, '')}\n`).digest('hex');
 }
 
 /** A "project" holding the confirmed document, and a "worktree" cloned from another repository. */
@@ -157,6 +166,44 @@ test('a missing project document is refused, not silently skipped', () => {
     execFileSync('git', ['init', '-q'], { cwd: worktree });
     const r = place(project, worktree, 'a'.repeat(64));
     assert.notEqual(r.status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the digest is takumi\'s canonical digest, not raw file bytes (ledger #122)', () => {
+  // A CRLF document and its LF twin are the SAME requirement to takumi, and an editor that adds or
+  // removes trailing blank lines must not invalidate a confirmation. If this script hashed raw bytes
+  // it would refuse every such document — and this test would pass with `sha256sum`, which is exactly
+  // how the first version shipped. Assert the two forms agree.
+  const lf = 'requirements:\n  - id: REQ-001\n    title: x\n';
+  const crlf = lf.replace(/\n/g, '\r\n') + '\r\n';
+  const dir = mkdtempSync(join(tmpdir(), 'digest-'));
+  try {
+    const worktree = join(dir, 'worktree');
+    mkdirSync(join(worktree, 'docs/requirements'), { recursive: true });
+    writeFileSync(join(worktree, 'docs/requirements/intake.yaml'), 'old\n');
+    execFileSync('git', ['init', '-q'], { cwd: worktree });
+    execFileSync('git', ['config', 'user.email', 't@example.invalid'], { cwd: worktree });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: worktree });
+    execFileSync('git', ['add', '-A'], { cwd: worktree });
+    execFileSync('git', ['commit', '-qm', 'x'], { cwd: worktree });
+
+    const a = join(dir, 'a'); const b = join(dir, 'b');
+    mkdirSync(join(a, 'docs/requirements'), { recursive: true });
+    mkdirSync(join(b, 'docs/requirements'), { recursive: true });
+    writeFileSync(join(a, 'docs/requirements/intake.yaml'), lf);
+    writeFileSync(join(b, 'docs/requirements/intake.yaml'), crlf);
+
+    // The digest of the LF form must be accepted for the CRLF project copy: same requirement.
+    const digestOfA = sha256(join(a, 'docs/requirements/intake.yaml'));
+    assert.equal(
+      digestOfA,
+      sha256(join(b, 'docs/requirements/intake.yaml')),
+      'CRLF and LF forms of the same document must share a digest',
+    );
+    const r = place(b, worktree, digestOfA);
+    assert.equal(r.status, 0, `a CRLF copy of the confirmed document must be accepted:\n${r.out}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
