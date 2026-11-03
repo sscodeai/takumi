@@ -103,22 +103,3 @@ limitations:
       on this machine), or the test is rewritten to detect the boundary the host actually provides and
       to fail only when the project directory itself is unprotected — in which case the weaker
       outside-write protection must be stated in docs/limitations.yaml as its own entry.
-
-  - id: the-mutation-harness-can-be-judged-before-it-exists
-    what: >-
-      A delivery step can be judged while the files it declares are not yet in the worktree. Measured
-      2026-11-03 on run `wf-0a7781cf`: the judge invoked `bash run-mutation.sh` as the document's
-      `mutation.run` declares and got `exit 127` (command not found), aborting the delivery on
-      `REL-002`. The same command, run by hand in that worktree afterwards — and under `unshare -r -n`,
-      and under `sh -c` exactly as the judge invokes it — succeeds: 18 mutants measured, 0 survivors.
-      So the acceptance verdict described a worktree state that no longer existed by the time it was
-      read. Nothing incorrect landed (the relation failed closed, which is the right direction), but a
-      run that had in fact produced the file was lost.
-    where:
-      file: docs/measurements/second-request-on-a-busy-repository-2026-11-03.md
-      contains: "exit 127"
-    closes_when: >-
-      the acceptance step either reads the worktree at a pinned commit and says which one (so the
-      verdict names the tree it judged), or the delivery step cannot reach acceptance until every path
-      its document declares under `mutation.run` / `deliverable.run` exists in the worktree — and a
-      real run shows the mutation relation passing without a later manual re-run.

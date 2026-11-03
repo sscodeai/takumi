@@ -1035,7 +1035,17 @@ export async function executeWorkflow(
         const cmd = renderPrompt(step.prompt ?? '', vars);
         try {
           ctx.onEvent?.(stepId, `tool run: ${cmd}`);
-          const { stdout, stderr } = await runStepCommand(ctx, { shell: cmd, cwd: ctx.worktree ?? ctx.cwd, timeoutMs: step.timeoutMs ?? 120000 });
+          const { stdout, stderr } = await runStepCommand(ctx, {
+            shell: cmd,
+            cwd: ctx.worktree ?? ctx.cwd,
+            // A `tool` step lives in the DELIVERY worktree, but the scripts it runs belong to the
+            // PROJECT (ledger #118: `worktree-ready.sh` is takumi's, not the delivery's). Without this
+            // the step has no way to name the repository it came from, and every manifest that needs a
+            // platform script would have to guess a relative path — which is how a check silently runs
+            // the wrong file or none at all.
+            env: { TAKUMI_PROJECT: ctx.cwd, TAKUMI_WORKTREE: ctx.worktree ?? ctx.cwd },
+            timeoutMs: step.timeoutMs ?? 120000,
+          });
           const out = (stdout?.trim() || stderr?.trim() || '(no output)').slice(0, 4000);
           const kind = step.id.split('_')[0] ?? 'tool';
           const artifact = await ctx.artifacts.write({

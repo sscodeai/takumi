@@ -150,15 +150,13 @@ steps:
     # IS the commit, so an uncommitted file means the agent did not finish. It names every leftover
     # path rather than the first, so the repair round gets the whole list instead of one at a time.
     type: tool
+    # Two questions, both a second's work, both answered in scripts/worktree-ready.sh (ledger #106, #118):
+    # nothing left uncommitted, and every entry point the document declares actually exists.
+    # `tool` steps run in the delivery worktree; `TAKUMI_PROJECT` names the repository this script
+    # belongs to (set by the engine for exactly this reason), and the requirement path is relative to
+    # the worktree because that is the cwd.
     prompt: |
-      left=$(git status --porcelain)
-      if [ -n "$left" ]; then
-        echo "the implementation left uncommitted change(s) — the agent's boundary IS the commit, so these were never delivered:" >&2
-        printf '%s\n' "$left" | sed 's/^/  /' >&2
-        echo "commit them (ci_config's pipeline file is written BEFORE the implementer commits, so it belongs in that commit), or delete what you did not mean to create." >&2
-        exit 1
-      fi
-      echo "the worktree is clean: every file the attempt produced is inside a commit"
+      bash "$TAKUMI_PROJECT/scripts/worktree-ready.sh" {requirement}
     dependsOn: [quality_gate]
     timeoutMs: 60000
   - id: rule_review
