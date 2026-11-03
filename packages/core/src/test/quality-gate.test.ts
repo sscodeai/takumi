@@ -726,3 +726,75 @@ test('quality gate step: unparseable output fails with the command and output ta
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// LEDGER #124 — a TAP-shaped run that counts its checks in its own words.
+//
+// Measured 2026-11-04 on `wf-385ed5bc`: the delivered `run-tests.sh` printed 91 `ok N - ...` lines and
+// closed with
+//
+//   # checks 91
+//   # failed 0
+//
+// `parseTap` recognises `# tests` / `# fail` / `# skip`, so this was `unrecognised`, the gate failed
+// closed (correctly — an unreadable summary is not a pass) and the delivery was refused. Running the
+// same script by hand exits 0 with 91 checks and 0 failures, so nothing was wrong with what was
+// delivered; the run was lost to a vocabulary difference.
+//
+// Two things make this a parsing gap rather than a new format: the stream IS TAP (`ok N - ...` per
+// check), and the writer used the two most common synonyms — `checks` for the count and `failed` for
+// the failures. And the `ok` lines were already there to be counted.
+
+test('quality gate: `# checks N` / `# failed N` is read as a TAP summary', () => {
+  const out = [
+    'ok 1 - first',
+    'ok 2 - second',
+    'not ok 3 - third',
+    '# checks 3',
+    '# failed 1',
+    '',
+  ].join('\n');
+  const report = parseTestReport(out);
+  assert.equal(report.shape, 'tap', `the stream is TAP-shaped: ${JSON.stringify(report)}`);
+  if (report.shape === 'tap') {
+    assert.equal(report.total, 3);
+    assert.equal(report.failed, 1);
+  }
+});
+
+test('quality gate: a PASSING `# checks` run is a pass, which is the case that lost the run', () => {
+  const out = [...Array.from({ length: 5 }, (_, i) => `ok ${i + 1} - check ${i}`), '# checks 5', '# failed 0', ''].join('\n');
+  const report = parseTestReport(out);
+  assert.equal(report.shape, 'tap');
+  if (report.shape === 'tap') {
+    assert.equal(report.total, 5);
+    assert.equal(report.failed, 0);
+  }
+});
+
+test('quality gate: TAP with `ok` lines and NO summary at all still counts its tests', () => {
+  // The plan line is optional in practice and a runner may simply stop after its last check. Counting
+  // the `ok`/`not ok` lines is the only reading that does not call a real run "unrecognised".
+  const out = ['ok 1 - a', 'ok 2 - b', 'not ok 3 - c', 'ok 4 - d', ''].join('\n');
+  const report = parseTestReport(out);
+  assert.equal(report.shape, 'tap', JSON.stringify(report));
+  if (report.shape === 'tap') {
+    assert.equal(report.total, 4);
+    assert.equal(report.failed, 1);
+  }
+});
+
+test('quality gate: a stream of ONLY `ok` lines is a pass, not zero tests', () => {
+  const out = ['ok 1 - a', 'ok 2 - b', 'ok 3 - c', ''].join('\n');
+  const report = parseTestReport(out);
+  assert.equal(report.shape, 'tap', JSON.stringify(report));
+  if (report.shape === 'tap') {
+    assert.equal(report.total, 3);
+    assert.equal(report.failed, 0);
+  }
+});
+
+test('quality gate: `not ok` alone still fails, as before', () => {
+  const report = parseTestReport('not ok 1 - the only check\n');
+  assert.equal(report.shape, 'tap');
+  if (report.shape === 'tap') assert.equal(report.failed, 1);
+});
