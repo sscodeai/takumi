@@ -87,9 +87,54 @@ denominator and the ratio — it has no count or sum for them to find, so those 
 `row-order-invariance` needs no fields at all (it shuffles the input and compares the two reports), and
 `mutation-detection` and `browser-scenario` run commands, so all three work for either shape.
 
+**AND THEREFORE, ON A QUOTIENT ANSWER, DO NOT WRITE THOSE DECISIONS AT ALL.** This is the half that has
+been costing runs: a ratio document correctly narrowed its relations to the four above and then recorded
+blocking decisions "what happens to a malformed row" (`checkedAs: skip-count`) and "what happens to a
+repeated id" (`checkedAs: merge`) — decisions that ONLY `malformed-row-accounting` and
+`duplicate-resolution` can verify, and those cannot read a ratio line. The forge then refuses:
+
+    blocking decision(s) AMB-001, AMB-002 are exercised by no declared relation or anchor
+
+So when a request mentions malformed rows or repeated ids and the answer is a QUOTIENT, do not turn them
+into `ambiguities`. State the behaviour in the REQUIREMENT text instead ("a row that cannot form a valid
+record is skipped", "rows naming the same id are merged") where it is a plain instruction to the
+implementer, and leave the `checkedAs` vocabulary to decisions something can actually check. A decision
+nothing can check is worse than no decision: it blocks the run.
+
+The same applies to an AGGREGATE answer only for the relations you did NOT list — if
+`malformed-row-accounting` is in your `ALLOWED_RELATIONS`, such a decision IS checkable and belongs in
+`ambiguities` with its `checkedAs`.
+
+## The fourth thing: what the ROUNDING answer means to a judge
+
+Every decision a relation settles must carry a `checkedAs:` — a machine-readable word for what the
+human's answer MEANS, because prose is for humans and a judge will not guess. Measured 2026-11-08: a
+ratio document settled its rounding decision but wrote no `checkedAs`, and the forge refused the whole
+document with
+
+    the decision AMB-001 is settled by REL-001, and the relation needs to know what its answer MEANS:
+    give it "checkedAs: <half-up truncate>"
+
+so the run was lost before any code was written. The rule is #12 of the document prompt and it was
+ignored there, which is the same thing that happened to the field model (#102), the entry point (#107)
+and the relation list (#121).
+
+So decide it HERE, where it is the only question: **for a QUOTIENT answer, which rounding does the
+judge apply?**
+
+- `half-up` — a value exactly halfway rounds away from zero (6.25 → 6.3). This is what "round normally",
+  "round half up", or an unqualified "rounded to one decimal place" means.
+- `truncate` — everything after the last printed digit is dropped (6.29 → 6.2, and 6.25 → 6.2).
+
+If the request says "rounded" without qualifying it, answer `half-up`: it is the ordinary reading of
+the word, and a document that picks the other one is choosing a behaviour the request did not ask for.
+
+For an AGGREGATE answer whose number is rounded by a relation, the same two words apply; if nothing in
+the answer is rounded at all, write `NONE`.
+
 ## Your answer
 
-Answer with EXACTLY these six lines and nothing else:
+Answer with EXACTLY these seven lines and nothing else:
 
 ```
 ANSWER_SHAPE: AGGREGATE
@@ -105,6 +150,7 @@ THE_NUMBER_IS: <one short phrase naming the printed number, e.g. "mean salary pe
 THE_TWO_COUNTS_ARE: <for QUOTIENT only: what is divided by what, e.g. "passes divided by total runs". Write NONE for AGGREGATE.>
 ENTRY_POINT: bash <name> {csv}
 ALLOWED_RELATIONS: <the exact list above for your shape, copied verbatim>
+ROUNDING_MEANS: <half-up | truncate | NONE>
 WHY_NOT_THE_OTHER: <one sentence: why the other shape does not express this number>
 ```
 

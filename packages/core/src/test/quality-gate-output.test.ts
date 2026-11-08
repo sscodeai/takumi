@@ -65,3 +65,32 @@ test('the kept text names how much was dropped, so a truncated summary is visibl
   assert.match(kept, /not ok 1 - the real reason/);
   assert.match(kept, /\d+ earlier line\(s\) omitted|\d+ line\(s\) omitted/, 'the cut is stated, not silent');
 });
+
+// LEDGER #128 — a tool's own refusal line survives the budget.
+//
+// #126 made the intake shape gate repeat the forge's verdict as `# FORGE SAID: ...`, and the next real
+// run still recorded nothing: `#103`'s budget only rescues lines matching its FALSIFYING pattern, and
+// that pattern knew `not ok`, `FAILED`, `Error:` — not a `#` diagnostic. TAP reserves `#` for
+// diagnostics, so a harness that explains itself writes comments, and those comments were the one thing
+// cut. Twice in a row the fix was defeated by the budget it was written for.
+test('a `# FORGE SAID:` comment past the head budget is rescued', () => {
+  const out = [
+    'ok 1 - wrote the document',
+    ...Array.from({ length: 40 }, (_, i) => `#  decision ${i}: a line of explanatory prose`),
+    '# FORGE SAID: the decision AMB-001 is settled by REL-001, and the relation needs checkedAs',
+    'not ok 4 - a judge can be forged from the document',
+  ].join('\n');
+  const kept = summariseGateOutput(out);
+  assert.match(kept, /# FORGE SAID: the decision AMB-001/, `the verdict must survive:\n${kept}`);
+});
+
+test('other self-explaining harness lines are rescued too', () => {
+  const out = [
+    ...Array.from({ length: 60 }, (_, i) => `ok ${i + 1} - check ${i}`),
+    '# REFUSED: the document declares two scenarios under one id',
+    '# reason: one mutation block configures one check',
+  ].join('\n');
+  const kept = summariseGateOutput(out);
+  assert.match(kept, /# REFUSED: the document declares two scenarios under one id/);
+  assert.match(kept, /# reason: one mutation block configures one check/);
+});

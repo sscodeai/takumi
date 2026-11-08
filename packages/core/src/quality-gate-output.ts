@@ -19,8 +19,14 @@ const TOTAL_BUDGET = 4000;
  * Lines that report a failure, across the frameworks this gate meets: TAP (`not ok`), node:test
  * (`✗`, `not ok`), mocha/chai (`failing`, numbered `1)` under a `Failing` heading), go test (`--- FAIL`),
  * pytest (`FAILED`), cargo (`test ... FAILED`), and rust/assertion markers (`AssertionError`, `Error:`).
+ *
+ * LEDGER #128: a tool's own `# FORGE SAID:` / `# REFUSED:` / `# reason:` line is a falsifying line too.
+ * The gate writes them as comments because TAP reserves `#` for diagnostics, and #103's budget threw
+ * them away — so the one sentence that named the defect was the one thing cut, twice over (#126 then
+ * this). A comment is not automatically noise: one that follows a failure is usually the reason.
  */
-const FALSIFYING = /^(?:not ok\b|✗|✘|×|---\s*FAIL|\s*✗)|FAILED\b|Failing\b|^AssertionError\b|^\s*Error:/;
+const FALSIFYING =
+  /^(?:not ok\b|✗|✘|×|---\s*FAIL|\s*✗)|FAILED\b|Failing\b|^AssertionError\b|^\s*Error:|^#\s*(?:FORGE|REFUSED|REFUSE|REASON|FATAL|ERROR)\b/i;
 
 /** How many lines the summary may spend on rescuing failures past the head. */
 const RESCUE_BUDGET = TOTAL_BUDGET - HEAD_BUDGET;

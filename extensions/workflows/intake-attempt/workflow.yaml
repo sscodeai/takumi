@@ -61,6 +61,14 @@ steps:
       If it says `ANSWER_SHAPE: AGGREGATE`, use `count`/`sum`/`min`/`max`/`mean` on the per-id line and
       do NOT declare `derived-ratio`.
 
+      IT ALSO DECIDED WHAT THE ROUNDING ANSWER MEANS, AND `checkedAs:` MUST CARRY IT. Step 1's answer
+      includes `ROUNDING_MEANS: <half-up | truncate | NONE>`. The decision that settles the rounding
+      (the one a `derived-ratio` or `independent-aggregation` relation names in `decides:`) MUST carry
+      `checkedAs: <that word>`, written ON THE AMB-nnn ENTRY next to `chosen:`, never on the relation.
+      Measured 2026-11-08: a ratio document settled its rounding decision with no `checkedAs`, and the
+      forge refused the whole document — the run was lost before any code was written. If step 1 said
+      `NONE` and a relation still settles a rounding decision, write `half-up` and say why in one clause.
+
       IT ALSO DECIDED WHICH RELATIONS ARE POSSIBLE, AND `relations:` MUST BE A SUBSET OF THAT LINE.
       Step 1's answer includes `ALLOWED_RELATIONS: ...`. Every `relation:` you write must be named in
       it; a relation that is not there is REFUSED by the forge and the run is lost before any code is
@@ -97,6 +105,36 @@ steps:
     produces:
       - docs/requirements/intake.yaml
     dependsOn: [shape_decision]
+  # REPAIR THE DOCUMENT FROM WHAT STEP 1 ALREADY DECIDED (ledger #129).
+  #
+  # Measured 2026-11-08: the first attempt passes its own gate 1 time in 3, twice over, and with the
+  # forge's words finally visible (#126/#128) the failures turned out to be the SAME SHAPE — a decision
+  # step 1 made correctly is missing from the document: `checkedAs:` absent while step 1 answered
+  # `ROUNDING_MEANS: half-up`; `deliverable.run` absent while step 1 answered `ENTRY_POINT: ...`.
+  #
+  # Those are DETERMINISTIC: the answer is already known and the document merely failed to carry it.
+  # Asking the model to rewrite the whole document to fix a missing word is how the rate stayed at 1 in 3
+  # through four rounds of prompt rules. This repairs the document from step 1's own answers, and REFUSES
+  # rather than inventing a decision step 1 did not make.
+  - id: intake_repair
+    type: tool
+    # THE ANSWER GOES IN A HEREDOC, NOT AS A QUOTED ARGUMENT (ledger #135).
+    #
+    # Step 1's answer is MULTI-LINE — it arrives inside a ``` fence — and `--shape-text "{step.shape_decision}"`
+    # splices those newlines into a double-quoted shell argument. Measured 2026-11-08, immediately after #134
+    # made the fence parse: `/bin/sh: 9: Syntax error: Unterminated quoted string`, and the run died with no
+    # repair attempted at all. A quoted argument can hold a phrase; it cannot hold a document.
+    prompt: |
+      shape_file=$(mktemp)
+      cat > "$shape_file" <<'TAKUMI_SHAPE_EOF'
+      {step.shape_decision}
+      TAKUMI_SHAPE_EOF
+      bash "$TAKUMI_PROJECT/scripts/intake-repair.sh" --doc docs/requirements/intake.yaml --shape "$shape_file"
+      rc=$?
+      rm -f "$shape_file"
+      exit $rc
+    dependsOn: [req_intake, shape_decision]
+    timeoutMs: 60000
   - id: intake_shape
     # The document's contract IS this attempt's verdict — a `quality_gate`, not an `acceptance`: an
     # acceptance is bound to a CONFIRMED requirement and nothing is confirmed yet at intake time, so
@@ -106,5 +144,5 @@ steps:
     type: quality_gate
     prompt: |
       bash extensions/workflows/request-intake/checks/intake-shape-tap.sh
-    dependsOn: [req_intake]
+    dependsOn: [intake_repair]
     timeoutMs: 180000

@@ -50,6 +50,7 @@ set -a; . /srv/hermes/.env; set +a
 
 FIRST_OK=0
 TOTAL=0
+ERRORS=0
 printf 'shape\trun\tfirst_attempt_ok\tdelivered\tseconds\n' > "$LOGDIR/report.tsv"
 
 for i in $(seq 1 "$N"); do
@@ -62,10 +63,22 @@ for i in $(seq 1 "$N"); do
   elapsed=$(( $(date +%s) - started ))
 
   run_id=$(grep -oE 'run *: wf-[a-f0-9]+' "$log" | tail -1 | grep -oE 'wf-[a-f0-9]+')
-  # The repair wrapper writes `--- attempt 1 of 2: refused ---` when the FIRST attempt was refused.
-  if grep -q -- '--- attempt 1 of 2: refused ---' "$log"; then first=no; else first=yes; fi
+  # A FIRST ATTEMPT COUNTS AS PASSED ONLY IF THE INTAKE ACTUALLY COMPLETED (ledger #130).
+  #
+  # This used to be "no `--- attempt 1 of 2: refused ---` marker means passed", which reported a run that
+  # DIED BEFORE THE INTAKE EVER RAN as a first-attempt pass — measured 2026-11-08: three runs finished in
+  # 2-3 seconds with `step intake_attempt: failed — ... could not be run` and the report said 3 of 3.
+  # A measurement that can say "passed" about a run that never started is worse than no measurement.
+  if grep -q -- '--- attempt 1 of 2: refused ---' "$log"; then
+    first=no
+  elif grep -qE 'attempt accepted (on|after) .*attempt\(s\)|delivery accepted on the first attempt' "$log"; then
+    first=yes
+  else
+    first=error
+  fi
   if grep -qE '^== delivered' "$log"; then delivered=yes; else delivered=no; fi
   [ "$first" = yes ] && FIRST_OK=$((FIRST_OK + 1))
+  [ "$first" = error ] && ERRORS=$((ERRORS + 1))
   TOTAL=$((TOTAL + 1))
   printf '%s\t%s\t%s\t%s\t%s\n' "$shape" "${run_id:-?}" "$first" "$delivered" "$elapsed" >> "$LOGDIR/report.tsv"
   echo "  [$i/$N] $shape ${run_id:-?} first=$first delivered=$delivered ${elapsed}s" >&2
@@ -73,6 +86,10 @@ done
 
 echo
 echo "MEASURED: the intake's first attempt passed its own gate in $FIRST_OK of $TOTAL run(s)."
+if [ "$ERRORS" -gt 0 ]; then
+  echo "  $ERRORS run(s) never reached an intake verdict at all — they are counted as failures above,"
+  echo "  not as passes, because a run that could not start proves nothing about the intake."
+fi
 echo "A first attempt that failed still delivered through the repair round — that is the REPAIR"
 echo "working, and it is not the same claim as the intake being reliable on the first try."
 echo "report: $LOGDIR/report.tsv"

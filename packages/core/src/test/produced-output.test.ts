@@ -251,7 +251,18 @@ test('the REAL intake manifests declare the document its agent step must produce
   // The gate that reads the document must depend on the step that produces it, or the declaration
   // is checked after something has already read the stale file.
   const gate = (def.steps ?? []).find((s) => s.type === 'quality_gate');
-  assert.ok((gate?.dependsOn ?? []).includes(agent?.id ?? ''), 'the shape gate depends on the agent step');
+  // LEDGER #129: the gate depends on `intake_repair`, which depends on the agent. The gate still judges
+  // the DOCUMENT THE AGENT WROTE — the repair only fills in what step 1 had already decided — so the
+  // chain is asserted link by link rather than collapsed into one edge.
+  assert.ok(
+    (gate?.dependsOn ?? []).includes('intake_repair'),
+    'the shape gate depends on the repair step',
+  );
+  const repair = (def.steps ?? []).find((s) => s.id === 'intake_repair');
+  assert.ok(
+    (repair?.dependsOn ?? []).includes(agent?.id ?? ''),
+    'and the repair acts on the document the agent wrote',
+  );
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -325,4 +336,74 @@ test('the document step is told the list is a CONSTRAINT, not a suggestion', () 
   assert.match(prompt, /ALLOWED_RELATIONS/, 'it names the line');
   assert.match(prompt, /SUBSET/, 'and calls it a subset constraint');
   assert.match(prompt, /may not use any other|REFUSED/, 'with the consequence stated');
+});
+
+// LEDGER #127: the shape step also decides what the ROUNDING answer MEANS.
+//
+// Measured 2026-11-08 on a real run: a ratio document settled its rounding decision but wrote no
+// `checkedAs`, so the forge refused the whole document —
+//   the decision AMB-001 is settled by REL-001, and the relation needs to know what its answer MEANS:
+//   give it "checkedAs: <half-up truncate>"
+// — and the run was lost before a line of code was written. The rule is #12 of the 400-line document
+// prompt and was ignored there, which is the same thing that happened to the field model (#102), the
+// entry point (#107) and the relation list (#121). So it is decided in the 60-line step instead.
+test('the shape step decides the rounding mode, with the default spelled out', () => {
+  const prompt = readFileSync(
+    new URL('../../../../extensions/skills/req-intake/prompts/shape.md', import.meta.url),
+    'utf8',
+  );
+  assert.match(prompt, /^ROUNDING_MEANS: /m, 'the step emits the line');
+  assert.match(prompt, /`half-up` — a value exactly halfway rounds away from zero/, 'half-up is defined');
+  assert.match(prompt, /`truncate` — everything after the last printed digit is dropped/, 'truncate is defined');
+  assert.match(
+    prompt,
+    /without qualifying it, answer `half-up`/,
+    'the unqualified case is decided for the model rather than left to taste',
+  );
+  assert.match(prompt, /NONE/, 'a shape with nothing rounded says so');
+});
+
+test('the document step is told `checkedAs` must carry that word, on the DECISION', () => {
+  const def = parseYaml(
+    readFileSync(new URL('../../../../extensions/workflows/intake-attempt/workflow.yaml', import.meta.url), 'utf8'),
+  ) as WorkflowDefinition;
+  const doc = (def.steps ?? []).find((s) => (s.produces ?? []).includes('docs/requirements/intake.yaml'));
+  const prompt = String(doc?.prompt ?? '');
+  assert.match(prompt, /ROUNDING_MEANS/, 'it names the line');
+  assert.match(prompt, /checkedAs/, 'and the field it fills');
+  assert.match(
+    prompt,
+    /ON THE AMB-nnn ENTRY next to `chosen:`, never on the relation/i,
+    'with the placement the forge actually enforces',
+  );
+});
+
+// LEDGER #139 — the shape step must also say which decisions NOT to write.
+//
+// Measured 2026-11-09: a ratio document narrowed its relations correctly to the four that can read a
+// ratio line, and THEN recorded blocking decisions "what happens to a malformed row" (checkedAs:
+// skip-count) and "what happens to a repeated id" (checkedAs: merge) — decisions only
+// `malformed-row-accounting` and `duplicate-resolution` can verify, and those cannot read a ratio line.
+// The forge refused with "blocking decision(s) AMB-001, AMB-002 are exercised by no declared relation".
+//
+// A list of what IS allowed is not enough: the model still writes the decision the request implies. The
+// prompt has to say what to do with that impulse instead.
+test('the shape step forbids on a QUOTIENT answer the decisions its relations cannot check', () => {
+  const prompt = readFileSync(
+    new URL('../../../../extensions/skills/req-intake/prompts/shape.md', import.meta.url),
+    'utf8',
+  );
+  assert.match(prompt, /DO NOT WRITE THOSE DECISIONS AT ALL/, 'the half that was missing');
+  assert.match(prompt, /skip-count/, 'it names the malformed-row decision');
+  assert.match(prompt, /merge/, 'and the duplicate one');
+  assert.match(
+    prompt,
+    /State the behaviour in the REQUIREMENT text instead/,
+    'and says where the behaviour goes instead of into an unverifiable decision',
+  );
+  assert.match(
+    prompt,
+    /A decision\s+nothing can check is worse than no decision/,
+    'with the reason a reader can act on',
+  );
 });

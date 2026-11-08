@@ -522,7 +522,13 @@ export function stepArtifactKind(step: WorkflowStep, fallback: string): string {
 
 /** Render a step prompt by resolving {placeholders} from the run context. */
 export function renderPrompt(template: string, vars: Record<string, string>): string {
-  return template.replace(/\{(\w+)\}/g, (m, key: string) => vars[key] ?? m);
+  // LEDGER #133: a var name may contain DOTS. `{step.shape_decision}` is how one step hands its own
+  // answer to the next, and `\w+` — the pattern this used — does not match a dot, so every such
+  // placeholder reached the shell verbatim. Measured 2026-11-08: two real runs died with
+  // "intake-repair: step 1 recorded no ANSWER_SHAPE" while step 1 had answered, because the script
+  // received the literal text `{step.shape_decision}`. The engine leaves unknown keys alone on purpose
+  // (an unfilled placeholder should be visible), which is why this failed quietly instead of throwing.
+  return template.replace(/\{([\w.]+)\}/g, (m, key: string) => vars[key] ?? m);
 }
 
 /** Resolve trace ids carried in the run vars (REQ-001, DESIGN-001, ...). */
