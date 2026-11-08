@@ -251,7 +251,18 @@ test('the REAL intake manifests declare the document its agent step must produce
   // The gate that reads the document must depend on the step that produces it, or the declaration
   // is checked after something has already read the stale file.
   const gate = (def.steps ?? []).find((s) => s.type === 'quality_gate');
-  assert.ok((gate?.dependsOn ?? []).includes(agent?.id ?? ''), 'the shape gate depends on the agent step');
+  // LEDGER #129: the gate depends on `intake_repair`, which depends on the agent. The gate still judges
+  // the DOCUMENT THE AGENT WROTE — the repair only fills in what step 1 had already decided — so the
+  // chain is asserted link by link rather than collapsed into one edge.
+  assert.ok(
+    (gate?.dependsOn ?? []).includes('intake_repair'),
+    'the shape gate depends on the repair step',
+  );
+  const repair = (def.steps ?? []).find((s) => s.id === 'intake_repair');
+  assert.ok(
+    (repair?.dependsOn ?? []).includes(agent?.id ?? ''),
+    'and the repair acts on the document the agent wrote',
+  );
 });
 
 // ---------------------------------------------------------------------------------------------

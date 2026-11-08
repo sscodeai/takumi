@@ -105,6 +105,25 @@ steps:
     produces:
       - docs/requirements/intake.yaml
     dependsOn: [shape_decision]
+  # REPAIR THE DOCUMENT FROM WHAT STEP 1 ALREADY DECIDED (ledger #129).
+  #
+  # Measured 2026-11-08: the first attempt passes its own gate 1 time in 3, twice over, and with the
+  # forge's words finally visible (#126/#128) the failures turned out to be the SAME SHAPE — a decision
+  # step 1 made correctly is missing from the document: `checkedAs:` absent while step 1 answered
+  # `ROUNDING_MEANS: half-up`; `deliverable.run` absent while step 1 answered `ENTRY_POINT: ...`.
+  #
+  # Those are DETERMINISTIC: the answer is already known and the document merely failed to carry it.
+  # Asking the model to rewrite the whole document to fix a missing word is how the rate stayed at 1 in 3
+  # through four rounds of prompt rules. This repairs the document from step 1's own answers, and REFUSES
+  # rather than inventing a decision step 1 did not make.
+  - id: intake_repair
+    type: tool
+    prompt: |
+      bash "$TAKUMI_PROJECT/scripts/intake-repair.sh" \
+        --doc {requirement} \
+        --shape-text "{step.shape_decision}"
+    dependsOn: [req_intake]
+    timeoutMs: 60000
   - id: intake_shape
     # The document's contract IS this attempt's verdict — a `quality_gate`, not an `acceptance`: an
     # acceptance is bound to a CONFIRMED requirement and nothing is confirmed yet at intake time, so
@@ -114,5 +133,5 @@ steps:
     type: quality_gate
     prompt: |
       bash extensions/workflows/request-intake/checks/intake-shape-tap.sh
-    dependsOn: [req_intake]
+    dependsOn: [intake_repair]
     timeoutMs: 180000
