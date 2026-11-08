@@ -442,3 +442,40 @@ test('a decision no allowed relation can verify is removed, with its answer repo
   assert.doesNotMatch(r.after, /AMB-002/, 'the decision is gone');
   assert.match(r.after, /decides: AMB-001/, 'the usable one is bound to its relation');
 });
+
+// LEDGER #141 — a `differential:` entry names its check with `anchor:`, not `relation:`.
+//
+// Measured 2026-11-09: run-14's repair dropped REL-001 and REL-002 as out-of-list, left DIFF-001
+// (`anchor: independent-aggregation`) alone, and the forge refused the document for the relation that
+// survived. The two keys carry the same relation kinds, and a repair that speaks only one vocabulary
+// leaves half the document unexamined — which looks like the repair did nothing.
+test('an out-of-list `anchor:` is dropped just like a `relation:`', () => {
+  const doc = [
+    'requirements:',
+    '  - id: REQ-001',
+    '    title: t',
+    'deliverable:',
+    '  run: "bash s.sh {csv}"',
+    'ambiguities:',
+    '  - id: AMB-001',
+    '    question: q',
+    '    default: "half-up"',
+    '    checkedAs: half-up',
+    '    blocking: true',
+    'relations:',
+    '  - id: REL-001',
+    '    relation: derived-ratio',
+    '    description: ratio',
+    'differential:',
+    '  - id: DIFF-001',
+    '    anchor: independent-aggregation',
+    '    decides: AMB-001',
+    '    description: anchor',
+    '',
+  ].join('\n');
+  const r = repair(doc, SHAPE.replace(/ALLOWED_RELATIONS:.*/, 'ALLOWED_RELATIONS: derived-ratio'));
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /dropped DIFF-001 \(independent-aggregation\)/, 'the anchor is named as dropped');
+  assert.doesNotMatch(r.after, /anchor: independent-aggregation/, 'and it is gone');
+  assert.match(r.after, /relation: derived-ratio/, 'the allowed relation survives');
+});

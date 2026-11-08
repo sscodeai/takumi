@@ -271,9 +271,13 @@ if allowed:
                 break
             j += 1
         entry = src[i:j]
+        # LEDGER #141: a `differential:` entry names its check with `anchor:`, not `relation:` — the two
+        # vocabularies are the same relation kinds under different keys. Measured 2026-11-09: the repair
+        # dropped `REL-001` and `REL-002` and left `DIFF-001` (anchor: independent-aggregation) in place,
+        # and the forge refused the document for the relation that survived.
         kind = None
         for ln in entry:
-            km = re.match(r'^\s*relation:\s*([a-z-]+)\s*$', ln)
+            km = re.match(r'^\s*(?:relation|anchor):\s*([a-z-]+)\s*$', ln)
             if km:
                 kind = km.group(1)
                 break
@@ -334,7 +338,7 @@ if True:
     rels = []
     for m in re.finditer(r'^( *)- id: ([A-Z]+-\d+)\s*\n((?:\1 +.*\n|\s*\n)*)', text, re.M):
         body = m.group(3)
-        kind = re.search(r'^\s*relation:\s*([a-z-]+)\s*$', body, re.M)
+        kind = re.search(r'^\s*(?:relation|anchor):\s*([a-z-]+)\s*$', body, re.M)
         decides = re.search(r'^\s*decides:\s*(AMB-\d+)\s*$', body, re.M)
         if kind:
             rels.append((m.group(2), kind.group(1), decides.group(1) if decides else None))
