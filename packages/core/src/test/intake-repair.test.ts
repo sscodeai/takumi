@@ -165,7 +165,7 @@ test('a step that interpolates `{step.X}` depends on X', () => {
   for (const step of steps) {
     const prompt = String(step.prompt ?? '');
     for (const m of prompt.matchAll(/\{step\.([A-Za-z0-9_]+)\}/g)) {
-      const needed = m[1];
+      const needed = m[1] ?? '';
       if (!(step.dependsOn ?? []).includes(needed)) {
         offenders.push(`${step.id} reads {step.${needed}} but does not depend on it`);
       }
