@@ -479,3 +479,44 @@ test('an out-of-list `anchor:` is dropped just like a `relation:`', () => {
   assert.doesNotMatch(r.after, /anchor: independent-aggregation/, 'and it is gone');
   assert.match(r.after, /relation: derived-ratio/, 'the allowed relation survives');
 });
+
+// LEDGER #142 — two ids on one key.
+//
+// Measured 2026-11-09: `- id: SCN-001 SCN-002` — one key, two identifiers — and the forge refused the
+// whole document with "the scenario SCN-001 SCN-002 declares no run", because it looks up a scenario by
+// the exact id and found a string naming two.
+//
+// Nothing about it is a judgement: a key holds one value, so the second id is an entry that lost its own
+// `- id:` line. The repair keeps the first id (its block carries the fields) and drops the extra, saying
+// so — a second id needs its own entry with its own run, and inventing one would be a check nobody wrote.
+test('two ids on one key are split down to one, and the drop is reported', () => {
+  const doc = [
+    'requirements:',
+    '  - id: REQ-001',
+    '    title: t',
+    'deliverable:',
+    '  run: "bash s.sh {csv}"',
+    '  scenarios:',
+    '    - id: SCN-001 SCN-002',
+    '      expect: "the report lists a line per suite"',
+    '      run: "bash check.sh"',
+    'ambiguities:',
+    '  - id: AMB-001',
+    '    question: q',
+    '    default: "half-up"',
+    '    checkedAs: half-up',
+    '    blocking: true',
+    'relations:',
+    '  - id: REL-001',
+    '    relation: derived-ratio',
+    '    description: r',
+    '',
+  ].join('\n');
+  const r = repair(doc, SHAPE.replace(/ALLOWED_RELATIONS:.*/, 'ALLOWED_RELATIONS: derived-ratio'));
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /- id: SCN-001 SCN-002.*named two entries on one key/s, 'the defect is named');
+  assert.match(r.out, /DROPPED `SCN-002`/, 'and which id was dropped');
+  assert.match(r.after, /- id: SCN-001\s*$/m, 'the first id survives alone');
+  assert.doesNotMatch(r.after, /SCN-001 SCN-002/, 'no key names two ids');
+  assert.match(r.after, /expect:/, 'its fields are intact');
+});

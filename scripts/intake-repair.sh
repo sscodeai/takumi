@@ -442,6 +442,35 @@ if True:
                 f'it ({", ".join(r for r, _ in candidates)}). Which one is meant is a judgment, not a repair'
             )
 
+# ---------------------------------------------------------------- 6. two ids on one entry
+# LEDGER #142: `- id: SCN-001 SCN-002` — one key, two identifiers. Measured 2026-11-09: the forge refused
+# the whole document with "the scenario SCN-001 SCN-002 declares no run", because it looks up a scenario by
+# the exact id and found a string that names two. Nothing about it is a judgement: a key holds one value,
+# so the extra id is a SECOND entry that lost its own `- id:` line.
+#
+# The repair SPLITS the entry: the first id keeps the fields, and the rest become their own entries with
+# the same fields but no `run:` — because a scenario without a command is exactly what the forge refuses,
+# and inventing a command would be a check nobody wrote. They are therefore dropped, not duplicated, and
+# the drop is reported.
+if True:
+    text = '\n'.join(lines)
+    renamed = []
+    for m in re.finditer(r'^( *)- id:\s*([A-Z]+-\d+)\s+([A-Z]+-\d+(?:\s+[A-Z]+-\d+)*)\s*$', text, re.M):
+        indent, first, extra = m.group(1), m.group(2), m.group(3)
+        # Keep the FIRST id on this entry — it is the one whose block actually carries fields — and drop
+        # the extra ids, reporting them so a reader knows a scenario was lost rather than merged.
+        old_line = m.group(0)
+        new_line = f'{indent}- id: {first}'
+        text = text.replace(old_line, new_line, 1)
+        renamed.append((first, extra))
+    if renamed:
+        lines = text.split('\n')
+        for first, extra in renamed:
+            notes.append(
+                f'`- id: {first} {extra}` named two entries on one key; kept `{first}` and DROPPED `{extra}` — '
+                f'a second id needs its own entry with its own run, and inventing one would be a check nobody wrote'
+            )
+
 # ---------------------------------------------------------------- refusals win over notes
 if refusals:
     print('intake-repair: refused —', file=sys.stderr)
