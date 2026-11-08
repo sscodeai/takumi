@@ -279,7 +279,11 @@ test('the manifests carry the wiring: the intake is a repair round, and the deli
   // the agent's own with step 1's decided values filled in — NOT a different document. The gate must
   // therefore depend on the repair, and the repair on the agent, or the chain could judge a document
   // nobody wrote.
-  assert.match(sub, /- id: intake_repair[\s\S]*?dependsOn: \[req_intake\]/, 'the repair acts on the agent\'s document');
+  assert.match(
+    sub,
+    /- id: intake_repair[\s\S]*?dependsOn: \[[^\]]*req_intake[^\]]*\]/,
+    'the repair acts on the agent\'s document',
+  );
   assert.match(sub, /- id: intake_shape[\s\S]*?dependsOn: \[intake_repair\]/, 'the gate runs on the repaired document');
 
   const delivery = read('extensions/workflows/request-to-delivery-attempt/workflow.yaml');

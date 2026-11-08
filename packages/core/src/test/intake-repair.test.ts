@@ -145,3 +145,44 @@ test('the workflow runs the repair BEFORE the gate that judges the document', ()
   const step = (def.steps ?? []).find((s) => s.id === 'intake_repair');
   assert.match(String(step?.prompt ?? ''), /\{step\.shape_decision\}/, 'and it reads step 1\'s own answer');
 });
+
+// LEDGER #132 — a step that reads `{step.X}` must DEPEND on X.
+//
+// `intake_repair` takes step 1's answer through `{step.shape_decision}`. Declared against `req_intake`
+// alone it ran in the SAME LEVEL as `shape_decision`, so the engine had not recorded that step's summary
+// yet and the placeholder reached the shell verbatim. Every repair then refused with "step 1 recorded no
+// ANSWER_SHAPE", and two real runs were lost to an ordering that was never declared.
+//
+// A placeholder that is not resolved is not an error the engine can see: `renderPrompt` leaves unknown
+// keys alone, so the failure surfaces as a confusing refusal three steps later. The dependency is the
+// only thing that makes the interpolation true.
+test('a step that interpolates `{step.X}` depends on X', () => {
+  const def = parseYaml(
+    readFileSync(new URL('../../../../extensions/workflows/intake-attempt/workflow.yaml', import.meta.url), 'utf8'),
+  ) as WorkflowDefinition;
+  const steps = def.steps ?? [];
+  const offenders: string[] = [];
+  for (const step of steps) {
+    const prompt = String(step.prompt ?? '');
+    for (const m of prompt.matchAll(/\{step\.([A-Za-z0-9_]+)\}/g)) {
+      const needed = m[1];
+      if (!(step.dependsOn ?? []).includes(needed)) {
+        offenders.push(`${step.id} reads {step.${needed}} but does not depend on it`);
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'an undeclared dependency means the placeholder reaches the shell verbatim, and the refusal that follows names the wrong cause',
+  );
+});
+
+test('the repair step depends on BOTH the document and the decision it repairs from', () => {
+  const def = parseYaml(
+    readFileSync(new URL('../../../../extensions/workflows/intake-attempt/workflow.yaml', import.meta.url), 'utf8'),
+  ) as WorkflowDefinition;
+  const repair = (def.steps ?? []).find((s) => s.id === 'intake_repair');
+  assert.ok((repair?.dependsOn ?? []).includes('req_intake'), 'the document it edits');
+  assert.ok((repair?.dependsOn ?? []).includes('shape_decision'), 'and the answer it edits from');
+});
