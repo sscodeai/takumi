@@ -118,15 +118,21 @@ steps:
   # rather than inventing a decision step 1 did not make.
   - id: intake_repair
     type: tool
+    # THE ANSWER GOES IN A HEREDOC, NOT AS A QUOTED ARGUMENT (ledger #135).
+    #
+    # Step 1's answer is MULTI-LINE — it arrives inside a ``` fence — and `--shape-text "{step.shape_decision}"`
+    # splices those newlines into a double-quoted shell argument. Measured 2026-11-08, immediately after #134
+    # made the fence parse: `/bin/sh: 9: Syntax error: Unterminated quoted string`, and the run died with no
+    # repair attempted at all. A quoted argument can hold a phrase; it cannot hold a document.
     prompt: |
-      bash "$TAKUMI_PROJECT/scripts/intake-repair.sh" \
-        --doc docs/requirements/intake.yaml \
-        --shape-text "{step.shape_decision}"
-    # BOTH, and both are load-bearing: `req_intake` writes the document this repairs, and
-    # `shape_decision` writes the answer it repairs FROM. Measured 2026-11-08: declared against
-    # `req_intake` alone the step ran in the same level as `shape_decision`, so `{step.shape_decision}`
-    # reached the shell as the literal placeholder and every repair refused with "step 1 recorded no
-    # ANSWER_SHAPE" — a dependency that is not declared is not an ordering.
+      shape_file=$(mktemp)
+      cat > "$shape_file" <<'TAKUMI_SHAPE_EOF'
+      {step.shape_decision}
+      TAKUMI_SHAPE_EOF
+      bash "$TAKUMI_PROJECT/scripts/intake-repair.sh" --doc docs/requirements/intake.yaml --shape "$shape_file"
+      rc=$?
+      rm -f "$shape_file"
+      exit $rc
     dependsOn: [req_intake, shape_decision]
     timeoutMs: 60000
   - id: intake_shape

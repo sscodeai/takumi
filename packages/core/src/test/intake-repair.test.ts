@@ -212,3 +212,33 @@ test('an indented shape answer is still read', () => {
   assert.equal(r.status, 0, r.out);
   assert.match(r.after, /^\s+checkedAs: half-up$/m);
 });
+
+// LEDGER #135 — a multi-line answer cannot be a quoted shell argument.
+//
+// `--shape-text "{step.shape_decision}"` splices newlines into a double-quoted argument. Measured
+// 2026-11-08, immediately after #134 made the fence parse: `/bin/sh: 9: Syntax error: Unterminated
+// quoted string`, and the run died with the repair never attempted. A quoted argument can hold a
+// phrase; step 1's answer is a document.
+test('the repair step passes the answer through a FILE, not a quoted argument', () => {
+  const def = parseYaml(
+    readFileSync(new URL('../../../../extensions/workflows/intake-attempt/workflow.yaml', import.meta.url), 'utf8'),
+  ) as WorkflowDefinition;
+  const step = (def.steps ?? []).find((s) => s.id === 'intake_repair');
+  const prompt = String(step?.prompt ?? '');
+  assert.doesNotMatch(prompt, /--shape-text/, 'no quoted multi-line argument');
+  assert.match(prompt, /<<'TAKUMI_SHAPE_EOF'/, 'the answer goes in a heredoc');
+  assert.match(prompt, /--shape "\$shape_file"/, 'and the script reads it from the file');
+  assert.match(prompt, /rm -f "\$shape_file"/, 'the temp file is cleaned up');
+});
+
+test('the heredoc delimiter is at column 0 after YAML parsing, or it never terminates', () => {
+  const def = parseYaml(
+    readFileSync(new URL('../../../../extensions/workflows/intake-attempt/workflow.yaml', import.meta.url), 'utf8'),
+  ) as WorkflowDefinition;
+  const prompt = String((def.steps ?? []).find((s) => s.id === 'intake_repair')?.prompt ?? '');
+  const lines = prompt.split('\n');
+  const open = lines.findIndex((l) => /<<'TAKUMI_SHAPE_EOF'/.test(l));
+  const close = lines.findIndex((l) => l === 'TAKUMI_SHAPE_EOF');
+  assert.ok(open >= 0 && close > open, 'both delimiters exist');
+  assert.equal(lines[close], 'TAKUMI_SHAPE_EOF', 'the closing delimiter has no leading whitespace');
+});
