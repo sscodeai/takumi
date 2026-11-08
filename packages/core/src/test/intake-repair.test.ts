@@ -396,10 +396,49 @@ test('an ambiguous inference is REFUSED, not guessed', () => {
   assert.doesNotMatch(r.after, /decides: AMB-001/, 'and writes nothing');
 });
 
-test('a mode no declared relation can verify is REFUSED', () => {
+test('a mode no declared relation can verify is REMOVED (ledger #140 changed this from a refusal)', () => {
+  // This case used to assert a refusal. #140 reversed it: a decision nothing may check blocks the run
+  // forever, and its answer belongs in the requirement text. The refusal survives only for a mode the
+  // repair cannot place at all.
   const doc = DOC_UNDECIDED.replace('  - id: REL-002\n    relation: duplicate-resolution\n    description: dup\n', '');
   const r = repair(doc, SHAPE.replace(/ALLOWED_RELATIONS:.*/, 'ALLOWED_RELATIONS: derived-ratio'));
-  assert.equal(r.status, 1, r.out);
-  assert.match(r.out, /no declared relation can verify that mode/, 'it says which decision cannot be checked');
-  assert.match(r.out, /will not invent a check/, 'and refuses to invent one');
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /removed AMB-002 \(blocking, checkedAs: merge\)/, 'the decision is removed');
+  assert.match(r.out, /belongs in/, 'and its answer is redirected to the requirement text');
+});
+
+// LEDGER #140 — a decision no allowed relation can verify is REMOVED, not left to block the run.
+//
+// Measured 2026-11-09, twice: a ratio document kept recording "what happens to a repeated id"
+// (`checkedAs: merge`) and "what happens to a malformed row" (`checkedAs: skip-count`) as blocking
+// ambiguities, while its ALLOWED_RELATIONS — correctly, see #139 — contains neither
+// duplicate-resolution nor malformed-row-accounting, because both read a `count` role a ratio totals
+// line no longer carries (#108).
+//
+// #139's prompt told the model not to write them. It wrote them anyway — the fifth rule to fail that
+// way. But the decision is DETERMINISTICALLY unusable: no vocabulary the document may use can check it.
+// So the repair removes it and reports where its answer belongs instead. The removal is done line by
+// line, not with a block regex, because a block that fails to match would silently leave the decision
+// in place — the exact state that blocks the run.
+test('a decision no allowed relation can verify is removed, with its answer reported', () => {
+  const doc = DOC_UNDECIDED.replace(
+    'relations:',
+    [
+      'relations:',
+      '  - id: REL-001',
+      '    relation: derived-ratio',
+      '    description: only the rounding relation is declared',
+    ].join('\n'),
+  ).replace('  - id: REL-001\n  - id: REL-001', '');
+  // DOC_UNDECIDED declares both relations; strip the duplicate one so only derived-ratio remains.
+  const onlyRatio = DOC_UNDECIDED.replace(
+    '  - id: REL-002\n    relation: duplicate-resolution\n    description: dup\n',
+    '',
+  );
+  const r = repair(onlyRatio, SHAPE.replace(/ALLOWED_RELATIONS:.*/, 'ALLOWED_RELATIONS: derived-ratio'));
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /removed AMB-002 \(blocking, checkedAs: merge\)/, 'the unusable decision is named');
+  assert.match(r.out, /belongs in\s+the requirement text|belongs in the requirement text/, 'and where its answer goes');
+  assert.doesNotMatch(r.after, /AMB-002/, 'the decision is gone');
+  assert.match(r.after, /decides: AMB-001/, 'the usable one is bound to its relation');
 });

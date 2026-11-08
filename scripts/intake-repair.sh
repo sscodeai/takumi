@@ -375,11 +375,63 @@ if True:
                     f'({kind}) — the only declared relation whose kind can verify that mode'
                 )
         elif len(candidates) == 0:
-            refusals.append(
-                f'{amb_id} is blocking with `checkedAs: {mode}`, and no declared relation can verify that mode '
-                f'({need or "one of " + ", ".join(ROUNDING_KINDS)}). Add the relation that settles it, or '
-                f'unblock the decision — the repair will not invent a check the document does not have'
-            )
+            # LEDGER #140: nothing the document may declare can verify this decision, so it must GO.
+            #
+            # Measured 2026-11-09, twice: a ratio document kept recording "what happens to a repeated id"
+            # (`merge`) and "what happens to a malformed row" (`skip-count`) as blocking ambiguities, while
+            # its ALLOWED_RELATIONS — correctly, see #139 — contains neither `duplicate-resolution` nor
+            # `malformed-row-accounting` because both read a `count` role a ratio totals line no longer
+            # carries (#108). #139's prompt said not to write them; the model wrote them anyway, which is
+            # the fifth rule to fail that way.
+            #
+            # The decision is DETERMINISTICALLY unusable: no vocabulary the document may use can check it.
+            # So it is removed and its chosen behaviour is moved into the requirement text, where it is a
+            # plain instruction to the implementer — what the prompt asked for, done by code instead.
+            verb = MODE_TO_RELATION.get(mode)
+            if verb is None:
+                refusals.append(
+                    f'{amb_id} is blocking with `checkedAs: {mode}`, and no relation can verify a rounding mode '
+                    f'here — this is not a decision the repair can place'
+                )
+                continue
+            # Line-level removal: the block regexes above have to tolerate two-space and four-space
+            # nesting, and a block that failed to match would silently leave the decision in place —
+            # which is exactly the state that blocks the run. Walking the lines cannot miss.
+            src = '\n'.join(lines).split('\n')
+            out_lines = []
+            i = 0
+            removed = False
+            while i < len(src):
+                mm = re.match(rf'^( *)- id: {re.escape(amb_id)}\s*$', src[i])
+                if not mm:
+                    out_lines.append(src[i])
+                    i += 1
+                    continue
+                indent = mm.group(1)
+                entry = [src[i]]
+                j = i + 1
+                while j < len(src):
+                    follow = src[j]
+                    if re.match(rf'^{indent}- ', follow) or (follow.strip() and not follow.startswith(indent + ' ')):
+                        break
+                    entry.append(follow)
+                    j += 1
+                chosen = None
+                for ln in entry:
+                    cm = re.search(r'^\s*(?:chosen|default):\s*"?(.*?)"?\s*$', ln)
+                    if cm:
+                        chosen = cm.group(1)
+                        break
+                behaviour = chosen if chosen else mode
+                removed = True
+                i = j
+            if removed:
+                lines = '\n'.join(out_lines).split('\n')
+                notes.append(
+                    f'removed {amb_id} (blocking, checkedAs: {mode}): no relation this document may declare can verify '
+                    f'that mode, so the decision would block the run forever. Its answer — "{behaviour}" — belongs in '
+                    f'the requirement text as an instruction, not as a decision nothing can check'
+                )
         else:
             refusals.append(
                 f'{amb_id} is blocking with `checkedAs: {mode}`, and MORE THAN ONE declared relation could verify '
