@@ -377,3 +377,33 @@ test('the document step is told `checkedAs` must carry that word, on the DECISIO
     'with the placement the forge actually enforces',
   );
 });
+
+// LEDGER #139 — the shape step must also say which decisions NOT to write.
+//
+// Measured 2026-11-09: a ratio document narrowed its relations correctly to the four that can read a
+// ratio line, and THEN recorded blocking decisions "what happens to a malformed row" (checkedAs:
+// skip-count) and "what happens to a repeated id" (checkedAs: merge) — decisions only
+// `malformed-row-accounting` and `duplicate-resolution` can verify, and those cannot read a ratio line.
+// The forge refused with "blocking decision(s) AMB-001, AMB-002 are exercised by no declared relation".
+//
+// A list of what IS allowed is not enough: the model still writes the decision the request implies. The
+// prompt has to say what to do with that impulse instead.
+test('the shape step forbids on a QUOTIENT answer the decisions its relations cannot check', () => {
+  const prompt = readFileSync(
+    new URL('../../../../extensions/skills/req-intake/prompts/shape.md', import.meta.url),
+    'utf8',
+  );
+  assert.match(prompt, /DO NOT WRITE THOSE DECISIONS AT ALL/, 'the half that was missing');
+  assert.match(prompt, /skip-count/, 'it names the malformed-row decision');
+  assert.match(prompt, /merge/, 'and the duplicate one');
+  assert.match(
+    prompt,
+    /State the behaviour in the REQUIREMENT text instead/,
+    'and says where the behaviour goes instead of into an unverifiable decision',
+  );
+  assert.match(
+    prompt,
+    /A decision\s+nothing can check is worse than no decision/,
+    'with the reason a reader can act on',
+  );
+});

@@ -87,6 +87,24 @@ denominator and the ratio — it has no count or sum for them to find, so those 
 `row-order-invariance` needs no fields at all (it shuffles the input and compares the two reports), and
 `mutation-detection` and `browser-scenario` run commands, so all three work for either shape.
 
+**AND THEREFORE, ON A QUOTIENT ANSWER, DO NOT WRITE THOSE DECISIONS AT ALL.** This is the half that has
+been costing runs: a ratio document correctly narrowed its relations to the four above and then recorded
+blocking decisions "what happens to a malformed row" (`checkedAs: skip-count`) and "what happens to a
+repeated id" (`checkedAs: merge`) — decisions that ONLY `malformed-row-accounting` and
+`duplicate-resolution` can verify, and those cannot read a ratio line. The forge then refuses:
+
+    blocking decision(s) AMB-001, AMB-002 are exercised by no declared relation or anchor
+
+So when a request mentions malformed rows or repeated ids and the answer is a QUOTIENT, do not turn them
+into `ambiguities`. State the behaviour in the REQUIREMENT text instead ("a row that cannot form a valid
+record is skipped", "rows naming the same id are merged") where it is a plain instruction to the
+implementer, and leave the `checkedAs` vocabulary to decisions something can actually check. A decision
+nothing can check is worse than no decision: it blocks the run.
+
+The same applies to an AGGREGATE answer only for the relations you did NOT list — if
+`malformed-row-accounting` is in your `ALLOWED_RELATIONS`, such a decision IS checkable and belongs in
+`ambiguities` with its `checkedAs`.
+
 ## The fourth thing: what the ROUNDING answer means to a judge
 
 Every decision a relation settles must carry a `checkedAs:` — a machine-readable word for what the
