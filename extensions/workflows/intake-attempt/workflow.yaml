@@ -120,7 +120,7 @@ steps:
     type: tool
     prompt: |
       bash "$TAKUMI_PROJECT/scripts/intake-repair.sh" \
-        --doc {requirement} \
+        --doc docs/requirements/intake.yaml \
         --shape-text "{step.shape_decision}"
     dependsOn: [req_intake]
     timeoutMs: 60000
