@@ -329,3 +329,77 @@ test('a document that is not valid YAML is REFUSED before any repair, and untouc
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// LEDGER #138 — a blocking decision no check exercises, repaired from `checkedAs`.
+//
+// Measured 2026-11-09: `blocking decision(s) AMB-NNN are exercised by no declared relation or anchor` was
+// the single most common remaining failure, twice in a row.
+//
+// It is NOT a guess which relation owns a decision, because the document already says what the answer
+// MEANS in `checkedAs:`, and the forge's own table maps a mode to the relations that can verify it:
+//   skip-count | skip-silent | stop-error                -> malformed-row-accounting
+//   first-row | last-row | latest-start-date | merge | error -> duplicate-resolution
+//   half-up | truncate                                  -> derived-ratio | independent-aggregation
+// So a decision with mode `half-up` that no relation names can only be settled by a rounding relation,
+// and when exactly one such relation is declared, that is where `decides:` belongs.
+//
+// It REFUSES when the inference is not unique or no relation can verify the mode — a wrong `decides:`
+// would have the judge verify a decision the document never meant.
+const DOC_UNDECIDED = [
+  'requirements:',
+  '  - id: REQ-001',
+  '    title: t',
+  'deliverable:',
+  '  run: "bash s.sh {csv}"',
+  'ambiguities:',
+  '  - id: AMB-001',
+  '    question: how is it rounded?',
+  '    default: "half-up"',
+  '    checkedAs: half-up',
+  '    blocking: true',
+  '  - id: AMB-002',
+  '    question: what about repeats?',
+  '    default: "merge"',
+  '    checkedAs: merge',
+  '    blocking: true',
+  'relations:',
+  '  - id: REL-001',
+  '    relation: derived-ratio',
+  '    description: ratio',
+  '  - id: REL-002',
+  '    relation: duplicate-resolution',
+  '    description: dup',
+  '',
+].join('\n');
+
+test('a blocking decision with no check gets `decides:` from its checkedAs mode', () => {
+  const r = repair(DOC_UNDECIDED, SHAPE.replace(/ALLOWED_RELATIONS:.*/, 'ALLOWED_RELATIONS: derived-ratio, duplicate-resolution'));
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /AMB-001 \(blocking, checkedAs: half-up\) had no check/, 'the reasoning is reported');
+  assert.match(r.out, /AMB-002 \(blocking, checkedAs: merge\) had no check/);
+  // Each lands on the relation whose KIND can verify that mode.
+  const rel1 = r.after.slice(r.after.indexOf('id: REL-001'), r.after.indexOf('id: REL-002'));
+  const rel2 = r.after.slice(r.after.indexOf('id: REL-002'));
+  assert.match(rel1, /decides: AMB-001/, 'half-up goes to the rounding relation');
+  assert.match(rel2, /decides: AMB-002/, 'merge goes to the duplicate relation');
+});
+
+test('an ambiguous inference is REFUSED, not guessed', () => {
+  // Two rounding relations and one rounding decision: which one is meant is a judgment.
+  const doc = DOC_UNDECIDED.replace(
+    '  - id: REL-002\n    relation: duplicate-resolution\n    description: dup',
+    '  - id: REL-002\n    relation: independent-aggregation\n    description: anchor',
+  );
+  const r = repair(doc, SHAPE.replace(/ALLOWED_RELATIONS:.*/, 'ALLOWED_RELATIONS: derived-ratio, independent-aggregation'));
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /MORE THAN ONE declared relation could verify it/, 'it names the ambiguity');
+  assert.doesNotMatch(r.after, /decides: AMB-001/, 'and writes nothing');
+});
+
+test('a mode no declared relation can verify is REFUSED', () => {
+  const doc = DOC_UNDECIDED.replace('  - id: REL-002\n    relation: duplicate-resolution\n    description: dup\n', '');
+  const r = repair(doc, SHAPE.replace(/ALLOWED_RELATIONS:.*/, 'ALLOWED_RELATIONS: derived-ratio'));
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /no declared relation can verify that mode/, 'it says which decision cannot be checked');
+  assert.match(r.out, /will not invent a check/, 'and refuses to invent one');
+});

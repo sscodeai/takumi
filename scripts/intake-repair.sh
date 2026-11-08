@@ -290,6 +290,102 @@ if allowed:
             )
         lines = '\n'.join(out_lines).split('\n')
 
+# ---------------------------------------------------------------- 5. a blocking decision no check exercises
+# LEDGER #138: the forge refuses `blocking decision(s) AMB-NNN are exercised by no declared relation or
+# anchor`. Measured 2026-11-09 — this was the single most common remaining failure, twice in a row.
+#
+# It is NOT a guess which relation owns a decision, because the document ALREADY SAYS what the answer
+# means: `checkedAs:`. The forge's own table maps a mode to the relations that can verify it —
+#   skip-count | skip-silent | stop-error                -> malformed-row-accounting
+#   first-row | last-row | latest-start-date | merge | error -> duplicate-resolution
+#   half-up | truncate                                  -> derived-ratio | independent-aggregation
+# So a decision whose mode is `half-up` and which no relation names can only be settled by a rounding
+# relation — and if exactly one such relation is declared, that is where `decides:` belongs. This is
+# derived from two fields the document already carries, not invented.
+#
+# It refuses when the inference is not unique: two rounding relations and no way to tell them apart, or
+# no relation of the needed kind at all. A wrong `decides:` would have the judge verify a decision the
+# document never meant, which is worse than the refusal.
+MODE_TO_RELATION = {
+    'skip-count': 'malformed-row-accounting',
+    'skip-silent': 'malformed-row-accounting',
+    'stop-error': 'malformed-row-accounting',
+    'first-row': 'duplicate-resolution',
+    'last-row': 'duplicate-resolution',
+    'latest-start-date': 'duplicate-resolution',
+    'merge': 'duplicate-resolution',
+    'error': 'duplicate-resolution',
+    'half-up': None,
+    'truncate': None,
+}
+ROUNDING_KINDS = ('derived-ratio', 'independent-aggregation')
+ROUNDING_MODES = ('half-up', 'truncate')
+
+if True:
+    text = '\n'.join(lines)
+    # decisions that exist, with their mode and whether they are blocking
+    ambs = {}
+    for m in re.finditer(r'^( *)- id: (AMB-\d+)\s*\n((?:\1 +.*\n|\s*\n)*)', text, re.M):
+        body = m.group(3)
+        mode = re.search(r'^\s*checkedAs:\s*([a-z-]+)\s*$', body, re.M)
+        blocking = re.search(r'^\s*blocking:\s*true\s*$', body, re.M)
+        ambs[m.group(2)] = (mode.group(1) if mode else None, bool(blocking))
+    # relations that exist, with their kind and what they already decide
+    rels = []
+    for m in re.finditer(r'^( *)- id: ([A-Z]+-\d+)\s*\n((?:\1 +.*\n|\s*\n)*)', text, re.M):
+        body = m.group(3)
+        kind = re.search(r'^\s*relation:\s*([a-z-]+)\s*$', body, re.M)
+        decides = re.search(r'^\s*decides:\s*(AMB-\d+)\s*$', body, re.M)
+        if kind:
+            rels.append((m.group(2), kind.group(1), decides.group(1) if decides else None))
+
+    covered = {d for (_rid, _k, d) in rels if d}
+    for amb_id, (mode, blocking) in sorted(ambs.items()):
+        if not blocking or amb_id in covered:
+            continue
+        if mode is None:
+            continue  # no mode: nothing in the document says what would check it
+        # `mode` is a MODE (`half-up`), `ROUNDING_KINDS` are RELATION KINDS (`derived-ratio`) — the two
+        # vocabularies must not be compared to each other.
+        need = MODE_TO_RELATION.get(mode)
+        if mode in ROUNDING_MODES:
+            candidates = [(rid, kind) for (rid, kind, decided) in rels if kind in ROUNDING_KINDS and not decided]
+        elif need is not None:
+            candidates = [(rid, kind) for (rid, kind, decided) in rels if kind == need and not decided]
+        else:
+            candidates = []
+        if len(candidates) == 1:
+            rid, kind = candidates[0]
+            # Named groups: the back-reference must point at the INDENT group, and inside an f-string
+            # `\1` would be renumbered by the braces around `rid`.
+            pat = re.compile(
+                rf'^(?P<ind> *)- id: {re.escape(rid)}\s*\n(?:(?P=ind) +.*\n|\s*\n)*?(?=^ *- id: |\Z)',
+                re.M,
+            )
+            m = pat.search('\n'.join(lines))
+            if m:
+                entry = m.group(0)
+                indent = ' ' * 6
+                entry_new = entry.rstrip('\n') + f'\n{indent}decides: {amb_id}\n'
+                joined = '\n'.join(lines).replace(entry, entry_new, 1)
+                lines = joined.split('\n')
+                covered.add(amb_id)
+                notes.append(
+                    f'{amb_id} (blocking, checkedAs: {mode}) had no check; `decides: {amb_id}` added to {rid} '
+                    f'({kind}) — the only declared relation whose kind can verify that mode'
+                )
+        elif len(candidates) == 0:
+            refusals.append(
+                f'{amb_id} is blocking with `checkedAs: {mode}`, and no declared relation can verify that mode '
+                f'({need or "one of " + ", ".join(ROUNDING_KINDS)}). Add the relation that settles it, or '
+                f'unblock the decision — the repair will not invent a check the document does not have'
+            )
+        else:
+            refusals.append(
+                f'{amb_id} is blocking with `checkedAs: {mode}`, and MORE THAN ONE declared relation could verify '
+                f'it ({", ".join(r for r, _ in candidates)}). Which one is meant is a judgment, not a repair'
+            )
+
 # ---------------------------------------------------------------- refusals win over notes
 if refusals:
     print('intake-repair: refused —', file=sys.stderr)
