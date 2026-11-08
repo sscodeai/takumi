@@ -52,8 +52,14 @@ else
 fi
 SHAPE="$SHAPE_FILE"
 
+# Step 1 answers inside a ``` fence (the prompt shows a code block), so the fence lines and any
+# indentation are stripped before a key is read. Measured 2026-11-08: `{step.shape_decision}` began with
+# a fence, `sed -n "s/^KEY://p"` matched nothing, and every repair refused with "no ANSWER_SHAPE" for a
+# second, unrelated reason.
 field() { # $1 key, prints the value or nothing
-  sed -n "s/^$1:[[:space:]]*//p" "$SHAPE" | head -1
+  sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$SHAPE" \
+    | sed -n "s/^$1:[[:space:]]*//p" \
+    | head -1
 }
 
 ANSWER=$(field ANSWER_SHAPE)

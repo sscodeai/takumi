@@ -186,3 +186,29 @@ test('the repair step depends on BOTH the document and the decision it repairs f
   assert.ok((repair?.dependsOn ?? []).includes('req_intake'), 'the document it edits');
   assert.ok((repair?.dependsOn ?? []).includes('shape_decision'), 'and the answer it edits from');
 });
+
+// LEDGER #134 — step 1 answers inside a ``` fence.
+//
+// The shape prompt shows its answer in a code block, so the model writes the fence lines too and the
+// engine hands the whole thing to `{step.shape_decision}`. `sed -n "s/^KEY://p"` then matches nothing —
+// the line is "ANSWER_SHAPE: QUOTIENT" with no leading spaces, so this looked like it should work, and
+// the repair refused with "no ANSWER_SHAPE" for a reason unrelated to the document.
+//
+// Measured 2026-11-08, immediately after #133 made the placeholder resolve at all.
+test('a fenced shape answer is still read', () => {
+  const fenced = ['```', ...SHAPE.trimEnd().split('\n'), '```', ''].join('\n');
+  const r = repair(DOC_MISSING_BOTH, fenced);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.after, /^\s+run: "bash summary\.sh \{csv\}"$/m, 'the entry point is still found');
+  assert.match(r.after, /^\s+checkedAs: half-up$/m, 'and the rounding');
+});
+
+test('an indented shape answer is still read', () => {
+  const indented = SHAPE.trimEnd()
+    .split('\n')
+    .map((l) => `    ${l}`)
+    .join('\n');
+  const r = repair(DOC_MISSING_BOTH, `${indented}\n`);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.after, /^\s+checkedAs: half-up$/m);
+});
