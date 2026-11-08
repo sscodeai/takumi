@@ -242,3 +242,46 @@ test('the heredoc delimiter is at column 0 after YAML parsing, or it never termi
   assert.ok(open >= 0 && close > open, 'both delimiters exist');
   assert.equal(lines[close], 'TAKUMI_SHAPE_EOF', 'the closing delimiter has no leading whitespace');
 });
+
+// LEDGER #136 — a relation step 1 did not allow is DROPPED.
+//
+// Step 1 emits `ALLOWED_RELATIONS` for the shape it chose, and #121 tells the document step that
+// `relations:` must be a subset of it. Measured 2026-11-08, on a run where the repair step was finally
+// working: the document still declared `independent-aggregation` on a ratio line and the forge refused
+// with "it recomputes COUNTS or SUMS from the fixture ... a ratio line carries none". Step 1 had already
+// answered that it could not. Leaving it in refuses the run; keeping it silently would be a document
+// that declares a check it cannot have. So it is dropped, and the drop is reported.
+test('a relation outside ALLOWED_RELATIONS is dropped, and the drop is reported', () => {
+  const doc = DOC_MISSING_BOTH.replace(
+    '  relations:\n    - id: REL-001',
+    [
+      '  relations:',
+      '    - id: DIFF-001',
+      '      relation: independent-aggregation',
+      '      decides: AMB-001',
+      '      description: an anchor step 1 does not allow on a ratio line',
+      '    - id: REL-001',
+    ].join('\n'),
+  );
+  const r = repair(doc);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /dropped DIFF-001 \(independent-aggregation\)/, 'the drop is named');
+  assert.doesNotMatch(r.after, /independent-aggregation/, 'and the relation is gone');
+  assert.match(r.after, /relation: derived-ratio/, 'the allowed one survives');
+});
+
+test('a relation step 1 DID allow is kept', () => {
+  const doc = DOC_MISSING_BOTH.replace(
+    '  relations:\n    - id: REL-001',
+    [
+      '  relations:',
+      '    - id: REL-002',
+      '      relation: row-order-invariance',
+      '      description: shuffling the input leaves the report identical',
+      '    - id: REL-001',
+    ].join('\n'),
+  );
+  const r = repair(doc);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.after, /row-order-invariance/, 'row-order is on the list and stays');
+});

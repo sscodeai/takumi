@@ -197,6 +197,54 @@ for m in re.finditer(r'( +)fields:\s*\[([^\]]*)\]', text):
         'quote them — that is a rewrite, not a repair, so it is refused here instead of guessed at'
     )
 
+# ---------------------------------------------------------------- 4. a relation step 1 did not allow
+# LEDGER #136: step 1 emits `ALLOWED_RELATIONS` for the shape it chose, and #121 tells the document step
+# that `relations:` must be a SUBSET of it — the model still wrote `independent-aggregation` on a ratio
+# document, and the forge refused the run with "it recomputes COUNTS or SUMS from the fixture and a ratio
+# line carries none". Step 1 had already said so. A relation outside the list is DROPPED here, because
+# leaving it in refuses the run and keeping it silently would be a document that declares a check it
+# cannot have.
+if allowed:
+    text = '\n'.join(lines)
+    out_lines = []
+    dropped = []
+    i = 0
+    src = text.split('\n')
+    while i < len(src):
+        line = src[i]
+        m = re.match(r'^( *)- id:\s*([A-Z]+-\d+)\s*$', line)
+        if not m:
+            out_lines.append(line)
+            i += 1
+            continue
+        indent, rel_id = m.group(1), m.group(2)
+        # Collect the whole entry: it runs until a line at or above its own indent that starts a new item.
+        j = i + 1
+        while j < len(src):
+            follow = src[j]
+            if re.match(rf'^{indent}- ', follow) or (follow.strip() and not follow.startswith(indent + ' ')):
+                break
+            j += 1
+        entry = src[i:j]
+        kind = None
+        for ln in entry:
+            km = re.match(r'^\s*relation:\s*([a-z-]+)\s*$', ln)
+            if km:
+                kind = km.group(1)
+                break
+        if kind and kind not in allowed:
+            dropped.append((rel_id, kind))
+        else:
+            out_lines.extend(entry)
+        i = j
+    if dropped:
+        for rel_id, kind in dropped:
+            notes.append(
+                f'dropped {rel_id} ({kind}): step 1 answered ALLOWED_RELATIONS without it, and a relation that '
+                f'cannot read this report refuses the whole document'
+            )
+        lines = '\n'.join(out_lines).split('\n')
+
 # ---------------------------------------------------------------- refusals win over notes
 if refusals:
     print('intake-repair: refused —', file=sys.stderr)
