@@ -326,3 +326,43 @@ test('the document step is told the list is a CONSTRAINT, not a suggestion', () 
   assert.match(prompt, /SUBSET/, 'and calls it a subset constraint');
   assert.match(prompt, /may not use any other|REFUSED/, 'with the consequence stated');
 });
+
+// LEDGER #127: the shape step also decides what the ROUNDING answer MEANS.
+//
+// Measured 2026-11-08 on a real run: a ratio document settled its rounding decision but wrote no
+// `checkedAs`, so the forge refused the whole document —
+//   the decision AMB-001 is settled by REL-001, and the relation needs to know what its answer MEANS:
+//   give it "checkedAs: <half-up truncate>"
+// — and the run was lost before a line of code was written. The rule is #12 of the 400-line document
+// prompt and was ignored there, which is the same thing that happened to the field model (#102), the
+// entry point (#107) and the relation list (#121). So it is decided in the 60-line step instead.
+test('the shape step decides the rounding mode, with the default spelled out', () => {
+  const prompt = readFileSync(
+    new URL('../../../../extensions/skills/req-intake/prompts/shape.md', import.meta.url),
+    'utf8',
+  );
+  assert.match(prompt, /^ROUNDING_MEANS: /m, 'the step emits the line');
+  assert.match(prompt, /`half-up` — a value exactly halfway rounds away from zero/, 'half-up is defined');
+  assert.match(prompt, /`truncate` — everything after the last printed digit is dropped/, 'truncate is defined');
+  assert.match(
+    prompt,
+    /without qualifying it, answer `half-up`/,
+    'the unqualified case is decided for the model rather than left to taste',
+  );
+  assert.match(prompt, /NONE/, 'a shape with nothing rounded says so');
+});
+
+test('the document step is told `checkedAs` must carry that word, on the DECISION', () => {
+  const def = parseYaml(
+    readFileSync(new URL('../../../../extensions/workflows/intake-attempt/workflow.yaml', import.meta.url), 'utf8'),
+  ) as WorkflowDefinition;
+  const doc = (def.steps ?? []).find((s) => (s.produces ?? []).includes('docs/requirements/intake.yaml'));
+  const prompt = String(doc?.prompt ?? '');
+  assert.match(prompt, /ROUNDING_MEANS/, 'it names the line');
+  assert.match(prompt, /checkedAs/, 'and the field it fills');
+  assert.match(
+    prompt,
+    /ON THE AMB-nnn ENTRY next to `chosen:`, never on the relation/i,
+    'with the placement the forge actually enforces',
+  );
+});

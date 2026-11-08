@@ -61,6 +61,14 @@ steps:
       If it says `ANSWER_SHAPE: AGGREGATE`, use `count`/`sum`/`min`/`max`/`mean` on the per-id line and
       do NOT declare `derived-ratio`.
 
+      IT ALSO DECIDED WHAT THE ROUNDING ANSWER MEANS, AND `checkedAs:` MUST CARRY IT. Step 1's answer
+      includes `ROUNDING_MEANS: <half-up | truncate | NONE>`. The decision that settles the rounding
+      (the one a `derived-ratio` or `independent-aggregation` relation names in `decides:`) MUST carry
+      `checkedAs: <that word>`, written ON THE AMB-nnn ENTRY next to `chosen:`, never on the relation.
+      Measured 2026-11-08: a ratio document settled its rounding decision with no `checkedAs`, and the
+      forge refused the whole document — the run was lost before any code was written. If step 1 said
+      `NONE` and a relation still settles a rounding decision, write `half-up` and say why in one clause.
+
       IT ALSO DECIDED WHICH RELATIONS ARE POSSIBLE, AND `relations:` MUST BE A SUBSET OF THAT LINE.
       Step 1's answer includes `ALLOWED_RELATIONS: ...`. Every `relation:` you write must be named in
       it; a relation that is not there is REFUSED by the forge and the run is lost before any code is
