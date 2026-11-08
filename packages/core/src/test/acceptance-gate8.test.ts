@@ -50,3 +50,33 @@ test('Gate 8: skill without manifest/skill follows step.prompt fallback (never h
 test('renderPrompt: unknown placeholders left intact', () => {
   assert.equal(renderPrompt('keep {unknown}', {}), 'keep {unknown}');
 });
+// LEDGER #133 — a var name may contain DOTS.
+//
+// `{step.shape_decision}` is how one workflow step hands its own answer to the next; the engine stores
+// it as `vars['step.shape_decision']`. `renderPrompt` substituted with `\w+`, which does NOT match a
+// dot, so every such placeholder reached its consumer VERBATIM.
+//
+// Measured 2026-11-08: two real unattended runs died with "intake-repair: step 1 recorded no
+// ANSWER_SHAPE" while step 1 had answered perfectly — the script was handed the literal text
+// `{step.shape_decision}`. And because the engine deliberately leaves unknown keys intact (an unfilled
+// placeholder should be visible, not blank), nothing threw: the failure surfaced three steps later,
+// naming the wrong cause.
+test('renderPrompt: a DOTTED placeholder is substituted', () => {
+  assert.equal(
+    renderPrompt('answer: {step.shape_decision}', { 'step.shape_decision': 'ANSWER_SHAPE: QUOTIENT' }),
+    'answer: ANSWER_SHAPE: QUOTIENT',
+  );
+});
+
+test('renderPrompt: dotted and plain placeholders resolve in one template', () => {
+  const out = renderPrompt(
+    '{requirement} says {step.shape_decision}',
+    { requirement: 'docs/requirements/intake.yaml', 'step.shape_decision': 'QUOTIENT' },
+  );
+  assert.equal(out, 'docs/requirements/intake.yaml says QUOTIENT');
+});
+
+test('renderPrompt: an unknown DOTTED key is still left intact', () => {
+  // The deliberate behaviour must survive the widening: a placeholder nobody filled stays visible.
+  assert.equal(renderPrompt('keep {step.nobody}', {}), 'keep {step.nobody}');
+});
