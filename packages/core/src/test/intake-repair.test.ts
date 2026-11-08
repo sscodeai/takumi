@@ -285,3 +285,47 @@ test('a relation step 1 DID allow is kept', () => {
   assert.equal(r.status, 0, r.out);
   assert.match(r.after, /row-order-invariance/, 'row-order is on the list and stays');
 });
+
+// LEDGER #137 — the repair EDITS the document, so a document that does not parse must be refused first.
+//
+// Measured 2026-11-08 on a real run: an `aggregate` document carried `source: "prints the total revenue"
+// (the request asks for totals)` — valid-looking, not YAML — and the validator downstream reported it.
+// But a TEXT repair on a document that does not parse edits lines it only thinks it understands, so the
+// refusal has to come first.
+//
+// The verdict comes from `requirement confirm --dry-run`, which reports a broken document in its OUTPUT
+// and still exits 0. `requirement digest` cannot be used: it hashes whatever it is given, valid or not.
+test('a document that is not valid YAML is REFUSED before any repair, and untouched', () => {
+  const broken = [
+    'requirements:',
+    '  - id: REQ-001',
+    '    source: "prints the total revenue" (the request asks for totals)',
+    '',
+  ].join('\n');
+  const dir = mkdtempSync(join(tmpdir(), 'repair-yaml-'));
+  try {
+    const p = join(dir, 'intake.yaml');
+    writeFileSync(p, broken);
+    const s = join(dir, 'shape.txt');
+    writeFileSync(s, SHAPE);
+    let status = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [SCRIPT, '--doc', p, '--shape', s], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, TAKUMI_PROJECT: REPO },
+      });
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      status = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.equal(status, 1, out);
+    assert.match(out, /not valid YAML/, 'it says what is wrong');
+    assert.match(out, /make it worse|Fix the YAML first/, 'and why it will not touch it');
+    assert.equal(readFileSync(p, 'utf8'), broken, 'a refusal writes nothing');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

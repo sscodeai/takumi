@@ -80,6 +80,51 @@ original = text
 notes = []
 refusals = []
 
+# ---------------------------------------------------------------- 0. the document must be YAML at all
+# LEDGER #137: this script EDITS the document. Measured 2026-11-08: a real run handed it a document whose
+# `source:` value contained an unescaped quote, so the YAML did not parse — and a text-matching repair on a
+# broken document can silently make it worse (it edits lines it thinks it understands). The validator runs
+# right after this step and reports "not valid YAML", but by then the repair has already touched the file.
+# Refusing early is both safer and clearer, and it needs no YAML parser of its own: the project's own CLI
+# already answers this question.
+def parses(text):
+    import subprocess, tempfile, os
+    # The CLI resolves the ref RELATIVE TO ITS CWD, so the temp file goes beside the document and the
+    # ref is its basename — an absolute path would be reported as "does not exist in <cwd>", which is a
+    # different failure and would have masked a genuinely broken document.
+    # The CLI is at a path relative to the PROJECT and resolves its ref from that same root, so the
+    # probe file goes under the project's own `.takumi/` and the ref is relative to the root.
+    root = os.environ.get('TAKUMI_PROJECT') or os.getcwd()
+    probe_dir = os.path.join(root, '.takumi')
+    os.makedirs(probe_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix='.yaml', prefix='yaml-probe-', dir=probe_dir)
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+    ref = os.path.relpath(tmp, root)
+    try:
+        r = subprocess.run(
+            ['node', 'apps/cli/dist/index.js', 'requirement', 'confirm', ref, '--dry-run'],
+            capture_output=True, text=True, timeout=60, cwd=root,
+        )
+        # `confirm --dry-run` reports a broken document in its OUTPUT and still exits 0, so the verdict is
+        # in the text. `digest` cannot be used: it hashes whatever it is given, valid or not.
+        out = (r.stderr or '') + (r.stdout or '')
+        if 'not valid YAML' in out:
+            return (False, out.strip())
+        return (True, '')
+    except Exception as exc:  # noqa: BLE001 - any failure to ask is a refusal to repair
+        return (False, str(exc))
+    finally:
+        os.unlink(tmp)
+
+
+ok_yaml, why = parses(text)
+if not ok_yaml:
+    print('intake-repair: refused — the document is not valid YAML, so there is nothing safe to repair:', file=sys.stderr)
+    print('  ' + why.splitlines()[0] if why else '  (no detail)', file=sys.stderr)
+    print('  A text repair on a document that does not parse can silently make it worse. Fix the YAML first.', file=sys.stderr)
+    sys.exit(1)
+
 # ---------------------------------------------------------------- split into top-level blocks
 lines = text.split('\n')
 
