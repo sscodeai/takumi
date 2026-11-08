@@ -107,6 +107,16 @@ else
     timeout 120 bash "$FORGE" 2>&1)
   FORGE_STATUS=$?
   rm -rf "$JUDGE_TMP" "$WORK_TMP" "$GATE_DIR"
+  # THE FORGE'S OWN WORDS, UP FRONT (ledger #126).
+  #
+  # `#103` keeps a failing gate's `not ok` lines, but the REASON lives in these comment lines. Measured
+  # 2026-11-08: every `intake_shape` refusal recorded `not ok 4 - a judge can be forged ... (exit 1: no
+  # delivery could be judged against this document)` and the sentence that said WHY was past the budget,
+  # so the one thing a reader needs was the one thing cut. The first line of a forge refusal is its
+  # verdict, so it goes first, before the transcript that buries it.
+  if [ "$FORGE_STATUS" -ne 0 ]; then
+    printf '%s\n' "$FORGE_OUT" | head -1 | sed 's/^/# FORGE SAID: /'
+  fi
   printf '%s\n' "$FORGE_OUT" | sed 's/^/# /'
   if [ "$FORGE_STATUS" -eq 0 ] && printf '%s\n' "$FORGE_OUT" | grep -qE '^[[:space:]]*JUDGE_FORGE[[:space:]]*[:=][[:space:]]*ok[[:space:]]*$'; then
     ok "a judge can be forged from the document as the confirmation will leave it"
