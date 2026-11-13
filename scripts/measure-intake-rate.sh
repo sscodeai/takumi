@@ -51,7 +51,20 @@ set -a; . /srv/hermes/.env; set +a
 FIRST_OK=0
 TOTAL=0
 ERRORS=0
-printf 'shape\trun\tfirst_attempt_ok\tdelivered\tseconds\n' > "$LOGDIR/report.tsv"
+# EVERY RUN GETS ITS OWN LOG DIRECTORY (ledger #145).
+#
+# Measured 2026-11-09: the log path was `$LOGDIR/run-<i>-<shape>.log`, so measuring twice into the same
+# --logdir OVERWROTE the first batch — and the report.tsv appended to, so the two disagreed. Worse, this
+# is how a real investigation went wrong: reading `run-2-aggregate.log` produced TWO different
+# confirmation tokens and I concluded (wrongly) that one run had confirmed twice, when I was reading the
+# tail of one run and the artifact of another. A failure that cannot be re-read is a failure that cannot
+# be diagnosed, so the directory is made unique per invocation and the report records BOTH the batch and
+# the run's own log path.
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+LOGDIR="$LOGDIR/$STAMP"
+mkdir -p "$LOGDIR"
+printf 'shape\trun\tfirst_attempt_ok\tdelivered\tseconds\tlog\treason\n' > "$LOGDIR/report.tsv"
+echo "measure-intake-rate: batch $STAMP -> $LOGDIR" >&2
 
 for i in $(seq 1 "$N"); do
   req="${REQS[$(( (i - 1) % ${#REQS[@]} ))]}"
@@ -80,8 +93,15 @@ for i in $(seq 1 "$N"); do
   [ "$first" = yes ] && FIRST_OK=$((FIRST_OK + 1))
   [ "$first" = error ] && ERRORS=$((ERRORS + 1))
   TOTAL=$((TOTAL + 1))
-  printf '%s\t%s\t%s\t%s\t%s\n' "$shape" "${run_id:-?}" "$first" "$delivered" "$elapsed" >> "$LOGDIR/report.tsv"
-  echo "  [$i/$N] $shape ${run_id:-?} first=$first delivered=$delivered ${elapsed}s" >&2
+  # RECORD THE FIRST NAMED REASON, so a failure can be triaged without opening the log (ledger #145).
+  #
+  # Every investigation in this cycle began by grepping for one of these markers in a log that might not
+  # be the run it claimed to be. Writing the first one into the report means the shape of a batch's
+  # failures is visible in one table, and `reason` is empty ONLY when nothing named itself — which is
+  # itself the signal that the run died somewhere earlier than any verdict.
+  reason=$(grep -hoE 'FORGE SAID: [^"]{0,80}|the requirement document "[^"]*" is not valid YAML|not the one that was confirmed|timeout after [0-9]+ms|the scenario [A-Z]+-[0-9]+[^:]*declares no run' "$log" 2>/dev/null | head -1 | tr '\t\n' '  ' | cut -c1-90)
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$shape" "${run_id:-?}" "$first" "$delivered" "$elapsed" "$log" "${reason:-}" >> "$LOGDIR/report.tsv"
+  echo "  [$i/$N] $shape ${run_id:-?} first=$first delivered=$delivered ${elapsed}s ${reason:+— $reason}" >&2
 done
 
 echo
