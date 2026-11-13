@@ -150,6 +150,43 @@ esac
 
 [ -f docs/authorizations/SA-002.yaml ] || printf 'PREFLIGHT note: no standing authorization at docs/authorizations/SA-002.yaml — the chain will refuse at step 2 (a person signs that grant; ledger #76 is about the ENVIRONMENT, this is about the licence)\n'
 
+# An authorization that has expired is not an authorization (ledger #146).
+#
+# Measured 2026-11-13: SA-002 expired 2026-11-11T02:38:35Z, and the FIRST symptom was eight failing tests
+# two days later — the expiry had been sitting in the file the whole time with nobody watching it. Every
+# unattended run in between would have spent an intake before discovering it could not confirm.
+#
+# This checks the authorization the chain ACTUALLY READS (`docs/authorizations/SA-002.yaml`), not every
+# SA-*.yaml in the directory: SA-001 is history, and a spent grant for an old decision must not fail a run
+# that will never consult it. (The first version swept the directory, and made three passing tests fail
+# by rejecting the chain over a file it does not use.)
+#
+# This does not extend anything: re-signing is the operator's act (ADR-045), and silently moving a date
+# would defeat the mechanism. It only makes the wall visible BEFORE the chain hits it.
+AUTHORIZATION_FILE=docs/authorizations/SA-002.yaml
+# `TAKUMI_AUTHORIZATION_FILE` lets a caller point at a specific grant (tests do, so that a test about the
+# runtime is not silently a test about whether today's authorization happens to be in date). An explicit
+# empty value skips the check entirely.
+if [ "${TAKUMI_AUTHORIZATION_FILE+set}" = set ]; then
+  AUTHORIZATION_FILE="${TAKUMI_AUTHORIZATION_FILE}"
+fi
+if [ -n "$AUTHORIZATION_FILE" ] && [ -f "$AUTHORIZATION_FILE" ]; then
+  exp=$(sed -n 's/^expiresAt:[[:space:]]*"\{0,1\}\([^"#]*\)"\{0,1\}.*/\1/p' "$AUTHORIZATION_FILE" | head -1)
+  if [ -n "$exp" ]; then
+    if ! exp_epoch=$(date -u -d "$exp" +%s 2>/dev/null); then
+      printf 'PREFLIGHT note: %s declares expiresAt "%s", which does not parse as a date — the chain will refuse it\n' "$AUTHORIZATION_FILE" "$exp"
+    else
+      now_epoch=$(date -u +%s)
+      if [ "$exp_epoch" -le "$now_epoch" ]; then
+        fail "$AUTHORIZATION_FILE expired at $exp — an authorization that is over is not an authorization. The chain cannot confirm a document until a person signs a new one (ADR-045); this preflight will not extend it."
+      fi
+      days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+      [ "$days_left" -lt 3 ] && printf 'PREFLIGHT note: %s expires in %s day(s) (at %s) — sign a new one before then or unattended runs stop\n' "$AUTHORIZATION_FILE" "$days_left" "$exp"
+    fi
+  fi
+fi
+
+
 # THE MODEL KEY IS PART OF THE ENVIRONMENT TOO (ledger #93).
 #
 # Three times in three days a green preflight has preceded a chain that could not run: the token (#91),

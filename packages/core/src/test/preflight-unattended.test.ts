@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,13 @@ const SCRIPT = fileURLToPath(new URL('../../../../scripts/preflight-unattended.s
 const REPO = fileURLToPath(new URL('../../../../', import.meta.url));
 
 function preflight(env: NodeJS.ProcessEnv) {
-  return spawnSync('bash', [SCRIPT], { encoding: 'utf8', env: { ...process.env, ...env } });
+  return spawnSync('bash', [SCRIPT], {
+    encoding: 'utf8',
+    // TAKUMI_AUTHORIZATION_FILE='' pins the AUTHORIZATION check OFF: most of these tests are about the
+    // runtime, and a test about the runtime must not double as a test about whether today's grant happens
+    // to be in date. The authorization check has its own tests, which point at a file they control.
+    env: { TAKUMI_AUTHORIZATION_FILE: '', ...process.env, ...env },
+  });
 }
 
 test('the preflight refuses when the pi runtime dist is missing, and says where it looked', () => {
@@ -263,7 +269,7 @@ test('the preflight refuses when the model key the agent needs is missing (ledge
   const runtime = join(dir, 'index.js');
   writeFileSync(runtime, 'export const PiRuntimeAdapter = class {};\n');
   try {
-    const env: NodeJS.ProcessEnv = { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: '' };
+    const env: NodeJS.ProcessEnv = { ...process.env, TAKUMI_PI_RUNTIME: runtime, TAKUMI_DELIVERY_REPO: '', TAKUMI_AUTHORIZATION_FILE: '' };
     delete env.OPENCODE_GO_API_KEY;
     const r = spawnSync('bash', [SCRIPT], { encoding: 'utf8', env });
     const text = `${r.stdout}${r.stderr}`;
@@ -278,4 +284,89 @@ test('the preflight refuses when the model key the agent needs is missing (ledge
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// LEDGER #146 — an expired authorization must stop the chain BEFORE it spends anything.
+//
+// Measured 2026-11-13: SA-001 expired 2026-11-11T21:40:00Z and SA-002 at 2026-11-11T02:38:35Z, and the
+// FIRST symptom was eight failing tests two days later — the expiry had been in the file the whole time
+// with nobody watching it. Every unattended run in between would have spent an intake before discovering
+// it could not confirm.
+//
+// This does NOT extend a date: re-signing is the operator's act (ADR-045), and the preflight says so.
+test('an expired authorization is a preflight failure, and the message does not offer to extend it', () => {
+  const script = readFileSync(new URL('../../../../scripts/preflight-unattended.sh', import.meta.url), 'utf8');
+  assert.match(
+    script,
+    /AUTHORIZATION_FILE=docs\/authorizations\/SA-002\.yaml/,
+    'the authorization the chain ACTUALLY READS is examined — not every SA-*.yaml, because SA-001 is history and a spent grant for an old decision must not fail a run that never consults it',
+  );
+  assert.match(script, /expiresAt:/, 'the expiry is read from the file');
+  assert.match(
+    script,
+    /expired at \$exp — an authorization that is over is not an authorization/,
+    'an expired one is a failure, in the same words the validator uses',
+  );
+  assert.match(script, /a person signs a new one \(ADR-045\)/, 'and it says who must act, not the agent');
+  assert.match(script, /this preflight will not extend it/, 'it is explicit that no date is moved');
+});
+
+test('an authorization about to expire is warned about, not silently awaited', () => {
+  // Behaviour, not wording: a grant that expires tomorrow must produce a note and still let the run go.
+  const dir = mkdtempSync(join(tmpdir(), 'pf-soon-'));
+  const runtime = join(dir, 'index.js');
+  writeFileSync(runtime, 'export const PiRuntimeAdapter = class {};\n');
+  const tomorrow = new Date(Date.now() + 20 * 3600 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  const sa = join(dir, 'SA-soon.yaml');
+  writeFileSync(sa, `expiresAt: "${tomorrow}"\n`);
+  try {
+    const r = spawnSync('bash', [SCRIPT], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        TAKUMI_PI_RUNTIME: runtime,
+        TAKUMI_DELIVERY_REPO: '',
+        OPENCODE_GO_API_KEY: 'stub-model-key',
+        TAKUMI_AUTHORIZATION_FILE: sa,
+      },
+    });
+    const text = `${r.stdout}${r.stderr}`;
+    assert.match(text, /expires in 0 day\(s\)/, 'it warns while a run can still be planned around the expiry');
+    assert.notEqual(r.status, 3, 'and does NOT refuse a grant that is still in date');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an EXPIRED authorization is refused, and says a person must sign a new one', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pf-exp-'));
+  const runtime = join(dir, 'index.js');
+  writeFileSync(runtime, 'export const PiRuntimeAdapter = class {};\n');
+  const sa = join(dir, 'SA-old.yaml');
+  writeFileSync(sa, 'expiresAt: "2020-01-01T00:00:00Z"\n');
+  try {
+    const r = spawnSync('bash', [SCRIPT], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        TAKUMI_PI_RUNTIME: runtime,
+        TAKUMI_DELIVERY_REPO: '',
+        OPENCODE_GO_API_KEY: 'stub-model-key',
+        TAKUMI_AUTHORIZATION_FILE: sa,
+      },
+    });
+    const text = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 3, text);
+    assert.match(text, /expired at 2020-01-01T00:00:00Z/, 'the expiry is named');
+    assert.match(text, /a person signs a new one/, 'and who must act');
+    assert.match(text, /will not extend it/, 'and that this check will not move the date');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('only the consulted authorization is named, so an unsigned template cannot fail the chain', () => {
+  const script = readFileSync(new URL('../../../../scripts/preflight-unattended.sh', import.meta.url), 'utf8');
+  assert.doesNotMatch(script, /for sa in docs\/authorizations/, 'no directory sweep');
+  assert.match(script, /SA-002\.yaml/, 'the file the workflow reads');
 });

@@ -10,6 +10,18 @@ import {
   UNMECHANISED_CLASS,
 } from '../index.js';
 
+// A FIXTURE EXPIRY MUST NOT BE A CALENDAR DATE (ledger #147).
+//
+// These tests hard-coded `expiresAt: "2026-11-11T00:00:00Z"`. They passed for months and then, on
+// 2026-11-13, eight of them failed at once — not because anything changed, but because the calendar went
+// past the fixture. An authorization test whose subject is an expiry must control the clock's answer, or
+// it will one day assert that a valid grant is invalid and read as a regression.
+const FUTURE = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+// For the tests whose SUBJECT is expiry, the grant must be in the past — and relative, so it stays in the
+// past. A fixed past date would work today and read as an accident tomorrow.
+const EXPIRED = new Date(Date.now() - 24 * 3600 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+
+
 /**
  * A standing authorization (ADR-045), PIN-ONLY (v1).
  *
@@ -88,7 +100,7 @@ function authText(doc: string, mutate: (lines: string[]) => string[] = (l) => l)
     'id: SA-001',
     'signedBy: "moon"',
     'signedAt: "2026-10-11T00:00:00Z"',
-    'expiresAt: "2026-11-11T00:00:00Z"',
+    `expiresAt: "${FUTURE}"`,
     'revoked: false',
     'reason: "unattended intake for the station-summary document"',
     'pin:',
@@ -114,7 +126,7 @@ function familyAuthText(mutate: (lines: string[]) => string[] = (l) => l): strin
     'id: SA-002',
     'signedBy: "moon"',
     'signedAt: "2026-10-11T00:00:00Z"',
-    'expiresAt: "2026-11-11T00:00:00Z"',
+    `expiresAt: "${FUTURE}"`,
     'revoked: false',
     'reason: "unattended intake for the station-summary family"',
     'scope:',
@@ -148,6 +160,7 @@ function loaded(text: string) {
 }
 
 // --- what it IS ---------------------------------------------------------------------------------
+
 
 test('a standing authorization is one committed scope, plus the classes it may default', () => {
   const authorization = loaded(authText(DOC));
@@ -418,7 +431,10 @@ test('an open acceptance failure is not a machine\'s to close: it stops the conf
 });
 
 test('expiry, revocation and a document that changed since it was signed are refusals by name', () => {
-  const authorization = loaded(authText(DOC));
+  // This test SIMULATES the future (`now`) rather than waiting for it, so the grant must be in the past
+  // relative to that simulated clock — not relative to today. An expiry that is merely old today is not
+  // old relative to `now: 2026-12-01`, which is how a relative constant made this test stop testing.
+  const authorization = loaded(authText(DOC, (lines) => [...lines.filter((l) => !l.startsWith('expiresAt:')), 'expiresAt: "2026-11-01T00:00:00Z"']));
 
   const expired = licenseStandingConfirmation({
     authorization,
@@ -531,7 +547,10 @@ test('the SAME fail-closed exclusions hold for the FAMILY form', () => {
 });
 
 test('expiry and revocation are the SAME refusals for the FAMILY form', () => {
-  const authorization = loaded(familyAuthText());
+  // Same reason as the pin-form test above: `now` is simulated, so the grant must be past relative to it.
+  const authorization = loaded(
+    familyAuthText((lines) => [...lines.filter((l) => !l.startsWith('expiresAt:')), 'expiresAt: "2026-11-01T00:00:00Z"']),
+  );
   const expired = licenseStandingConfirmation({
     authorization,
     documentRef: DOC_REF,
@@ -578,7 +597,7 @@ test('the record can tell a human\'s confirmation from an authorization\'s, and 
       `    digest: "sha256:${authorizationDigest('x')}"`,
       '    signedBy: "moon"',
       '    signedAt: "2026-10-11T00:00:00Z"',
-      '    expiresAt: "2026-11-11T00:00:00Z"',
+      `    expiresAt: "${EXPIRED}"`,
       '  defaulted:',
       '    - id: AMB-001',
       '      question: "How are unparseable rows handled?"',
@@ -594,7 +613,7 @@ test('the record can tell a human\'s confirmation from an authorization\'s, and 
   assert.equal(standing.method, 'standing-authorization');
   assert.equal(standing.authorization?.ref, 'docs/authorizations/SA-001.yaml');
   assert.equal(standing.authorization?.signedBy, 'moon');
-  assert.equal(standing.authorization?.expiresAt, '2026-11-11T00:00:00Z');
+  assert.equal(standing.authorization?.expiresAt, EXPIRED);
   assert.deepEqual(standing.defaulted.map((d) => [d.id, d.class, d.checkedAs]), [
     ['AMB-001', 'malformed-row-accounting', 'skip-count'],
   ]);
